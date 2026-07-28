@@ -1,0 +1,67 @@
+[CmdletBinding()]
+param(
+    [switch]$SkipInstalledPackageCheck
+)
+
+$ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path $PSScriptRoot -Parent
+$failures = [System.Collections.Generic.List[string]]::new()
+$cleanRoomSelfTest = Join-Path $PSScriptRoot 'CleanroomSelfTest.js'
+
+foreach ($script in Get-ChildItem -Recurse -File -LiteralPath $projectRoot -Filter '*.ps1') {
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        $script.FullName,
+        [ref]$tokens,
+        [ref]$parseErrors
+    ) | Out-Null
+    foreach ($parseError in $parseErrors) {
+        $failures.Add("PowerShell parse error in $($script.FullName): $($parseError.Message)")
+    }
+}
+
+$node = Get-Command node.exe -ErrorAction SilentlyContinue
+if (-not $node) {
+    $failures.Add('node.exe is required for JavaScript syntax checks.')
+} else {
+    foreach ($source in Get-ChildItem -Recurse -File -LiteralPath (Join-Path $projectRoot 'src') | Where-Object {
+        $_.Extension -in @('.js', '.mjs')
+    }) {
+        $syntaxOutput = & $node.Source --check $source.FullName 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $failures.Add("Node syntax error in $($source.FullName): $($syntaxOutput -join ' ')")
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $cleanRoomSelfTest -PathType Leaf)) {
+        $failures.Add("Clean-room runtime self-test is missing: $cleanRoomSelfTest")
+    } elseif ($failures.Count -eq 0) {
+        $selfTestOutput = & $node.Source $cleanRoomSelfTest 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $failures.Add("Clean-room runtime self-test failed: $($selfTestOutput -join ' ')")
+        }
+    }
+}
+
+foreach ($required in @('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'SECURITY.md', 'package.json', 'docs\CLEANROOM.md')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $required) -PathType Leaf)) {
+        $failures.Add("Required repository file is missing: $required")
+    }
+}
+
+if (-not $SkipInstalledPackageCheck -and $failures.Count -eq 0) {
+    $powershellExecutable = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $preflightOutput = & $powershellExecutable -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot 'Test-CodexControlOtherDevices.ps1') -Json 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $failures.Add("Installed-package preflight failed: $($preflightOutput -join ' ')")
+    }
+}
+
+if ($failures.Count -gt 0) {
+    Write-Host 'Validation failed:' -ForegroundColor Red
+    foreach ($failure in $failures) { Write-Host "  - $failure" }
+    exit 1
+}
+
+Write-Host 'Validation passed: PowerShell, JavaScript, clean-room runtime tests, repository files, and package preflight.' -ForegroundColor Green

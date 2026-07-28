@@ -1,0 +1,381 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Clean-room contributors
+
+"use strict";
+
+const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
+const vm = require("node:vm");
+const {
+  DeviceKeyService,
+  resolveStorePath,
+  resolveWindowsPowerShellPath,
+  runDpapi,
+} = require("../src/runtime/main-payload.js");
+const { checkPortOnce, chooseTarget, waitForExplicitRefusal } = require("../src/runtime/orchestrator.js");
+
+function listJavaScriptFiles(directory) {
+  const output = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      output.push(...listJavaScriptFiles(fullPath));
+    } else if (entry.isFile() && entry.name.endsWith(".js")) {
+      output.push(fullPath);
+    }
+  }
+  return output;
+}
+
+function reservePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0 }, () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : null;
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve(port);
+      });
+    });
+  });
+}
+
+function waitForOutput(stream, marker, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let text = "";
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for child marker: ${marker}`));
+    }, timeoutMs);
+    const onData = (chunk) => {
+      text += chunk.toString("utf8");
+      if (text.includes(marker)) {
+        cleanup();
+        resolve();
+      }
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      stream.off("data", onData);
+    };
+    stream.on("data", onData);
+  });
+}
+
+function waitForChildExit(child, timeoutMs) {
+  return new Promise((resolve) => {
+    if (child.exitCode != null || child.signalCode != null) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve();
+    }, timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function syntaxTest(root) {
+  const runtimeRoot = path.join(root, "..", "src", "runtime");
+  const files = [...listJavaScriptFiles(runtimeRoot), __filename];
+  assert(files.length >= 5);
+  for (const file of files) {
+    const result = childProcess.spawnSync(process.execPath, ["--check", file], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(result.status, 0, `Syntax check failed for ${path.basename(file)}`);
+  }
+  return { filesChecked: files.length };
+}
+
+async function deviceKeyLifecycleTest(storePath) {
+  const service = new DeviceKeyService({ storePath });
+  const created = await service.createDeviceKey("allow_os_protected_nonextractable");
+  assert.equal(created.algorithm, "ecdsa_p256_sha256");
+  assert.equal(created.protectionClass, "os_protected_nonextractable");
+  const fetched = await service.getDeviceKeyPublic(created.keyId);
+  assert.deepEqual(fetched, created);
+
+  const payload = Buffer.from([0x00, 0xff, 0x43, 0x00, 0x80, 0x7f]);
+  const signed = await service.signDeviceKey(created.keyId, payload);
+  assert.equal(signed.algorithm, "ecdsa_p256_sha256");
+  const publicKey = crypto.createPublicKey({
+    format: "der",
+    key: Buffer.from(created.publicKeySpkiDerBase64, "base64"),
+    type: "spki",
+  });
+  assert.equal(crypto.verify("sha256", payload, publicKey, Buffer.from(signed.signatureDerBase64, "base64")), true);
+
+  const surrounding = new Uint8Array([0xaa, 0x10, 0x00, 0xfe, 0x7f, 0xbb]);
+  const byteView = surrounding.subarray(1, 5);
+  const viewSignature = await service.signDeviceKey(created.keyId, byteView);
+  assert.equal(
+    crypto.verify("sha256", Buffer.from(byteView), publicKey, Buffer.from(viewSignature.signatureDerBase64, "base64")),
+    true,
+  );
+  assert.equal(
+    crypto.verify("sha256", Buffer.from(surrounding), publicKey, Buffer.from(viewSignature.signatureDerBase64, "base64")),
+    false,
+  );
+
+  const serialized = fs.readFileSync(storePath, "utf8");
+  const parsed = JSON.parse(serialized);
+  assert.equal(parsed.schemaVersion, 1);
+  assert.equal(typeof parsed.keys[created.keyId].encryptedPrivateKeyBase64, "string");
+  assert.equal(Object.hasOwn(parsed.keys[created.keyId], "privateKeyPkcs8DpapiBase64"), false);
+  assert.equal(serialized.includes("BEGIN PRIVATE KEY"), false);
+
+  await service.deleteDeviceKey(created.keyId);
+  await assert.rejects(() => service.getDeviceKeyPublic(created.keyId), { code: "KEY_NOT_FOUND" });
+  return { algorithm: created.algorithm, rawBufferAndUint8ArrayVerified: true, signatureVerified: true };
+}
+
+async function storeFilenameTest(tempDirectory) {
+  const resolved = resolveStorePath({ codexHome: tempDirectory });
+  assert.equal(path.basename(resolved), "remote-control-device-keys.windows.json");
+  assert.equal(path.dirname(resolved), path.resolve(tempDirectory));
+  const powershellPath = resolveWindowsPowerShellPath();
+  assert.equal(path.win32.isAbsolute(powershellPath), true);
+  assert.equal(path.win32.basename(powershellPath).toLowerCase(), "powershell.exe");
+  assert.equal(fs.existsSync(powershellPath), true);
+  const windowsRoots = [process.env.SystemRoot, process.env.SYSTEMROOT, process.env.WINDIR, process.env.windir]
+    .filter((value) => typeof value === "string" && path.win32.isAbsolute(value.trim()))
+    .map((value) => `${path.win32.normalize(value.trim()).toLowerCase()}\\`);
+  assert.equal(windowsRoots.some((root) => powershellPath.toLowerCase().startsWith(root)), true);
+  return { filename: path.basename(resolved), powershellAbsolute: true };
+}
+
+async function protectionModeTest(storePath) {
+  const service = new DeviceKeyService({ storePath });
+  await assert.rejects(() => service.createDeviceKey("hardware_only"), { code: "PROTECTION_MODE_UNSUPPORTED" });
+  assert.equal(fs.existsSync(storePath), false);
+  return { rejected: true };
+}
+
+async function malformedPreservationTest(storePath) {
+  const original = "{\"schemaVersion\":1,\"keys\":[]}\n";
+  fs.writeFileSync(storePath, original, "utf8");
+  const service = new DeviceKeyService({ storePath });
+  await assert.rejects(() => service.createDeviceKey("allow_os_protected_nonextractable"));
+  assert.equal(fs.readFileSync(storePath, "utf8"), original);
+  return { preservedByteForByte: true };
+}
+
+async function legacyStoreTest(storePath) {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const pem = Buffer.from(privateKey.export({ format: "pem", type: "pkcs8" }), "utf8");
+  const protectedPem = await runDpapi("protect", pem);
+  const keyId = "legacy-self-test-key";
+  const validRecord = {
+    algorithm: "ecdsa_p256_sha256",
+    encryptedPrivateKeyBase64: protectedPem.toString("base64"),
+    keyId,
+    protectionClass: "os_protected_nonextractable",
+    publicKeySpkiDerBase64: publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+  };
+
+  const mismatchedRaw = `${JSON.stringify({ [keyId]: { ...validRecord, keyId: "different-inner-key" } })}\n`;
+  fs.writeFileSync(storePath, mismatchedRaw, "utf8");
+  const mismatchedService = new DeviceKeyService({ storePath });
+  await assert.rejects(() => mismatchedService.getDeviceKeyPublic(keyId), { code: "STORE_MALFORMED" });
+  assert.equal(fs.readFileSync(storePath, "utf8"), mismatchedRaw);
+
+  const unknownFieldRaw = `${JSON.stringify({ [keyId]: { ...validRecord, unexpected: true } })}\n`;
+  fs.writeFileSync(storePath, unknownFieldRaw, "utf8");
+  const unknownFieldService = new DeviceKeyService({ storePath });
+  await assert.rejects(() => unknownFieldService.getDeviceKeyPublic(keyId), { code: "STORE_MALFORMED" });
+  assert.equal(fs.readFileSync(storePath, "utf8"), unknownFieldRaw);
+
+  fs.writeFileSync(storePath, `${JSON.stringify({ [keyId]: validRecord })}\n`, "utf8");
+  pem.fill(0);
+  protectedPem.fill(0);
+
+  const service = new DeviceKeyService({ storePath });
+  const payload = Buffer.from("legacy-pem", "utf8");
+  const signed = await service.signDeviceKey(keyId, payload);
+  assert.equal(crypto.verify("sha256", payload, publicKey, Buffer.from(signed.signatureDerBase64, "base64")), true);
+  const added = await service.createDeviceKey("allow_os_protected_nonextractable");
+  const migrated = JSON.parse(fs.readFileSync(storePath, "utf8"));
+  assert.equal(migrated.schemaVersion, 1);
+  assert.equal(typeof migrated.keys[keyId].encryptedPrivateKeyBase64, "string");
+  await service.deleteDeviceKey(keyId);
+  await service.deleteDeviceKey(added.keyId);
+  return { keyIdMismatchRejected: true, migratedToSchemaVersion: 1, signatureVerified: true, unknownFieldRejected: true };
+}
+
+async function rendererPayloadTest(root) {
+  const avatarOverlay = {
+    title: "Codex",
+    type: "page",
+    url: "app://-/index.html?initialRoute=%2Favatar-overlay",
+  };
+  const exactCodexPage = {
+    title: "Codex",
+    type: "page",
+    url: "app://-/index.html",
+  };
+  assert.equal(chooseTarget([avatarOverlay, exactCodexPage], "renderer"), exactCodexPage);
+  assert.throws(() => chooseTarget([avatarOverlay], "renderer"), { code: "TARGET_NOT_FOUND" });
+
+  const calls = [];
+  const client = {
+    checkGate(gate) {
+      calls.push(gate);
+      return gate === "unrelated-gate";
+    },
+    getConfig(name) {
+      return { name };
+    },
+    getFeatureGate(gate) {
+      return gate === "782640499" ? targetFeatureGate : unrelatedFeatureGate;
+    },
+    getGate(gate) {
+      return gate === "782640499" ? targetGatePromise : unrelatedGatePromise;
+    },
+    getGateValue(gate) {
+      return gate === "782640499" ? 1 : 7;
+    },
+  };
+  const targetFeatureGate = { enabled: true, metadata: { source: "target" }, value: true };
+  const unrelatedFeatureGate = { enabled: true, metadata: { source: "unrelated" }, value: true };
+  const targetGatePromise = Promise.resolve({ enabled: true, metadata: { async: true }, value: true });
+  const unrelatedGatePromise = Promise.resolve({ enabled: true, metadata: { async: "unrelated" }, value: true });
+  const context = vm.createContext({
+    __STATSIG__: { clients: [client] },
+    clearInterval() {},
+    console,
+    setInterval() {
+      return { unref() {} };
+    },
+  });
+  context.globalThis = context;
+  const source = fs.readFileSync(path.join(root, "..", "src", "runtime", "renderer-payload.js"), "utf8");
+  const initial = vm.runInContext(source, context, { filename: "renderer-payload.js" });
+  assert.equal(initial.proof, true);
+  assert.equal(client.checkGate("782640499"), false);
+  assert.equal(client.checkGate("unrelated-gate"), true);
+  assert.deepEqual(client.getConfig("kept"), { name: "kept" });
+  const shaped = client.getFeatureGate("782640499");
+  assert.notEqual(shaped, targetFeatureGate);
+  assert.equal(shaped.value, false);
+  assert.equal(shaped.enabled, false);
+  assert.deepEqual(shaped.metadata, { source: "target" });
+  assert.equal(targetFeatureGate.value, true);
+  assert.equal(targetFeatureGate.enabled, true);
+  assert.equal(client.getFeatureGate("unrelated-gate"), unrelatedFeatureGate);
+
+  const promised = client.getGate("782640499");
+  assert.equal(typeof promised.then, "function");
+  const promisedShape = await promised;
+  assert.equal(promisedShape.value, false);
+  assert.equal(promisedShape.enabled, false);
+  assert.deepEqual(promisedShape.metadata, { async: true });
+  assert.equal(client.getGate("unrelated-gate"), unrelatedGatePromise);
+  assert.equal(client.getGateValue("782640499"), false);
+  assert.equal(client.getGateValue("unrelated-gate"), 7);
+
+  const delayedClient = { checkGate() { return true; } };
+  context.__STATSIG__.clients.push(delayedClient);
+  const delayed = context.__CODEX_STATSIG_GATE_BRIDGE__.scan();
+  assert.equal(delayedClient.checkGate(782640499), false);
+  assert.equal(delayed.proof, true);
+  assert(calls.includes("unrelated-gate"));
+  assert.equal(calls.includes("782640499"), false);
+  return {
+    codexTargetFailClosed: true,
+    delayedClientCovered: true,
+    promiseShapePreserved: true,
+    unrelatedDelegated: true,
+  };
+}
+
+async function inspectorClosureTest(root, tempDirectory) {
+  const port = await reservePort();
+  assert(Number.isInteger(port));
+  const payloadPath = path.join(root, "..", "src", "runtime", "main-payload.js");
+  const childStore = path.join(tempDirectory, "inspector-child-store.json");
+  const childCode = [
+    `const bridge = require(${JSON.stringify(payloadPath)});`,
+    `Promise.resolve(bridge.installMainBridge({interceptModules:false,spoofPlatform:false,storePath:${JSON.stringify(childStore)},inspectorCloseDelayMs:750})).then(() => {`,
+    "  process.stdout.write('SELFTEST_READY\\n');",
+    "  setInterval(() => {}, 1000);",
+    "});",
+  ].join("\n");
+  const child = childProcess.spawn(process.execPath, [`--inspect=127.0.0.1:${port}`, "-e", childCode], {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  child.stderr.resume();
+  try {
+    await waitForOutput(child.stdout, "SELFTEST_READY", 5_000);
+    const open = await checkPortOnce(port, 500);
+    assert.equal(open.state, "open");
+    const closure = await waitForExplicitRefusal(port, 5_000);
+    assert.equal(closure.code, "ECONNREFUSED");
+    assert.equal(closure.confirmed, true);
+    return closure;
+  } finally {
+    child.kill();
+    await waitForChildExit(child, 2_000);
+  }
+}
+
+async function main() {
+  const root = __dirname;
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-cleanroom-selftest-"));
+  const tests = [
+    ["javascript-syntax", () => syntaxTest(root)],
+    ["store-filename", () => storeFilenameTest(tempDirectory)],
+    ["protection-mode-rejection", () => protectionModeTest(path.join(tempDirectory, "rejected.json"))],
+    ["create-sign-verify-delete", () => deviceKeyLifecycleTest(path.join(tempDirectory, "lifecycle.json"))],
+    ["malformed-store-preservation", () => malformedPreservationTest(path.join(tempDirectory, "malformed.json"))],
+    ["legacy-pem-store", () => legacyStoreTest(path.join(tempDirectory, "legacy.json"))],
+    ["renderer-existing-and-delayed", () => rendererPayloadTest(root)],
+    ["inspector-explicit-refusal", () => inspectorClosureTest(root, tempDirectory)],
+  ];
+  const results = [];
+  let ok = true;
+  try {
+    for (const [name, test] of tests) {
+      const startedAt = Date.now();
+      try {
+        const details = await test();
+        results.push({ details, durationMs: Date.now() - startedAt, name, ok: true });
+      } catch (error) {
+        ok = false;
+        results.push({
+          durationMs: Date.now() - startedAt,
+          error: { code: error?.code ?? "TEST_FAILED", message: error?.message ?? "Test failed" },
+          name,
+          ok: false,
+        });
+      }
+    }
+  } finally {
+    const resolvedTemp = path.resolve(tempDirectory);
+    const resolvedRoot = path.resolve(os.tmpdir());
+    if (resolvedTemp.startsWith(`${resolvedRoot}${path.sep}`) && path.basename(resolvedTemp).startsWith("codex-cleanroom-selftest-")) {
+      fs.rmSync(resolvedTemp, { force: true, recursive: true });
+    }
+  }
+  process.stdout.write(`${JSON.stringify({ ok, results }, null, 2)}\n`);
+  process.exitCode = ok ? 0 : 1;
+}
+
+main().catch((error) => {
+  process.stdout.write(`${JSON.stringify({ error: error?.message ?? "Self-test failed", ok: false })}\n`);
+  process.exitCode = 1;
+});

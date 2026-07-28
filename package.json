@@ -1,0 +1,19 @@
+{
+  "name": "codex-control-other-devices-windows",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Session-only Windows compatibility bridge for Codex Control other devices",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/naipi11/Codex-Control-other-devices-Windows.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "preflight": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File Test-CodexControlOtherDevices.ps1",
+    "test": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/Validate.ps1",
+    "test:runtime": "node tests/CleanroomSelfTest.js"
+  }
+}
