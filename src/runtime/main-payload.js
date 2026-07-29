@@ -25,9 +25,30 @@
   const fs = builtin("fs");
   const path = builtin("path");
   const os = builtin("os");
-  const crypto = builtin("crypto");
   const childProcess = builtin("child_process");
   const Module = builtin("module");
+
+  function loadNodeCrypto() {
+    if (typeof Module.createRequire === "function" && typeof process.execPath === "string") {
+      try {
+        const candidate = Module.createRequire(process.execPath)("node:crypto");
+        if (
+          candidate != null &&
+          typeof candidate.createPrivateKey === "function" &&
+          typeof candidate.createPublicKey === "function" &&
+          typeof candidate.sign === "function" &&
+          (typeof candidate.generateKeyPair === "function" || typeof candidate.generateKeyPairSync === "function")
+        ) {
+          return candidate;
+        }
+      } catch {
+        // Fall through to the ordinary builtin lookup below.
+      }
+    }
+    return builtin("crypto");
+  }
+
+  const crypto = loadNodeCrypto();
 
   function bridgeError(code, message) {
     const error = new Error(message);
@@ -342,6 +363,23 @@
   }
 
   function generateP256Pair() {
+    if (typeof crypto.generateKeyPair !== "function") {
+      if (typeof crypto.generateKeyPairSync !== "function") {
+        return Promise.reject(bridgeError("KEY_GENERATION_UNAVAILABLE", "Node P-256 key generation is unavailable"));
+      }
+      try {
+        return Promise.resolve(crypto.generateKeyPairSync(
+          "ec",
+          {
+            namedCurve: "prime256v1",
+            privateKeyEncoding: { format: "der", type: "pkcs8" },
+            publicKeyEncoding: { format: "der", type: "spki" },
+          },
+        )).then(({ privateKey, publicKey }) => ({ privateKey, publicKey }));
+      } catch {
+        return Promise.reject(bridgeError("KEY_GENERATION_FAILED", "P-256 key generation failed"));
+      }
+    }
     return new Promise((resolve, reject) => {
       crypto.generateKeyPair(
         "ec",

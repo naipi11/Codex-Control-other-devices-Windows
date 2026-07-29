@@ -216,6 +216,47 @@ async function legacyStoreTest(storePath) {
   return { keyIdMismatchRejected: true, migratedToSchemaVersion: 1, signatureVerified: true, unknownFieldRejected: true };
 }
 
+async function electronRestrictedCryptoFallbackTest(root, storePath) {
+  const restrictedCrypto = crypto.webcrypto;
+  assert.equal(typeof restrictedCrypto.generateKeyPair, "undefined");
+  assert.equal(typeof restrictedCrypto.createPrivateKey, "undefined");
+
+  const processFacade = {
+    env: process.env,
+    execPath: process.execPath,
+    getBuiltinModule(name) {
+      if (name === "crypto" || name === "node:crypto") {
+        return restrictedCrypto;
+      }
+      return process.getBuiltinModule(name);
+    },
+    pid: process.pid,
+    platform: process.platform,
+  };
+  const context = vm.createContext({
+    Buffer,
+    clearTimeout,
+    console,
+    process: processFacade,
+    setTimeout,
+  });
+  context.globalThis = context;
+  const source = fs.readFileSync(path.join(root, "..", "src", "runtime", "main-payload.js"), "utf8");
+  const bridge = vm.runInContext(source, context, { filename: "main-payload.js" });
+  const service = new bridge.DeviceKeyService({ storePath });
+  const created = await service.createDeviceKey("allow_os_protected_nonextractable");
+  const payload = Buffer.from("electron-restricted-crypto", "utf8");
+  const signed = await service.signDeviceKey(created.keyId, payload);
+  const publicKey = crypto.createPublicKey({
+    format: "der",
+    key: Buffer.from(created.publicKeySpkiDerBase64, "base64"),
+    type: "spki",
+  });
+  assert.equal(crypto.verify("sha256", payload, publicKey, Buffer.from(signed.signatureDerBase64, "base64")), true);
+  await service.deleteDeviceKey(created.keyId);
+  return { nativeCryptoLoadedWithCreateRequire: true, signatureVerified: true };
+}
+
 async function rendererPayloadTest(root) {
   const avatarOverlay = {
     title: "Codex",
@@ -343,6 +384,7 @@ async function main() {
     ["create-sign-verify-delete", () => deviceKeyLifecycleTest(path.join(tempDirectory, "lifecycle.json"))],
     ["malformed-store-preservation", () => malformedPreservationTest(path.join(tempDirectory, "malformed.json"))],
     ["legacy-pem-store", () => legacyStoreTest(path.join(tempDirectory, "legacy.json"))],
+    ["electron-restricted-crypto-fallback", () => electronRestrictedCryptoFallbackTest(root, path.join(tempDirectory, "electron-crypto.json"))],
     ["renderer-existing-and-delayed", () => rendererPayloadTest(root)],
     ["inspector-explicit-refusal", () => inspectorClosureTest(root, tempDirectory)],
   ];
