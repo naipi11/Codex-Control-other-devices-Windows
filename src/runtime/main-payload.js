@@ -28,24 +28,38 @@
   const childProcess = builtin("child_process");
   const Module = builtin("module");
 
+  function supportsDeviceKeyCrypto(candidate) {
+    return (
+      candidate != null &&
+      typeof candidate.createPrivateKey === "function" &&
+      typeof candidate.createPublicKey === "function" &&
+      typeof candidate.randomUUID === "function" &&
+      typeof candidate.sign === "function" &&
+      typeof candidate.timingSafeEqual === "function" &&
+      (typeof candidate.generateKeyPair === "function" || typeof candidate.generateKeyPairSync === "function")
+    );
+  }
+
   function loadNodeCrypto() {
     if (typeof Module.createRequire === "function" && typeof process.execPath === "string") {
       try {
         const candidate = Module.createRequire(process.execPath)("node:crypto");
-        if (
-          candidate != null &&
-          typeof candidate.createPrivateKey === "function" &&
-          typeof candidate.createPublicKey === "function" &&
-          typeof candidate.sign === "function" &&
-          (typeof candidate.generateKeyPair === "function" || typeof candidate.generateKeyPairSync === "function")
-        ) {
+        if (supportsDeviceKeyCrypto(candidate)) {
           return candidate;
         }
       } catch {
         // Fall through to the ordinary builtin lookup below.
       }
     }
-    return builtin("crypto");
+    try {
+      const candidate = builtin("crypto");
+      if (supportsDeviceKeyCrypto(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Report one stable, capability-specific error below.
+    }
+    throw bridgeError("CRYPTO_UNAVAILABLE", "A complete Node crypto module is required for Windows device keys");
   }
 
   const crypto = loadNodeCrypto();
