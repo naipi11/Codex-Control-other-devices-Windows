@@ -216,6 +216,118 @@ async function legacyStoreTest(storePath) {
   return { keyIdMismatchRejected: true, migratedToSchemaVersion: 1, signatureVerified: true, unknownFieldRejected: true };
 }
 
+function hostBuiltin(name) {
+  if (typeof process.getBuiltinModule === "function") {
+    return process.getBuiltinModule(name);
+  }
+  return require(name);
+}
+
+function processFacade(getBuiltinModule) {
+  const facade = {
+    env: process.env,
+    execPath: process.execPath,
+    pid: process.pid,
+    platform: process.platform,
+  };
+  if (typeof getBuiltinModule === "function") {
+    facade.getBuiltinModule = getBuiltinModule;
+  }
+  return facade;
+}
+
+function loadBridgeInVm(root, { getBuiltinModule, requireBuiltin } = {}) {
+  const globals = {
+    Buffer,
+    clearTimeout,
+    console,
+    process: processFacade(getBuiltinModule),
+    setTimeout,
+  };
+  if (typeof requireBuiltin === "function") {
+    globals.require = requireBuiltin;
+  }
+  const context = vm.createContext(globals);
+  context.globalThis = context;
+  const source = fs.readFileSync(path.join(root, "..", "src", "runtime", "main-payload.js"), "utf8");
+  return vm.runInContext(source, context, { filename: "main-payload.js" });
+}
+
+async function vmDeviceKeyLifecycle(bridge, storePath, payloadText) {
+  const service = new bridge.DeviceKeyService({ storePath });
+  const created = await service.createDeviceKey("allow_os_protected_nonextractable");
+  const payload = Buffer.from(payloadText, "utf8");
+  const signed = await service.signDeviceKey(created.keyId, payload);
+  const publicKey = crypto.createPublicKey({
+    format: "der",
+    key: Buffer.from(created.publicKeySpkiDerBase64, "base64"),
+    type: "spki",
+  });
+  assert.equal(crypto.verify("sha256", payload, publicKey, Buffer.from(signed.signatureDerBase64, "base64")), true);
+  await service.deleteDeviceKey(created.keyId);
+}
+
+function restrictedCryptoBuiltin(name) {
+  if (name === "crypto" || name === "node:crypto") {
+    return crypto.webcrypto;
+  }
+  return hostBuiltin(name);
+}
+
+async function electronRestrictedCryptoFallbackTest(root, storePath) {
+  assert.equal(typeof crypto.webcrypto.generateKeyPair, "undefined");
+  assert.equal(typeof crypto.webcrypto.createPrivateKey, "undefined");
+  const bridge = loadBridgeInVm(root, { getBuiltinModule: restrictedCryptoBuiltin });
+  await vmDeviceKeyLifecycle(bridge, storePath, "electron-restricted-crypto");
+  return { nativeCryptoLoadedWithCreateRequire: true, signatureVerified: true };
+}
+
+async function nodeWithoutGetBuiltinModuleTest(root, storePath) {
+  const bridge = loadBridgeInVm(root, { requireBuiltin: restrictedCryptoBuiltin });
+  await vmDeviceKeyLifecycle(bridge, storePath, "node-without-get-builtin-module");
+  return { outerRequireFallbackVerified: true, signatureVerified: true };
+}
+
+async function synchronousKeyGenerationFallbackTest(root, storePath) {
+  const syncOnlyCrypto = Object.create(crypto);
+  Object.defineProperty(syncOnlyCrypto, "generateKeyPair", { value: undefined });
+  assert.equal(typeof syncOnlyCrypto.generateKeyPair, "undefined");
+  assert.equal(typeof syncOnlyCrypto.generateKeyPairSync, "function");
+
+  const moduleFacade = Object.create(hostBuiltin("module"));
+  Object.defineProperty(moduleFacade, "createRequire", {
+    value() {
+      return (name) => name === "node:crypto" ? syncOnlyCrypto : require(name);
+    },
+  });
+  const resolveBuiltin = (name) => {
+    if (name === "module" || name === "node:module") {
+      return moduleFacade;
+    }
+    return restrictedCryptoBuiltin(name);
+  };
+  const bridge = loadBridgeInVm(root, { getBuiltinModule: resolveBuiltin });
+  await vmDeviceKeyLifecycle(bridge, storePath, "synchronous-key-generation");
+  return { signatureVerified: true, synchronousGenerationVerified: true };
+}
+
+async function incompleteCryptoRejectionTest(root) {
+  const moduleFacade = Object.create(hostBuiltin("module"));
+  Object.defineProperty(moduleFacade, "createRequire", {
+    value() {
+      return () => crypto.webcrypto;
+    },
+  });
+  const resolveBuiltin = (name) => {
+    if (name === "module" || name === "node:module") {
+      return moduleFacade;
+    }
+    return restrictedCryptoBuiltin(name);
+  };
+  assert.throws(() => loadBridgeInVm(root, { getBuiltinModule: resolveBuiltin }), { code: "CRYPTO_UNAVAILABLE" });
+  return { incompleteCryptoRejected: true };
+}
+
 async function rendererPayloadTest(root) {
   const avatarOverlay = {
     title: "Codex",
@@ -343,6 +455,10 @@ async function main() {
     ["create-sign-verify-delete", () => deviceKeyLifecycleTest(path.join(tempDirectory, "lifecycle.json"))],
     ["malformed-store-preservation", () => malformedPreservationTest(path.join(tempDirectory, "malformed.json"))],
     ["legacy-pem-store", () => legacyStoreTest(path.join(tempDirectory, "legacy.json"))],
+    ["electron-restricted-crypto-fallback", () => electronRestrictedCryptoFallbackTest(root, path.join(tempDirectory, "electron-crypto.json"))],
+    ["node-without-get-builtin-module", () => nodeWithoutGetBuiltinModuleTest(root, path.join(tempDirectory, "node-22-0.json"))],
+    ["synchronous-key-generation-fallback", () => synchronousKeyGenerationFallbackTest(root, path.join(tempDirectory, "sync-crypto.json"))],
+    ["incomplete-crypto-rejection", () => incompleteCryptoRejectionTest(root)],
     ["renderer-existing-and-delayed", () => rendererPayloadTest(root)],
     ["inspector-explicit-refusal", () => inspectorClosureTest(root, tempDirectory)],
   ];
