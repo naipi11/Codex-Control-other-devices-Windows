@@ -49,6 +49,19 @@ try {
         Assert-CcodEqual 1 (Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings').schemaVersion 'schema round-trip'
     }
 
+    Invoke-CcodTest 'atomically replaces an existing JSON file without temporary or backup leftovers' {
+        $path = Join-Path $root 'replace\settings.json'
+        Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'before' })
+        Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'after' })
+        $raw = [IO.File]::ReadAllBytes($path)
+        $value = Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings'
+        $siblings = @(Get-ChildItem -LiteralPath (Split-Path $path -Parent) -Force)
+        Assert-CcodEqual 'after' $value.value 'replacement must expose the second JSON value'
+        Assert-CcodTrue ($raw.Length -gt 0 -and -not ($raw[0] -eq 0xEF -and $raw[1] -eq 0xBB -and $raw[2] -eq 0xBF)) 'replacement JSON must remain UTF-8 without BOM'
+        Assert-CcodEqual 1 $siblings.Count 'replacement must not leave temporary or backup siblings'
+        Assert-CcodEqual 'settings.json' $siblings[0].Name 'replacement must leave only the target file'
+    }
+
     Invoke-CcodTest 'rejects malformed state and quarantines it beside the source' {
         $path = Join-Path $root 'state\truncated.json'
         [IO.Directory]::CreateDirectory((Split-Path $path -Parent)) | Out-Null

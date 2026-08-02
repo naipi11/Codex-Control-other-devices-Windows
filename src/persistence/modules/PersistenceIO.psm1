@@ -104,6 +104,7 @@ function Write-CcodAtomicJson {
     $directory = Split-Path -Path $Path -Parent
     [IO.Directory]::CreateDirectory($directory) | Out-Null
     $temporary = Join-Path $directory ([IO.Path]::GetRandomFileName())
+    $backup = Join-Path $directory ([IO.Path]::GetRandomFileName())
     try {
         $json = ($Value | ConvertTo-Json -Depth 16) + "`n"
         $encoding = [Text.UTF8Encoding]::new($false)
@@ -122,12 +123,13 @@ function Write-CcodAtomicJson {
         }
 
         if ([IO.File]::Exists($Path)) {
-            [IO.File]::Replace($temporary, $Path, $null, $true)
+            [IO.File]::Replace($temporary, $Path, $backup, $true)
         } else {
             [IO.File]::Move($temporary, $Path)
         }
     } finally {
         if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+        if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
     }
 }
 
