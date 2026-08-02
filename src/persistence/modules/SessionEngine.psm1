@@ -8,6 +8,20 @@ Import-Module (Join-Path $moduleRoot 'StateStore.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'ProcessControl.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'TransitionJournal.psm1') -Force
 
+$script:CcodSessionStableErrorCodes=@(
+    'BRIDGE_PROOF_INCOMPLETE',
+    'CCOD_ATOMIC_NAME_EXHAUSTED','CCOD_ATOMIC_NAME_INVALID','CCOD_ATOMIC_RECOVERY_FAILED','CCOD_ATOMIC_REPLACE_FAILED',
+    'CCOD_BRIDGE_JSON_INVALID','CCOD_CLOCK_INVALID','CCOD_CLOSE_UNPROVEN','CCOD_CODEX_HOME_INVALID',
+    'CCOD_LIVE_PROBE_INVALID','CCOD_LIVE_PROBE_MISMATCH','CCOD_LIVE_PROBE_REQUIRED','CCOD_LOG_ENTRY_TOO_LARGE',
+    'CCOD_MAIN_INSPECTOR_OPEN','CCOD_NODE_CANDIDATE_INVALID','CCOD_PATH_MISSING','CCOD_PATH_OUTSIDE_ROOT','CCOD_PATHS_INVALID',
+    'CCOD_PORT_UNAVAILABLE','CCOD_RECOVERY_UNPROVEN','CCOD_REPARSE_PATH','CCOD_REPLAY_INPUT_INVALID','CCOD_REQUEST_INVALID',
+    'CCOD_SCHEMA_UNSUPPORTED','CCOD_SESSION_FAILED','CCOD_SETTINGS_INVALID','CCOD_SOURCE_AMBIGUOUS','CCOD_SOURCE_CHANGED',
+    'CCOD_SPECIAL_START_FAILED','CCOD_STATE_ALREADY_INITIALIZED','CCOD_STATE_BLOCKED','CCOD_STATE_MALFORMED','CCOD_STATE_MISSING',
+    'CCOD_STATUS_INVALID','CCOD_STOP_UNCONFIRMED','CCOD_TRANSITION_ARCHIVE_FAILED','CCOD_TRANSITION_COMPLETION_INVALID',
+    'CCOD_TRANSITION_CONFLICT','CCOD_TRANSITION_INVALID','CCOD_TRANSITION_RECEIPT_INVALID','CCOD_TRANSITION_STAGE_INVALID',
+    'CCOD_VERIFIED_PACKAGES_INVALID'
+)
+
 function Throw-CcodSessionError {
     param([Parameter(Mandatory)][string]$Code, [Parameter(Mandatory)][string]$Message, $Target)
     $exception = [InvalidOperationException]::new($Message)
@@ -162,7 +176,7 @@ function New-CcodSessionResult {
 function Get-CcodSessionErrorCode($Record) {
     $code = [string]$Record.FullyQualifiedErrorId
     if ($code.Contains(',')) { $code = $code.Split(',')[0] }
-    if ([string]::IsNullOrWhiteSpace($code) -or $code -cnotmatch '^(CCOD_|BRIDGE_)') { return 'CCOD_SESSION_FAILED' }
+    if ([string]::IsNullOrWhiteSpace($code) -or $script:CcodSessionStableErrorCodes -cnotcontains $code) { return 'CCOD_SESSION_FAILED' }
     return $code
 }
 
@@ -762,8 +776,7 @@ function Invoke-CcodReplayTransition {
             return Complete-CcodCloseResult $result $Paths $adapter $Transition.transactionId
         }
         $probe=& $adapter.StaticProbe $state.Settings.nodeCandidates $Paths.CheckerPath;$result.package=ConvertTo-CcodSessionPackage $probe
-        if(@('SpecialLaunchRequested','SpecialStarted','Validated') -ccontains $Transition.stage -and
-            ($Transition.runtimeId -cne $Request.runtimeId -or $Transition.packageFullName -cne $probe.PackageFullName -or $Transition.appAsarSha256 -cne $probe.AppAsarSha256)){
+        if($Transition.runtimeId -cne $Request.runtimeId -or $Transition.packageFullName -cne $probe.PackageFullName -or $Transition.appAsarSha256 -cne $probe.AppAsarSha256){
             Throw-CcodSessionError 'CCOD_RECOVERY_UNPROVEN' 'The active runtime package does not match the durable transition identity' $Transition
         }
         if($Transition.stage -ceq 'CloseRequested'){
@@ -774,10 +787,20 @@ function Invoke-CcodReplayTransition {
             $portObservation=if($null -eq $Transition.mainPort){'NotApplicable'}else{'Indeterminate'}
             $recordedPid=if($null -ne $Transition.specialPid){$Transition.specialPid}else{$Transition.sourcePid}
             $recordedTime=if($null -ne $Transition.specialPid){$Transition.specialCreationTimeUtc}else{$Transition.sourceCreationTimeUtc}
+            $roots=@(Get-CcodCurrentPackageRoots $state.Status $probe $Request $adapter)
+            if($roots.Count -eq 0){
+                $cold=[pscustomobject][ordered]@{StopObservation='CloseTreeIndeterminate';RecoveryObservation='NotApplicable';SpecialObservation='NoCandidate';PortObservation=$portObservation;SpecialCandidates=@();OrdinaryCandidates=@()}
+                $decision=Get-CcodReplayDecision -Transition $Transition -Observed $cold
+                Throw-CcodSessionError 'CCOD_CLOSE_UNPROVEN' 'Cold close replay cannot prove absence of the complete recorded tree' $decision
+            }
+            if($roots.Count -ne 1 -or $roots[0].Pid -ne $recordedPid -or $roots[0].CreationTimeUtc -cne $recordedTime){
+                Throw-CcodSessionError 'CCOD_CLOSE_UNPROVEN' 'Close replay requires exactly the one journaled current-package root' $roots
+            }
             $current=& $adapter.GetProcess $recordedPid $state.Status
             if($null -eq $current -or $current.CreationTimeUtc -cne $recordedTime -or -not $current.IsTopLevel -or
                 [string]$current.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or $current.UserSid -cne $identity.UserSid -or
-                -not $current.Path.Equals($probe.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or $current.PackageFamilyName -cne $probe.PackageFamilyName){
+                -not $current.Path.Equals($probe.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or $current.PackageFamilyName -cne $probe.PackageFamilyName -or
+                -not (& $adapter.ProcessMatch $roots[0] $current)){
                 $cold=[pscustomobject][ordered]@{StopObservation='CloseTreeIndeterminate';RecoveryObservation='NotApplicable';SpecialObservation='NoCandidate';PortObservation=$portObservation;SpecialCandidates=@();OrdinaryCandidates=@()}
                 $decision=Get-CcodReplayDecision -Transition $Transition -Observed $cold
                 Throw-CcodSessionError 'CCOD_CLOSE_UNPROVEN' 'Cold close replay cannot prove absence of the complete recorded tree' $decision
