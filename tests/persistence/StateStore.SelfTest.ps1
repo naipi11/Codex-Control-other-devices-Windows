@@ -9,6 +9,7 @@ function New-CcodStateTestAdapters {
     return @{
         UtcNow = { $fixedUtc }.GetNewClosure()
         NewGuid = { [Guid]'11111111-2222-3333-4444-555555555555' }
+        TestVerifiedNodeCandidate = { param($Path) $Path -eq 'C:\Node\node.exe' }
     }
 }
 
@@ -29,12 +30,91 @@ function Set-CcodStateDamage([string]$StateRoot, [string]$Leaf, [string]$Variant
     }
 }
 
+function Write-CcodStateJson([string]$StateRoot, [string]$Leaf, $Value) {
+    [IO.File]::WriteAllText((Join-Path $StateRoot $Leaf), ($Value | ConvertTo-Json -Depth 16 -Compress), [Text.UTF8Encoding]::new($false))
+}
+
+function New-CcodTransitionFixture {
+    return [ordered]@{
+        transactionId = 'transaction-1'
+        stage = 'IntentWritten'
+        sourcePid = 101
+        sourceCreationTimeUtc = '2030-02-03T04:05:06.0000000Z'
+        packageFullName = 'pkg'
+        appAsarSha256 = ('a' * 64)
+        runtimeId = 'runtime-1'
+        mainPort = 41001
+        rendererPort = 41002
+        specialPid = $null
+        specialCreationTimeUtc = $null
+        recoveryPid = $null
+        recoveryCreationTimeUtc = $null
+        createdAtUtc = '2030-02-03T04:05:06.0000000Z'
+        updatedAtUtc = '2030-02-03T04:05:06.0000000Z'
+    }
+}
+
+function New-CcodStatusSession {
+    return [ordered]@{
+        supervisorPid = 11
+        supervisorCreationTimeUtc = '2030-02-03T04:05:06.0000000Z'
+        sessionId = 'session-1'
+        runtimeId = 'runtime-1'
+        sessionState = 'Active'
+        codex = [ordered]@{
+            pid = 22
+            creationTimeUtc = '2030-02-03T04:05:06.0000000Z'
+            packageFullName = 'pkg'
+            packageVersion = '1.0.0.0'
+            appAsarSha256 = ('a' * 64)
+            mainPort = 41001
+            rendererPort = 41002
+            mainProbe = 'Valid'
+            rendererProbe = 'Valid'
+        }
+    }
+}
+
+function New-CcodStatusFixture {
+    return [ordered]@{ schemaVersion = 1; session = (New-CcodStatusSession) }
+}
+
+function New-CcodLiveProbeFixture {
+    $session = New-CcodStatusSession
+    return [pscustomobject]@{
+        Valid = $true
+        runtimeId = $session.runtimeId
+        pid = $session.codex.pid
+        creationTimeUtc = $session.codex.creationTimeUtc
+        packageFullName = $session.codex.packageFullName
+        packageVersion = $session.codex.packageVersion
+        appAsarSha256 = $session.codex.appAsarSha256
+        mainPort = $session.codex.mainPort
+        rendererPort = $session.codex.rendererPort
+        mainProbe = $session.codex.mainProbe
+        rendererProbe = $session.codex.rendererProbe
+    }
+}
+
+function New-CcodVerifiedRecord {
+    return [ordered]@{
+        packageFullName = 'pkg'
+        packageVersion = '1.0.0.0'
+        appAsarSha256 = ('a' * 64)
+        runtimeId = 'runtime-1'
+        staticClassification = 'CandidateCompatible'
+        dynamicOutcome = 'Failed'
+        probeState = 'Invalid'
+        confirmedAtUtc = '2030-02-03T04:05:06.0000000Z'
+    }
+}
+
 $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-state-selftest-' + [Guid]::NewGuid().ToString('N'))
 try {
     Invoke-CcodTest 'initializes independent automation consent and installer-verified absolute Node paths' {
         $state = Join-Path $root 'initial'
         Initialize-CcodStateFixture -StateRoot $state
-        $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+        $loaded = Read-CcodState -StateRoot $state -CurrentSuppressionKey 'pkg|hash|runtime' -Adapters (New-CcodStateTestAdapters)
 
         Assert-CcodEqual $true $loaded.Settings.automationEnabled 'fresh explicit install enables automation'
         Assert-CcodEqual $true $loaded.Settings.candidateCompatibleOptIn 'opt-in persists independently from automation'
@@ -77,23 +157,91 @@ try {
         Set-CcodStateDamage -StateRoot $state -Leaf 'status.json' -Variant 'malformed'
         $damaged = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
         Assert-CcodEqual $true $damaged.StatusRebuildRequired 'damaged status is not trusted as a usable ordinary-session record'
-        Assert-CcodThrows { Write-CcodStatus -StateRoot $state -Status ([ordered]@{ schemaVersion = 1; session = 'Active' }) } 'CCOD_LIVE_PROBE_REQUIRED'
-        Write-CcodStatus -StateRoot $state -Status ([ordered]@{ schemaVersion = 1; session = 'Active' }) -LiveProbeResult ([pscustomobject]@{ Valid = $true }) | Out-Null
-        Assert-CcodEqual 'Active' (Read-CcodStatus -StateRoot $state).session 'a supplied live probe permits status reconstruction'
+        Assert-CcodThrows { Write-CcodStatus -StateRoot $state -Status (New-CcodStatusFixture) } 'CCOD_LIVE_PROBE_REQUIRED'
+        $status = New-CcodStatusFixture
+        $mismatchedProbe = New-CcodLiveProbeFixture
+        $mismatchedProbe.rendererPort = 49999
+        Assert-CcodThrows { Write-CcodStatus -StateRoot $state -Status $status -LiveProbeResult $mismatchedProbe } 'CCOD_LIVE_PROBE_MISMATCH'
+        Write-CcodStatus -StateRoot $state -Status $status -LiveProbeResult (New-CcodLiveProbeFixture) | Out-Null
+        Assert-CcodEqual 'Active' (Read-CcodStatus -StateRoot $state -Adapters (New-CcodStateTestAdapters)).session.sessionState 'a matching complete live probe permits status reconstruction'
+    }
+
+    Invoke-CcodTest 'quarantines every invalid transition shape and disables all actions' {
+        $badCases = @(
+            [pscustomobject]@{ Name = 'empty transaction'; Field = $null; Value = [ordered]@{} },
+            [pscustomobject]@{ Name = 'transaction ID'; Field = 'transactionId'; Value = 1 },
+            [pscustomobject]@{ Name = 'stage'; Field = 'stage'; Value = 'BadStage' },
+            [pscustomobject]@{ Name = 'source PID'; Field = 'sourcePid'; Value = '101' },
+            [pscustomobject]@{ Name = 'source creation'; Field = 'sourceCreationTimeUtc'; Value = 'not-a-time' },
+            [pscustomobject]@{ Name = 'package full name'; Field = 'packageFullName'; Value = 1 },
+            [pscustomobject]@{ Name = 'asar hash'; Field = 'appAsarSha256'; Value = 'not-a-hash' },
+            [pscustomobject]@{ Name = 'runtime ID'; Field = 'runtimeId'; Value = 1 },
+            [pscustomobject]@{ Name = 'main port'; Field = 'mainPort'; Value = 0 },
+            [pscustomobject]@{ Name = 'renderer port'; Field = 'rendererPort'; Value = 41001 },
+            [pscustomobject]@{ Name = 'special PID'; Field = 'specialPid'; Value = '22' },
+            [pscustomobject]@{ Name = 'special creation'; Field = 'specialCreationTimeUtc'; Value = 'not-a-time' },
+            [pscustomobject]@{ Name = 'recovery PID'; Field = 'recoveryPid'; Value = '33' },
+            [pscustomobject]@{ Name = 'recovery creation'; Field = 'recoveryCreationTimeUtc'; Value = 'not-a-time' },
+            [pscustomobject]@{ Name = 'created time'; Field = 'createdAtUtc'; Value = 'not-a-time' },
+            [pscustomobject]@{ Name = 'updated time'; Field = 'updatedAtUtc'; Value = 'not-a-time' }
+        )
+        foreach ($case in $badCases) {
+            $state = Join-Path $root ('transition-' + $case.Name.Replace(' ', '-'))
+            Initialize-CcodStateFixture -StateRoot $state
+            $transaction = New-CcodTransitionFixture
+            if ($null -eq $case.Field) { $transaction = $case.Value } else { $transaction[$case.Field] = $case.Value }
+            Write-CcodStateJson -StateRoot $state -Leaf 'transition.json' -Value ([ordered]@{ schemaVersion = 1; activeTransaction = $transaction })
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodEqual $false $loaded.AutomationEnabled "$($case.Name) transition disables automation"
+            Assert-CcodEqual $false $loaded.TransitionActionsAllowed "$($case.Name) transition forbids stop/start/recover"
+            Assert-CcodTrue ($loaded.Damage.PSObject.Properties['transition.json'] -ne $null) "$($case.Name) transition is recorded as damage"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'transition.json.corrupt.*').Count "$($case.Name) transition is quarantined"
+        }
+    }
+
+    Invoke-CcodTest 'quarantines strict status verified and settings schema violations' {
+        $cases = @(
+            [pscustomobject]@{ Leaf = 'status.json'; Value = [ordered]@{ schemaVersion = 1; session = [ordered]@{} }; Flag = 'StatusRebuildRequired' },
+            [pscustomobject]@{ Leaf = 'verified-packages.json'; Value = [ordered]@{ schemaVersion = 1; packages = [ordered]@{ 'wrong|key|value' = (New-CcodVerifiedRecord) } }; Flag = 'AutomaticCandidateTrialsAllowed' },
+            [pscustomobject]@{ Leaf = 'verified-packages.json'; Value = [ordered]@{ schemaVersion = 1; packages = [ordered]@{ 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1' = ([ordered]@{ packageFullName='pkg'; packageVersion='1.0.0.0'; appAsarSha256=('a' * 64); runtimeId='runtime-1'; staticClassification='CandidateCompatible'; dynamicOutcome='Failed'; probeState='Invalid'; confirmedAtUtc='bad' }) } }; Flag = 'AutomaticCandidateTrialsAllowed' },
+            [pscustomobject]@{ Leaf = 'settings.json'; Value = [ordered]@{ schemaVersion = '1'; automationEnabled=$true; candidateCompatibleOptIn=$true; nodeCandidates=@('C:\Node\node.exe'); updatedAtUtc='2030-02-03T04:05:06.0000000Z' }; Flag = 'AutomationEnabled' },
+            [pscustomobject]@{ Leaf = 'settings.json'; Value = [ordered]@{ schemaVersion = 1; automationEnabled=$true; candidateCompatibleOptIn=$true; nodeCandidates='C:\Node\node.exe'; updatedAtUtc='2030-02-03T04:05:06.0000000Z' }; Flag = 'AutomationEnabled' },
+            [pscustomobject]@{ Leaf = 'settings.json'; Value = [ordered]@{ schemaVersion = 1; automationEnabled=$true; candidateCompatibleOptIn=$true; nodeCandidates=@('C:node.exe'); updatedAtUtc='2030-02-03T04:05:06.0000000Z' }; Flag = 'AutomationEnabled' },
+            [pscustomobject]@{ Leaf = 'settings.json'; Value = [ordered]@{ schemaVersion = 1; automationEnabled=$true; candidateCompatibleOptIn=$true; nodeCandidates=@('\\Node\node.exe'); updatedAtUtc='2030-02-03T04:05:06.0000000Z' }; Flag = 'AutomationEnabled' },
+            [pscustomobject]@{ Leaf = 'settings.json'; Value = [ordered]@{ schemaVersion = 1; automationEnabled=$true; candidateCompatibleOptIn=$true; nodeCandidates=@('C:\Node\node.exe'); updatedAtUtc='2030-02-03T04:05:06Z' }; Flag = 'AutomationEnabled' }
+        )
+        foreach ($case in $cases) {
+            $state = Join-Path $root ('strict-' + $case.Leaf + '-' + [Guid]::NewGuid().ToString('N'))
+            Initialize-CcodStateFixture -StateRoot $state
+            Write-CcodStateJson -StateRoot $state -Leaf $case.Leaf -Value $case.Value
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodTrue ($loaded.Damage.PSObject.Properties[$case.Leaf] -ne $null) "$($case.Leaf) invalid shape is damage"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter ($case.Leaf + '.corrupt.*')).Count "$($case.Leaf) invalid shape is quarantined"
+        }
+    }
+
+    Invoke-CcodTest 'suppresses a previously attempted current package build key' {
+        $state = Join-Path $root 'suppression-history'
+        Initialize-CcodStateFixture -StateRoot $state
+        $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+        Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion = 1; packages = [ordered]@{ $key = (New-CcodVerifiedRecord) } })
+        $loaded = Read-CcodState -StateRoot $state -CurrentSuppressionKey $key -Adapters (New-CcodStateTestAdapters)
+        Assert-CcodEqual $false $loaded.AutomaticCandidateTrialsAllowed 'any recorded outcome suppresses another automatic trial for the same build'
+        Assert-CcodEqual $false (Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)).AutomaticCandidateTrialsAllowed 'no current build key cannot authorize a trial'
     }
 
     Invoke-CcodTest 'updates each consent without changing the other consent or verified candidates' {
         $state = Join-Path $root 'setters'
         Initialize-CcodStateFixture -StateRoot $state
         Set-CcodAutomationEnabled -StateRoot $state -Enabled $false -Adapters (New-CcodStateTestAdapters) | Out-Null
-        $afterAutomation = Read-CcodSettings -StateRoot $state
+        $afterAutomation = Read-CcodSettings -StateRoot $state -Adapters (New-CcodStateTestAdapters)
         Assert-CcodEqual $false $afterAutomation.automationEnabled 'automation setter changes only automation'
         Assert-CcodEqual $true $afterAutomation.candidateCompatibleOptIn 'automation setter preserves candidate opt-in'
         Assert-CcodEqual 'C:\Node\node.exe' $afterAutomation.nodeCandidates[0] 'automation setter preserves verified candidates'
         Assert-CcodEqual $false (Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)).AutomaticCandidateTrialsAllowed 'candidate trial requires automation as well as the preserved opt-in'
         Set-CcodAutomationEnabled -StateRoot $state -Enabled $true -Adapters (New-CcodStateTestAdapters) | Out-Null
         Set-CcodCandidateCompatibleOptIn -StateRoot $state -Enabled $false -Adapters (New-CcodStateTestAdapters) | Out-Null
-        $afterOptIn = Read-CcodSettings -StateRoot $state
+        $afterOptIn = Read-CcodSettings -StateRoot $state -Adapters (New-CcodStateTestAdapters)
         Assert-CcodEqual $true $afterOptIn.automationEnabled 'candidate opt-in setter preserves automation'
         Assert-CcodEqual $false $afterOptIn.candidateCompatibleOptIn 'candidate opt-in setter changes only its own consent'
         Assert-CcodEqual 'C:\Node\node.exe' $afterOptIn.nodeCandidates[0] 'candidate opt-in setter preserves verified candidates'

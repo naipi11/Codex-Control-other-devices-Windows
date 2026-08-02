@@ -15,6 +15,7 @@ function Get-CcodStateAdapters {
 
     $result = @{
         UtcNow = { [DateTime]::UtcNow }
+        TestVerifiedNodeCandidate = { param($Path) Test-Path -LiteralPath $Path -PathType Leaf }
     }
     if ($null -ne $Adapters) {
         foreach ($key in $Adapters.Keys) { $result[$key] = $Adapters[$key] }
@@ -27,6 +28,57 @@ function Test-CcodStateProperty {
 
     if ($Value -is [Collections.IDictionary]) { return $Value.Contains($Name) }
     return $null -ne $Value.PSObject.Properties[$Name]
+}
+
+function Get-CcodStatePropertyNames {
+    param([Parameter(Mandatory)]$Value)
+
+    if ($Value -is [Collections.IDictionary]) { return @($Value.Keys | ForEach-Object { [string]$_ }) }
+    return @($Value.PSObject.Properties | ForEach-Object { $_.Name })
+}
+
+function Assert-CcodExactProperties {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string[]]$Expected, [Parameter(Mandatory)][string]$ErrorId, [Parameter(Mandatory)][string]$Kind)
+
+    $actual = @(Get-CcodStatePropertyNames -Value $Value | Sort-Object)
+    $wanted = @($Expected | Sort-Object)
+    if ($actual.Count -ne $wanted.Count -or @($actual | Where-Object { $_ -notin $wanted }).Count -ne 0) {
+        Throw-CcodStateError $ErrorId "$Kind state has unexpected or missing fields" $Value
+    }
+}
+
+function Test-CcodSchemaVersionOne {
+    param([Parameter(Mandatory)]$Value)
+
+    return (Test-CcodStateProperty -Value $Value -Name 'schemaVersion') -and
+        ($Value.schemaVersion -is [int] -or $Value.schemaVersion -is [long]) -and $Value.schemaVersion -eq 1
+}
+
+function Assert-CcodUtcTimestamp {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$ErrorId, [Parameter(Mandatory)][string]$Name)
+
+    if ($Value -isnot [string]) { Throw-CcodStateError $ErrorId "$Name must be a UTC round-trip timestamp" $Value }
+    $parsed = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact($Value, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed) -or
+        $parsed.Kind -ne [DateTimeKind]::Utc -or $parsed.ToUniversalTime().ToString('o') -cne $Value) {
+        Throw-CcodStateError $ErrorId "$Name must be a UTC round-trip timestamp" $Value
+    }
+}
+
+function Assert-CcodPositiveInteger {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$ErrorId, [Parameter(Mandatory)][string]$Name)
+
+    if (($Value -isnot [int] -and $Value -isnot [long]) -or $Value -lt 1) {
+        Throw-CcodStateError $ErrorId "$Name must be a positive integer" $Value
+    }
+}
+
+function Assert-CcodTcpPort {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$ErrorId, [Parameter(Mandatory)][string]$Name)
+
+    if (($Value -isnot [int] -and $Value -isnot [long]) -or $Value -lt 1 -or $Value -gt 65535) {
+        Throw-CcodStateError $ErrorId "$Name must be a legal TCP port" $Value
+    }
 }
 
 function Get-CcodStatePath {
@@ -46,10 +98,14 @@ function Get-CcodStateTimestamp {
 }
 
 function Assert-CcodAbsoluteNodeCandidates {
-    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$NodeCandidates)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$NodeCandidates, [hashtable]$Adapters)
 
+    $adapters = Get-CcodStateAdapters -Adapters $Adapters
     foreach ($candidate in $NodeCandidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate) -or -not [IO.Path]::IsPathRooted($candidate)) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or
+            $candidate -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+\\)' -or
+            [IO.Path]::GetFileName([IO.Path]::GetFullPath($candidate)) -cne 'node.exe' -or
+            -not (& $adapters.TestVerifiedNodeCandidate $candidate)) {
             Throw-CcodStateError 'CCOD_NODE_CANDIDATE_INVALID' 'Node candidates must be installer-verified absolute paths' $candidate
         }
     }
@@ -63,7 +119,6 @@ function New-CcodSettings {
         [Parameter(Mandatory)][string]$UpdatedAtUtc
     )
 
-    Assert-CcodAbsoluteNodeCandidates -NodeCandidates @($NodeCandidates)
     return [ordered]@{
         schemaVersion = 1
         automationEnabled = $AutomationEnabled
@@ -92,52 +147,111 @@ function New-CcodTransitionStore {
 }
 
 function Assert-CcodSettingsShape {
-    param([Parameter(Mandatory)]$Settings)
+    param([Parameter(Mandatory)]$Settings, [hashtable]$Adapters)
 
-    foreach ($name in @('automationEnabled', 'candidateCompatibleOptIn', 'nodeCandidates', 'updatedAtUtc')) {
-        if (-not (Test-CcodStateProperty -Value $Settings -Name $name)) {
-            Throw-CcodStateError 'CCOD_SETTINGS_INVALID' "Settings state is missing $name" $Settings
-        }
-    }
+    Assert-CcodExactProperties -Value $Settings -Expected @('schemaVersion', 'automationEnabled', 'candidateCompatibleOptIn', 'nodeCandidates', 'updatedAtUtc') -ErrorId 'CCOD_SETTINGS_INVALID' -Kind 'Settings'
+    if (-not (Test-CcodSchemaVersionOne -Value $Settings)) { Throw-CcodStateError 'CCOD_SETTINGS_INVALID' 'Settings schemaVersion must be integer 1' $Settings }
     if ($Settings.automationEnabled -isnot [bool] -or $Settings.candidateCompatibleOptIn -isnot [bool] -or
         $Settings.updatedAtUtc -isnot [string] -or [string]::IsNullOrWhiteSpace($Settings.updatedAtUtc)) {
         Throw-CcodStateError 'CCOD_SETTINGS_INVALID' 'Settings state has invalid consent or timestamp fields' $Settings
     }
-    $candidates = @($Settings.nodeCandidates)
-    if ($null -eq $Settings.nodeCandidates -or @($candidates | Where-Object { $_ -isnot [string] }).Count -ne 0) {
+    if ($null -eq $Settings.nodeCandidates -or $Settings.nodeCandidates -is [string] -or $Settings.nodeCandidates -isnot [Collections.IEnumerable]) {
         Throw-CcodStateError 'CCOD_SETTINGS_INVALID' 'Settings node candidates must be a string array' $Settings
     }
-    Assert-CcodAbsoluteNodeCandidates -NodeCandidates $candidates
+    $candidates = @($Settings.nodeCandidates)
+    if (@($candidates | Where-Object { $_ -isnot [string] }).Count -ne 0) { Throw-CcodStateError 'CCOD_SETTINGS_INVALID' 'Settings node candidates must be a string array' $Settings }
+    Assert-CcodUtcTimestamp -Value $Settings.updatedAtUtc -ErrorId 'CCOD_SETTINGS_INVALID' -Name 'updatedAtUtc'
+    Assert-CcodAbsoluteNodeCandidates -NodeCandidates $candidates -Adapters $Adapters
 }
 
 function Assert-CcodStatusShape {
-    param([Parameter(Mandatory)]$Status)
+    param([Parameter(Mandatory)]$Status, [hashtable]$Adapters)
 
-    if (-not (Test-CcodStateProperty -Value $Status -Name 'schemaVersion')) {
-        Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status state is missing its schema version' $Status
+    Assert-CcodExactProperties -Value $Status -Expected @('schemaVersion', 'session') -ErrorId 'CCOD_STATUS_INVALID' -Kind 'Status'
+    if (-not (Test-CcodSchemaVersionOne -Value $Status)) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status schemaVersion must be integer 1' $Status }
+    if ($null -eq $Status.session) { return }
+    if ($Status.session -isnot [pscustomobject] -and $Status.session -isnot [Collections.IDictionary]) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status session must be null or an object' $Status }
+    $required = @('supervisorPid', 'supervisorCreationTimeUtc', 'sessionId', 'runtimeId', 'sessionState', 'codex')
+    Assert-CcodExactProperties -Value $Status.session -Expected $required -ErrorId 'CCOD_STATUS_INVALID' -Kind 'Status session'
+    Assert-CcodPositiveInteger -Value $Status.session.supervisorPid -ErrorId 'CCOD_STATUS_INVALID' -Name 'supervisorPid'
+    Assert-CcodUtcTimestamp -Value $Status.session.supervisorCreationTimeUtc -ErrorId 'CCOD_STATUS_INVALID' -Name 'supervisorCreationTimeUtc'
+    foreach ($name in @('sessionId', 'runtimeId', 'sessionState')) {
+        if ($Status.session.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($Status.session.$name)) { Throw-CcodStateError 'CCOD_STATUS_INVALID' "Status $name must be a non-empty string" $Status }
     }
+    if ($null -eq $Status.session.codex) { return }
+    if ($Status.session.codex -isnot [pscustomobject] -and $Status.session.codex -isnot [Collections.IDictionary]) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status codex must be null or an object' $Status }
+    $codexFields = @('pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainPort', 'rendererPort', 'mainProbe', 'rendererProbe')
+    Assert-CcodExactProperties -Value $Status.session.codex -Expected $codexFields -ErrorId 'CCOD_STATUS_INVALID' -Kind 'Status codex'
+    foreach ($name in @('packageFullName', 'packageVersion', 'appAsarSha256', 'mainProbe', 'rendererProbe')) {
+        if ($Status.session.codex.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($Status.session.codex.$name)) { Throw-CcodStateError 'CCOD_STATUS_INVALID' "Status codex $name must be a non-empty string" $Status }
+    }
+    Assert-CcodPositiveInteger -Value $Status.session.codex.pid -ErrorId 'CCOD_STATUS_INVALID' -Name 'codex.pid'
+    Assert-CcodUtcTimestamp -Value $Status.session.codex.creationTimeUtc -ErrorId 'CCOD_STATUS_INVALID' -Name 'codex.creationTimeUtc'
+    if ($Status.session.codex.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$') { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status codex appAsarSha256 must be lowercase SHA-256' $Status }
+    Assert-CcodTcpPort -Value $Status.session.codex.mainPort -ErrorId 'CCOD_STATUS_INVALID' -Name 'codex.mainPort'
+    Assert-CcodTcpPort -Value $Status.session.codex.rendererPort -ErrorId 'CCOD_STATUS_INVALID' -Name 'codex.rendererPort'
+    if ($Status.session.codex.mainPort -eq $Status.session.codex.rendererPort) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status ports must be distinct' $Status }
 }
 
 function Assert-CcodVerifiedPackagesShape {
-    param([Parameter(Mandatory)]$VerifiedPackages)
+    param([Parameter(Mandatory)]$VerifiedPackages, [hashtable]$Adapters)
 
-    if (-not (Test-CcodStateProperty -Value $VerifiedPackages -Name 'packages')) {
-        Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package state is missing packages' $VerifiedPackages
-    }
+    Assert-CcodExactProperties -Value $VerifiedPackages -Expected @('schemaVersion', 'packages') -ErrorId 'CCOD_VERIFIED_PACKAGES_INVALID' -Kind 'Verified packages'
+    if (-not (Test-CcodSchemaVersionOne -Value $VerifiedPackages)) { Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package schemaVersion must be integer 1' $VerifiedPackages }
     if ($null -eq $VerifiedPackages.packages -or $VerifiedPackages.packages -is [string] -or $VerifiedPackages.packages -isnot [pscustomobject] -and $VerifiedPackages.packages -isnot [Collections.IDictionary]) {
         Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package state packages must be an object' $VerifiedPackages
     }
+    foreach ($key in Get-CcodStatePropertyNames -Value $VerifiedPackages.packages) {
+        $record = $VerifiedPackages.packages.$key
+        if ($record -isnot [pscustomobject] -and $record -isnot [Collections.IDictionary]) { Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package record must be an object' $record }
+        $required = @('packageFullName', 'packageVersion', 'appAsarSha256', 'runtimeId', 'staticClassification', 'dynamicOutcome', 'probeState', 'confirmedAtUtc')
+        Assert-CcodExactProperties -Value $record -Expected $required -ErrorId 'CCOD_VERIFIED_PACKAGES_INVALID' -Kind 'Verified package record'
+        foreach ($name in $required | Where-Object { $_ -ne 'confirmedAtUtc' }) {
+            if ($record.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($record.$name)) { Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' "Verified record $name must be a non-empty string" $record }
+        }
+        if ($record.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or $record.staticClassification -notin @('CandidateCompatible', 'NativeModulePresent', 'UnknownOrIncompatible', 'VerifiedCompatible') -or $record.dynamicOutcome -notin @('Succeeded', 'Failed') -or $record.probeState -notin @('Valid', 'Invalid', 'NotRun')) {
+            Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified record has an invalid classification or outcome' $record
+        }
+        Assert-CcodUtcTimestamp -Value $record.confirmedAtUtc -ErrorId 'CCOD_VERIFIED_PACKAGES_INVALID' -Name 'confirmedAtUtc'
+        if ($key -cne (Get-CcodSuppressionKey -PackageFullName $record.packageFullName -AppAsarSha256 $record.appAsarSha256 -RuntimeId $record.runtimeId)) { Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package key does not match record identity' $record }
+    }
+}
+
+function Assert-CcodNullableProcessIdentity {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$PidName, [Parameter(Mandatory)][string]$TimeName, [Parameter(Mandatory)][string]$ErrorId)
+
+    $pid = $Value.$PidName
+    $time = $Value.$TimeName
+    if ($null -eq $pid -and $null -eq $time) { return }
+    if ($null -eq $pid -or $null -eq $time) { Throw-CcodStateError $ErrorId "$PidName and $TimeName must be paired" $Value }
+    Assert-CcodPositiveInteger -Value $pid -ErrorId $ErrorId -Name $PidName
+    Assert-CcodUtcTimestamp -Value $time -ErrorId $ErrorId -Name $TimeName
 }
 
 function Assert-CcodTransitionShape {
-    param([Parameter(Mandatory)]$Transition)
+    param([Parameter(Mandatory)]$Transition, [hashtable]$Adapters)
 
-    if (-not (Test-CcodStateProperty -Value $Transition -Name 'activeTransaction')) {
-        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition state is missing activeTransaction' $Transition
-    }
-    if ($null -ne $Transition.activeTransaction -and $Transition.activeTransaction -isnot [pscustomobject]) {
+    Assert-CcodExactProperties -Value $Transition -Expected @('schemaVersion', 'activeTransaction') -ErrorId 'CCOD_TRANSITION_INVALID' -Kind 'Transition'
+    if (-not (Test-CcodSchemaVersionOne -Value $Transition)) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition schemaVersion must be integer 1' $Transition }
+    if ($null -eq $Transition.activeTransaction) { return }
+    if ($Transition.activeTransaction -isnot [pscustomobject] -and $Transition.activeTransaction -isnot [Collections.IDictionary]) {
         Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition activeTransaction must be null or an object' $Transition
     }
+    $transaction = $Transition.activeTransaction
+    $required = @('transactionId', 'stage', 'sourcePid', 'sourceCreationTimeUtc', 'packageFullName', 'appAsarSha256', 'runtimeId', 'mainPort', 'rendererPort', 'specialPid', 'specialCreationTimeUtc', 'recoveryPid', 'recoveryCreationTimeUtc', 'createdAtUtc', 'updatedAtUtc')
+    Assert-CcodExactProperties -Value $transaction -Expected $required -ErrorId 'CCOD_TRANSITION_INVALID' -Kind 'Active transition'
+    foreach ($name in @('transactionId', 'packageFullName', 'runtimeId')) { if ($transaction.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($transaction.$name)) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' "$name must be a non-empty string" $transaction } }
+    if ($transaction.stage -isnot [string] -or $transaction.stage -notin @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered')) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition stage is invalid' $transaction }
+    Assert-CcodPositiveInteger -Value $transaction.sourcePid -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'sourcePid'
+    Assert-CcodUtcTimestamp -Value $transaction.sourceCreationTimeUtc -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'sourceCreationTimeUtc'
+    if ($transaction.appAsarSha256 -isnot [string] -or $transaction.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$') { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'appAsarSha256 must be lowercase SHA-256' $transaction }
+    Assert-CcodTcpPort -Value $transaction.mainPort -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'mainPort'
+    Assert-CcodTcpPort -Value $transaction.rendererPort -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'rendererPort'
+    if ($transaction.mainPort -eq $transaction.rendererPort) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition ports must be distinct' $transaction }
+    Assert-CcodNullableProcessIdentity -Value $transaction -PidName 'specialPid' -TimeName 'specialCreationTimeUtc' -ErrorId 'CCOD_TRANSITION_INVALID'
+    Assert-CcodNullableProcessIdentity -Value $transaction -PidName 'recoveryPid' -TimeName 'recoveryCreationTimeUtc' -ErrorId 'CCOD_TRANSITION_INVALID'
+    Assert-CcodUtcTimestamp -Value $transaction.createdAtUtc -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'createdAtUtc'
+    Assert-CcodUtcTimestamp -Value $transaction.updatedAtUtc -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'updatedAtUtc'
 }
 
 function Read-CcodTypedState {
@@ -145,12 +259,13 @@ function Read-CcodTypedState {
         [Parameter(Mandatory)][string]$StateRoot,
         [Parameter(Mandatory)][string]$Leaf,
         [Parameter(Mandatory)][string]$Kind,
-        [Parameter(Mandatory)][scriptblock]$Validator
+        [Parameter(Mandatory)][scriptblock]$Validator,
+        [hashtable]$Adapters
     )
 
     $path = Get-CcodStatePath -StateRoot $StateRoot -Leaf $Leaf
     $value = Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind $Kind
-    & $Validator $value
+    & $Validator $value $Adapters
     return $value
 }
 
@@ -159,13 +274,14 @@ function Write-CcodTypedState {
         [Parameter(Mandatory)][string]$StateRoot,
         [Parameter(Mandatory)][string]$Leaf,
         [Parameter(Mandatory)]$Value,
-        [Parameter(Mandatory)][scriptblock]$Validator
+        [Parameter(Mandatory)][scriptblock]$Validator,
+        [hashtable]$Adapters
     )
 
-    if ((-not (Test-CcodStateProperty -Value $Value -Name 'schemaVersion')) -or $Value.schemaVersion -ne 1) {
+    if (-not (Test-CcodSchemaVersionOne -Value $Value)) {
         Throw-CcodStateError 'CCOD_SCHEMA_UNSUPPORTED' 'State writes require schema version 1' $Value
     }
-    & $Validator $Value
+    & $Validator $Value $Adapters
     Write-CcodAtomicJson -Path (Get-CcodStatePath -StateRoot $StateRoot -Leaf $Leaf) -Value $Value
 }
 
@@ -187,28 +303,28 @@ function Initialize-CcodState {
         }
     }
 
-    Write-CcodSettings -StateRoot $StateRoot -Settings (New-CcodSettings -NodeCandidates $NodeCandidates -CandidateCompatibleOptIn $CandidateCompatibleOptIn -AutomationEnabled $true -UpdatedAtUtc (Get-CcodStateTimestamp -Adapters $adapters))
-    Write-CcodStatus -StateRoot $StateRoot -Status (New-CcodStatusStore) -LiveProbeResult ([pscustomobject]@{ Valid = $true })
-    Write-CcodVerifiedPackages -StateRoot $StateRoot -VerifiedPackages (New-CcodVerifiedPackagesStore)
-    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'transition.json' -Value (New-CcodTransitionStore) -Validator ${function:Assert-CcodTransitionShape}
+    Write-CcodSettings -StateRoot $StateRoot -Settings (New-CcodSettings -NodeCandidates $NodeCandidates -CandidateCompatibleOptIn $CandidateCompatibleOptIn -AutomationEnabled $true -UpdatedAtUtc (Get-CcodStateTimestamp -Adapters $adapters)) -Adapters $adapters
+    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'status.json' -Value (New-CcodStatusStore) -Validator ${function:Assert-CcodStatusShape} -Adapters $adapters
+    Write-CcodVerifiedPackages -StateRoot $StateRoot -VerifiedPackages (New-CcodVerifiedPackagesStore) -Adapters $adapters
+    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'transition.json' -Value (New-CcodTransitionStore) -Validator ${function:Assert-CcodTransitionShape} -Adapters $adapters
 }
 
 function Read-CcodSettings {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StateRoot)
-    return Read-CcodTypedState -StateRoot $StateRoot -Leaf 'settings.json' -Kind 'settings' -Validator ${function:Assert-CcodSettingsShape}
+    param([Parameter(Mandatory)][string]$StateRoot, [hashtable]$Adapters)
+    return Read-CcodTypedState -StateRoot $StateRoot -Leaf 'settings.json' -Kind 'settings' -Validator ${function:Assert-CcodSettingsShape} -Adapters (Get-CcodStateAdapters -Adapters $Adapters)
 }
 
 function Write-CcodSettings {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)]$Settings)
-    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'settings.json' -Value $Settings -Validator ${function:Assert-CcodSettingsShape}
+    param([Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)]$Settings, [hashtable]$Adapters)
+    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'settings.json' -Value $Settings -Validator ${function:Assert-CcodSettingsShape} -Adapters (Get-CcodStateAdapters -Adapters $Adapters)
 }
 
 function Read-CcodStatus {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StateRoot)
-    return Read-CcodTypedState -StateRoot $StateRoot -Leaf 'status.json' -Kind 'status' -Validator ${function:Assert-CcodStatusShape}
+    param([Parameter(Mandatory)][string]$StateRoot, [hashtable]$Adapters)
+    return Read-CcodTypedState -StateRoot $StateRoot -Leaf 'status.json' -Kind 'status' -Validator ${function:Assert-CcodStatusShape} -Adapters (Get-CcodStateAdapters -Adapters $Adapters)
 }
 
 function Write-CcodStatus {
@@ -216,25 +332,39 @@ function Write-CcodStatus {
     param(
         [Parameter(Mandatory)][string]$StateRoot,
         [Parameter(Mandatory)]$Status,
-        $LiveProbeResult
+        $LiveProbeResult,
+        [hashtable]$Adapters
     )
 
-    if ($null -eq $LiveProbeResult -or $null -eq $LiveProbeResult.PSObject.Properties['Valid'] -or $LiveProbeResult.Valid -ne $true) {
-        Throw-CcodStateError 'CCOD_LIVE_PROBE_REQUIRED' 'Status may only be rebuilt from a supplied successful live probe result' $LiveProbeResult
+    $adapters = Get-CcodStateAdapters -Adapters $Adapters
+    Assert-CcodStatusShape -Status $Status -Adapters $adapters
+    if ($null -ne $Status.session) {
+        if ($null -eq $LiveProbeResult -or -not (Test-CcodStateProperty -Value $LiveProbeResult -Name 'Valid') -or $LiveProbeResult.Valid -ne $true) {
+            Throw-CcodStateError 'CCOD_LIVE_PROBE_REQUIRED' 'Status may only be rebuilt from a supplied successful live probe result' $LiveProbeResult
+        }
+        if (-not (Test-CcodStateProperty -Value $LiveProbeResult -Name 'runtimeId') -or $LiveProbeResult.runtimeId -ne $Status.session.runtimeId) {
+            Throw-CcodStateError 'CCOD_LIVE_PROBE_MISMATCH' 'Live probe does not match status runtimeId' $LiveProbeResult
+        }
+        if ($null -eq $Status.session.codex) { Throw-CcodStateError 'CCOD_LIVE_PROBE_REQUIRED' 'A non-empty status write requires Codex identity and probe evidence' $Status }
+        foreach ($name in @('pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainPort', 'rendererPort', 'mainProbe', 'rendererProbe')) {
+            if (-not (Test-CcodStateProperty -Value $LiveProbeResult -Name $name) -or $LiveProbeResult.$name -ne $Status.session.codex.$name) {
+                Throw-CcodStateError 'CCOD_LIVE_PROBE_MISMATCH' "Live probe does not match status $name" $LiveProbeResult
+            }
+        }
     }
-    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'status.json' -Value $Status -Validator ${function:Assert-CcodStatusShape}
+    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'status.json' -Value $Status -Validator ${function:Assert-CcodStatusShape} -Adapters $adapters
 }
 
 function Read-CcodVerifiedPackages {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StateRoot)
-    return Read-CcodTypedState -StateRoot $StateRoot -Leaf 'verified-packages.json' -Kind 'verified packages' -Validator ${function:Assert-CcodVerifiedPackagesShape}
+    param([Parameter(Mandatory)][string]$StateRoot, [hashtable]$Adapters)
+    return Read-CcodTypedState -StateRoot $StateRoot -Leaf 'verified-packages.json' -Kind 'verified packages' -Validator ${function:Assert-CcodVerifiedPackagesShape} -Adapters (Get-CcodStateAdapters -Adapters $Adapters)
 }
 
 function Write-CcodVerifiedPackages {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)]$VerifiedPackages)
-    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'verified-packages.json' -Value $VerifiedPackages -Validator ${function:Assert-CcodVerifiedPackagesShape}
+    param([Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)]$VerifiedPackages, [hashtable]$Adapters)
+    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'verified-packages.json' -Value $VerifiedPackages -Validator ${function:Assert-CcodVerifiedPackagesShape} -Adapters (Get-CcodStateAdapters -Adapters $Adapters)
 }
 
 function Read-CcodStatePart {
@@ -260,18 +390,20 @@ function Read-CcodStatePart {
 
 function Read-CcodState {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StateRoot, [hashtable]$Adapters)
+    param([Parameter(Mandatory)][string]$StateRoot, [string]$CurrentSuppressionKey, [hashtable]$Adapters)
 
     $adapters = Get-CcodStateAdapters -Adapters $Adapters
     $damage = @{}
-    $settings = Read-CcodStatePart -StateRoot $StateRoot -Leaf 'settings.json' -Reader { Read-CcodSettings -StateRoot $StateRoot } -Adapters $adapters -Damage $damage
-    $status = Read-CcodStatePart -StateRoot $StateRoot -Leaf 'status.json' -Reader { Read-CcodStatus -StateRoot $StateRoot } -Adapters $adapters -Damage $damage
-    $verified = Read-CcodStatePart -StateRoot $StateRoot -Leaf 'verified-packages.json' -Reader { Read-CcodVerifiedPackages -StateRoot $StateRoot } -Adapters $adapters -Damage $damage
-    $transition = Read-CcodStatePart -StateRoot $StateRoot -Leaf 'transition.json' -Reader { Read-CcodTypedState -StateRoot $StateRoot -Leaf 'transition.json' -Kind 'transition' -Validator ${function:Assert-CcodTransitionShape} } -Adapters $adapters -Damage $damage
+    $settings = Read-CcodStatePart -StateRoot $StateRoot -Leaf 'settings.json' -Reader { Read-CcodSettings -StateRoot $StateRoot -Adapters $adapters } -Adapters $adapters -Damage $damage
+    $status = Read-CcodStatePart -StateRoot $StateRoot -Leaf 'status.json' -Reader { Read-CcodStatus -StateRoot $StateRoot -Adapters $adapters } -Adapters $adapters -Damage $damage
+    $verified = Read-CcodStatePart -StateRoot $StateRoot -Leaf 'verified-packages.json' -Reader { Read-CcodVerifiedPackages -StateRoot $StateRoot -Adapters $adapters } -Adapters $adapters -Damage $damage
+    $transition = Read-CcodStatePart -StateRoot $StateRoot -Leaf 'transition.json' -Reader { Read-CcodTypedState -StateRoot $StateRoot -Leaf 'transition.json' -Kind 'transition' -Validator ${function:Assert-CcodTransitionShape} -Adapters $adapters } -Adapters $adapters -Damage $damage
 
     $automationEnabled = $null -ne $settings -and $settings.automationEnabled -eq $true -and -not $damage.ContainsKey('transition.json')
     $statusNeedsRebuild = $null -eq $status
-    $candidateTrialsAllowed = $automationEnabled -and $settings.candidateCompatibleOptIn -eq $true -and $null -ne $verified -and -not $statusNeedsRebuild
+    $suppressionKeyValid = -not [string]::IsNullOrWhiteSpace($CurrentSuppressionKey) -and $CurrentSuppressionKey -cmatch '^[^|]+\|[^|]+\|[^|]+$'
+    $alreadyAttempted = $suppressionKeyValid -and $null -ne $verified -and (Test-CcodStateProperty -Value $verified.packages -Name $CurrentSuppressionKey)
+    $candidateTrialsAllowed = $automationEnabled -and $settings.candidateCompatibleOptIn -eq $true -and $null -ne $verified -and -not $statusNeedsRebuild -and $suppressionKeyValid -and -not $alreadyAttempted
     $transitionActionsAllowed = $null -ne $transition
     return [pscustomobject]@{
         Settings = $settings
@@ -291,8 +423,8 @@ function Set-CcodAutomationEnabled {
     param([Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)][bool]$Enabled, [hashtable]$Adapters)
 
     $adapters = Get-CcodStateAdapters -Adapters $Adapters
-    $settings = Read-CcodSettings -StateRoot $StateRoot
-    Write-CcodSettings -StateRoot $StateRoot -Settings (New-CcodSettings -NodeCandidates @($settings.nodeCandidates) -CandidateCompatibleOptIn $settings.candidateCompatibleOptIn -AutomationEnabled $Enabled -UpdatedAtUtc (Get-CcodStateTimestamp -Adapters $adapters))
+    $settings = Read-CcodSettings -StateRoot $StateRoot -Adapters $adapters
+    Write-CcodSettings -StateRoot $StateRoot -Settings (New-CcodSettings -NodeCandidates @($settings.nodeCandidates) -CandidateCompatibleOptIn $settings.candidateCompatibleOptIn -AutomationEnabled $Enabled -UpdatedAtUtc (Get-CcodStateTimestamp -Adapters $adapters)) -Adapters $adapters
 }
 
 function Set-CcodCandidateCompatibleOptIn {
@@ -300,8 +432,8 @@ function Set-CcodCandidateCompatibleOptIn {
     param([Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)][bool]$Enabled, [hashtable]$Adapters)
 
     $adapters = Get-CcodStateAdapters -Adapters $Adapters
-    $settings = Read-CcodSettings -StateRoot $StateRoot
-    Write-CcodSettings -StateRoot $StateRoot -Settings (New-CcodSettings -NodeCandidates @($settings.nodeCandidates) -CandidateCompatibleOptIn $Enabled -AutomationEnabled $settings.automationEnabled -UpdatedAtUtc (Get-CcodStateTimestamp -Adapters $adapters))
+    $settings = Read-CcodSettings -StateRoot $StateRoot -Adapters $adapters
+    Write-CcodSettings -StateRoot $StateRoot -Settings (New-CcodSettings -NodeCandidates @($settings.nodeCandidates) -CandidateCompatibleOptIn $Enabled -AutomationEnabled $settings.automationEnabled -UpdatedAtUtc (Get-CcodStateTimestamp -Adapters $adapters)) -Adapters $adapters
 }
 
 function Repair-CcodState {
@@ -316,10 +448,10 @@ function Repair-CcodState {
             Move-CcodCorruptState -Path $path -Reason 'explicit repair' -Root $StateRoot -Adapters $adapters | Out-Null
         }
     }
-    Write-CcodSettings -StateRoot $StateRoot -Settings (New-CcodSettings -NodeCandidates @() -CandidateCompatibleOptIn $false -AutomationEnabled $false -UpdatedAtUtc (Get-CcodStateTimestamp -Adapters $adapters))
-    Write-CcodStatus -StateRoot $StateRoot -Status (New-CcodStatusStore) -LiveProbeResult ([pscustomobject]@{ Valid = $true })
-    Write-CcodVerifiedPackages -StateRoot $StateRoot -VerifiedPackages (New-CcodVerifiedPackagesStore)
-    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'transition.json' -Value (New-CcodTransitionStore) -Validator ${function:Assert-CcodTransitionShape}
+    Write-CcodSettings -StateRoot $StateRoot -Settings (New-CcodSettings -NodeCandidates @() -CandidateCompatibleOptIn $false -AutomationEnabled $false -UpdatedAtUtc (Get-CcodStateTimestamp -Adapters $adapters)) -Adapters $adapters
+    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'status.json' -Value (New-CcodStatusStore) -Validator ${function:Assert-CcodStatusShape} -Adapters $adapters
+    Write-CcodVerifiedPackages -StateRoot $StateRoot -VerifiedPackages (New-CcodVerifiedPackagesStore) -Adapters $adapters
+    Write-CcodTypedState -StateRoot $StateRoot -Leaf 'transition.json' -Value (New-CcodTransitionStore) -Validator ${function:Assert-CcodTransitionShape} -Adapters $adapters
 }
 
 function Get-CcodAttemptKey([int]$Pid, [string]$CreationTimeUtc) { '{0}|{1}' -f $Pid, $CreationTimeUtc }
