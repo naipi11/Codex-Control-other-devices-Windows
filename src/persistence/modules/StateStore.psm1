@@ -483,6 +483,33 @@ function Assert-CcodFailedAttemptAdapters {
     }
 }
 
+function Invoke-CcodFailedAttemptCallback {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Callback,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ArgumentList,
+        [Parameter(Mandatory)][string]$Stage
+    )
+
+    if ($Stage -ceq 'Recheck') {
+        $errorId = 'CCOD_FAILED_ATTEMPT_RECHECK_FAILED'
+        $message = 'Failed package attempt precommit recheck failed'
+    } elseif ($Stage -ceq 'Write') {
+        $errorId = 'CCOD_FAILED_ATTEMPT_WRITE_FAILED'
+        $message = 'Failed package attempt atomic write failed'
+    } else {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_ADAPTER_INVALID' 'Failed package attempt adapter contract is invalid' $null
+    }
+
+    try {
+        $emitted = @(& $Callback @ArgumentList *>&1)
+    } catch {
+        Throw-CcodStateError $errorId $message $null
+    }
+    if ($emitted.Count -ne 0) {
+        Throw-CcodStateError $errorId $message $null
+    }
+}
+
 function Assert-CcodFailedAttemptClearInputs {
     param(
         [AllowNull()]$StateRoot,
@@ -595,11 +622,7 @@ function Clear-CcodFailedPackageAttempt {
 
     $initialSnapshot = $initial | ConvertTo-Json -Depth 16 -Compress
     $updated = New-CcodVerifiedPackagesWithoutKey -VerifiedPackages $initial -SuppressionKey $suppressionKey -Adapters $adapters
-    try {
-        [void](& $adapters.BeforeFailedPackageAttemptRecheck $path $suppressionKey)
-    } catch {
-        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_RECHECK_FAILED' 'Failed package attempt precommit recheck failed' $null
-    }
+    Invoke-CcodFailedAttemptCallback -Callback $adapters.BeforeFailedPackageAttemptRecheck -ArgumentList @($path, $suppressionKey) -Stage 'Recheck'
 
     $current = Read-CcodVerifiedPackages -StateRoot $canonicalRoot -Adapters $adapters
     $currentEntry = Get-CcodExactStateEntry -Container $current.packages -Name $suppressionKey
@@ -613,11 +636,7 @@ function Clear-CcodFailedPackageAttempt {
         return New-CcodFailedAttemptClearReceipt -Outcome 'Conflict'
     }
 
-    try {
-        [void](& $adapters.WriteAtomicJson $path $updated)
-    } catch {
-        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_WRITE_FAILED' 'Failed package attempt atomic write failed' $null
-    }
+    Invoke-CcodFailedAttemptCallback -Callback $adapters.WriteAtomicJson -ArgumentList @($path, $updated) -Stage 'Write'
     return New-CcodFailedAttemptClearReceipt -Outcome 'Cleared'
 }
 

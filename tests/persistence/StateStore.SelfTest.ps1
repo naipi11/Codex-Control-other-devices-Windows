@@ -700,6 +700,65 @@ try {
         }
     }
 
+    Invoke-CcodTest 'rejects every emitted callback stream including nonterminating errors from both stages' {
+        foreach ($stage in @('Recheck', 'Write')) {
+            foreach ($stream in @('Error', 'Output', 'Warning', 'Verbose', 'Debug', 'Information')) {
+                $state = Join-Path $root ('clear-failed-stream-' + $stage.ToLowerInvariant() + '-' + $stream.ToLowerInvariant())
+                Initialize-CcodStateFixture -StateRoot $state
+                $path = Join-Path $state 'verified-packages.json'
+                $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+                Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion=1; packages=[ordered]@{ $key=(New-CcodVerifiedRecord) } })
+                $before = [IO.File]::ReadAllBytes($path)
+                $secretTarget = Join-Path $state ('SECRET_STREAM_TARGET_' + $stage + '_' + $stream + '.txt')
+                $secretMessage = 'SECRET_STREAM_MESSAGE_' + $stage + '_' + $stream + '_' + $secretTarget
+                $expectedId = if ($stage -ceq 'Recheck') { 'CCOD_FAILED_ATTEMPT_RECHECK_FAILED' } else { 'CCOD_FAILED_ATTEMPT_WRITE_FAILED' }
+                $expectedMessage = if ($stage -ceq 'Recheck') { 'Failed package attempt precommit recheck failed' } else { 'Failed package attempt atomic write failed' }
+                $calls = [pscustomobject]@{ Recheck=0; Write=0 }
+                $emit = {
+                    switch -CaseSensitive ($stream) {
+                        'Error' { Write-Error -Message $secretMessage -ErrorId $expectedId -TargetObject $secretTarget -ErrorAction Continue }
+                        'Output' { Write-Output ([pscustomobject]@{ Message=$secretMessage; TargetObject=$secretTarget; FullyQualifiedErrorId=$expectedId }) }
+                        'Warning' { Write-Warning $secretMessage }
+                        'Verbose' { Write-Verbose $secretMessage -Verbose }
+                        'Debug' { $DebugPreference='Continue'; Write-Debug $secretMessage }
+                        'Information' { Write-Information $secretMessage -InformationAction Continue }
+                    }
+                }.GetNewClosure()
+                $recheck = {
+                    param($VerifiedPath, $SuppressionKey)
+                    $calls.Recheck++
+                    if ($stage -ceq 'Recheck') { & $emit }
+                }.GetNewClosure()
+                $writer = {
+                    param($VerifiedPath, $Value)
+                    $calls.Write++
+                    if ($stage -ceq 'Write') { & $emit }
+                }.GetNewClosure()
+
+                $receipt = $null
+                $caught = $null
+                try {
+                    $receipt = Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z' -Adapters @{ BeforeFailedPackageAttemptRecheck=$recheck; WriteAtomicJson=$writer }
+                } catch {
+                    $caught = $_
+                }
+
+                Assert-CcodEqual $null $receipt "$stage $stream emission returns no Cleared receipt"
+                Assert-CcodTrue ($null -ne $caught) "$stage $stream emission throws"
+                Assert-CcodEqual $expectedId (([string]$caught.FullyQualifiedErrorId -split ',')[0]) "$stage $stream emission uses the exact stage ID"
+                Assert-CcodEqual $expectedMessage $caught.Exception.Message "$stage $stream emission uses the fixed generic message"
+                Assert-CcodEqual $null $caught.TargetObject "$stage $stream emission has null TargetObject"
+                $rendered = $caught | Out-String
+                Assert-CcodTrue (-not $rendered.Contains($secretMessage)) "$stage $stream emission does not expose the secret message"
+                Assert-CcodTrue (-not $rendered.Contains($secretTarget)) "$stage $stream emission does not expose the secret target"
+                Assert-CcodEqual 1 $calls.Recheck "$stage $stream path invokes recheck once"
+                Assert-CcodEqual ($(if ($stage -ceq 'Write') { 1 } else { 0 })) $calls.Write "$stage $stream path never advances past an emitting recheck"
+                Assert-CcodEqual ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) "$stage $stream emission leaves exact prior target bytes"
+                Assert-CcodEqual 1 @((Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).packages.PSObject.Properties).Count "$stage $stream emission leaves a complete parseable store"
+            }
+        }
+    }
+
     Invoke-CcodTest 'updates each consent without changing the other consent or verified candidates' {
         $state = Join-Path $root 'setters'
         Initialize-CcodStateFixture -StateRoot $state
