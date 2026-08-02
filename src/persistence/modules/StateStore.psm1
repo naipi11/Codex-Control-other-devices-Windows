@@ -102,9 +102,13 @@ function Assert-CcodAbsoluteNodeCandidates {
 
     $adapters = Get-CcodStateAdapters -Adapters $Adapters
     foreach ($candidate in $NodeCandidates) {
+        $normalized = $null
+        try { $normalized = [IO.Path]::GetFullPath($candidate) } catch { }
         if ([string]::IsNullOrWhiteSpace($candidate) -or
             $candidate -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+\\)' -or
-            [IO.Path]::GetFileName([IO.Path]::GetFullPath($candidate)) -cne 'node.exe' -or
+            $null -eq $normalized -or
+            $candidate -cne $normalized -or
+            [IO.Path]::GetFileName($normalized) -cne 'node.exe' -or
             -not (& $adapters.TestVerifiedNodeCandidate $candidate)) {
             Throw-CcodStateError 'CCOD_NODE_CANDIDATE_INVALID' 'Node candidates must be installer-verified absolute paths' $candidate
         }
@@ -178,7 +182,12 @@ function Assert-CcodStatusShape {
     foreach ($name in @('sessionId', 'runtimeId', 'sessionState')) {
         if ($Status.session.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($Status.session.$name)) { Throw-CcodStateError 'CCOD_STATUS_INVALID' "Status $name must be a non-empty string" $Status }
     }
-    if ($null -eq $Status.session.codex) { return }
+    if ($Status.session.sessionState -notin @('Ordinary', 'Active', 'Transitioning', 'Recovering', 'Error', 'Paused')) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status sessionState is invalid' $Status }
+    if ($null -eq $Status.session.codex) {
+        if ($Status.session.sessionState -eq 'Active') { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Active status requires a validated Codex identity' $Status }
+        return
+    }
+    if ($Status.session.sessionState -ne 'Active') { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'A validated Codex identity requires Active sessionState' $Status }
     if ($Status.session.codex -isnot [pscustomobject] -and $Status.session.codex -isnot [Collections.IDictionary]) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status codex must be null or an object' $Status }
     $codexFields = @('pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainPort', 'rendererPort', 'mainProbe', 'rendererProbe')
     Assert-CcodExactProperties -Value $Status.session.codex -Expected $codexFields -ErrorId 'CCOD_STATUS_INVALID' -Kind 'Status codex'
@@ -191,6 +200,7 @@ function Assert-CcodStatusShape {
     Assert-CcodTcpPort -Value $Status.session.codex.mainPort -ErrorId 'CCOD_STATUS_INVALID' -Name 'codex.mainPort'
     Assert-CcodTcpPort -Value $Status.session.codex.rendererPort -ErrorId 'CCOD_STATUS_INVALID' -Name 'codex.rendererPort'
     if ($Status.session.codex.mainPort -eq $Status.session.codex.rendererPort) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status ports must be distinct' $Status }
+    if ($Status.session.codex.mainProbe -cne 'Closed' -or $Status.session.codex.rendererProbe -cne 'BridgeValid') { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Active status must confirm a closed main Inspector and valid renderer bridge' $Status }
 }
 
 function Assert-CcodVerifiedPackagesShape {
@@ -211,6 +221,11 @@ function Assert-CcodVerifiedPackagesShape {
         }
         if ($record.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or $record.staticClassification -notin @('CandidateCompatible', 'NativeModulePresent', 'UnknownOrIncompatible', 'VerifiedCompatible') -or $record.dynamicOutcome -notin @('Succeeded', 'Failed') -or $record.probeState -notin @('Valid', 'Invalid', 'NotRun')) {
             Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified record has an invalid classification or outcome' $record
+        }
+        if (($record.dynamicOutcome -eq 'Succeeded' -and $record.probeState -ne 'Valid') -or
+            ($record.dynamicOutcome -eq 'Failed' -and $record.probeState -notin @('Invalid', 'NotRun')) -or
+            ($record.staticClassification -in @('NativeModulePresent', 'UnknownOrIncompatible') -and $record.dynamicOutcome -eq 'Succeeded')) {
+            Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified record has an invalid classification, outcome, or probe pairing' $record
         }
         Assert-CcodUtcTimestamp -Value $record.confirmedAtUtc -ErrorId 'CCOD_VERIFIED_PACKAGES_INVALID' -Name 'confirmedAtUtc'
         if ($key -cne (Get-CcodSuppressionKey -PackageFullName $record.packageFullName -AppAsarSha256 $record.appAsarSha256 -RuntimeId $record.runtimeId)) { Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package key does not match record identity' $record }
@@ -327,6 +342,24 @@ function Read-CcodStatus {
     return Read-CcodTypedState -StateRoot $StateRoot -Leaf 'status.json' -Kind 'status' -Validator ${function:Assert-CcodStatusShape} -Adapters (Get-CcodStateAdapters -Adapters $Adapters)
 }
 
+function Assert-CcodLiveProbeShape {
+    param([Parameter(Mandatory)]$LiveProbeResult)
+
+    foreach ($name in @('Valid', 'runtimeId', 'pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainPort', 'rendererPort', 'mainProbe', 'rendererProbe')) {
+        if (-not (Test-CcodStateProperty -Value $LiveProbeResult -Name $name)) { Throw-CcodStateError 'CCOD_LIVE_PROBE_INVALID' "Live probe is missing $name" $LiveProbeResult }
+    }
+    if ($LiveProbeResult.Valid -isnot [bool] -or $LiveProbeResult.Valid -ne $true) { Throw-CcodStateError 'CCOD_LIVE_PROBE_INVALID' 'Live probe Valid must be boolean true' $LiveProbeResult }
+    foreach ($name in @('runtimeId', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainProbe', 'rendererProbe')) {
+        if ($LiveProbeResult.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($LiveProbeResult.$name)) { Throw-CcodStateError 'CCOD_LIVE_PROBE_INVALID' "Live probe $name must be a non-empty string" $LiveProbeResult }
+    }
+    Assert-CcodPositiveInteger -Value $LiveProbeResult.pid -ErrorId 'CCOD_LIVE_PROBE_INVALID' -Name 'live probe pid'
+    Assert-CcodUtcTimestamp -Value $LiveProbeResult.creationTimeUtc -ErrorId 'CCOD_LIVE_PROBE_INVALID' -Name 'live probe creationTimeUtc'
+    if ($LiveProbeResult.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$') { Throw-CcodStateError 'CCOD_LIVE_PROBE_INVALID' 'Live probe appAsarSha256 must be lowercase SHA-256' $LiveProbeResult }
+    Assert-CcodTcpPort -Value $LiveProbeResult.mainPort -ErrorId 'CCOD_LIVE_PROBE_INVALID' -Name 'live probe mainPort'
+    Assert-CcodTcpPort -Value $LiveProbeResult.rendererPort -ErrorId 'CCOD_LIVE_PROBE_INVALID' -Name 'live probe rendererPort'
+    if ($LiveProbeResult.mainPort -eq $LiveProbeResult.rendererPort -or $LiveProbeResult.mainProbe -cne 'Closed' -or $LiveProbeResult.rendererProbe -cne 'BridgeValid') { Throw-CcodStateError 'CCOD_LIVE_PROBE_INVALID' 'Live probe ports and probe states are invalid' $LiveProbeResult }
+}
+
 function Write-CcodStatus {
     [CmdletBinding()]
     param(
@@ -339,15 +372,17 @@ function Write-CcodStatus {
     $adapters = Get-CcodStateAdapters -Adapters $Adapters
     Assert-CcodStatusShape -Status $Status -Adapters $adapters
     if ($null -ne $Status.session) {
-        if ($null -eq $LiveProbeResult -or -not (Test-CcodStateProperty -Value $LiveProbeResult -Name 'Valid') -or $LiveProbeResult.Valid -ne $true) {
+        if ($null -eq $LiveProbeResult) {
             Throw-CcodStateError 'CCOD_LIVE_PROBE_REQUIRED' 'Status may only be rebuilt from a supplied successful live probe result' $LiveProbeResult
         }
-        if (-not (Test-CcodStateProperty -Value $LiveProbeResult -Name 'runtimeId') -or $LiveProbeResult.runtimeId -ne $Status.session.runtimeId) {
+        Assert-CcodLiveProbeShape -LiveProbeResult $LiveProbeResult
+        if ($LiveProbeResult.runtimeId -cne $Status.session.runtimeId) {
             Throw-CcodStateError 'CCOD_LIVE_PROBE_MISMATCH' 'Live probe does not match status runtimeId' $LiveProbeResult
         }
         if ($null -eq $Status.session.codex) { Throw-CcodStateError 'CCOD_LIVE_PROBE_REQUIRED' 'A non-empty status write requires Codex identity and probe evidence' $Status }
         foreach ($name in @('pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainPort', 'rendererPort', 'mainProbe', 'rendererProbe')) {
-            if (-not (Test-CcodStateProperty -Value $LiveProbeResult -Name $name) -or $LiveProbeResult.$name -ne $Status.session.codex.$name) {
+            if (($LiveProbeResult.$name -is [string] -and $LiveProbeResult.$name -cne $Status.session.codex.$name) -or
+                ($LiveProbeResult.$name -isnot [string] -and $LiveProbeResult.$name -ne $Status.session.codex.$name)) {
                 Throw-CcodStateError 'CCOD_LIVE_PROBE_MISMATCH' "Live probe does not match status $name" $LiveProbeResult
             }
         }

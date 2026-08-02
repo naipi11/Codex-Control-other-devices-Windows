@@ -13,6 +13,12 @@ function New-CcodStateTestAdapters {
     }
 }
 
+function New-CcodPermissiveNodeTestAdapters {
+    $adapters = New-CcodStateTestAdapters
+    $adapters.TestVerifiedNodeCandidate = { param($Path) $true }
+    return $adapters
+}
+
 function Initialize-CcodStateFixture([string]$StateRoot) {
     Initialize-CcodState -StateRoot $StateRoot -NodeCandidates @('C:\Node\node.exe') -CandidateCompatibleOptIn $true -Adapters (New-CcodStateTestAdapters) | Out-Null
 }
@@ -69,8 +75,8 @@ function New-CcodStatusSession {
             appAsarSha256 = ('a' * 64)
             mainPort = 41001
             rendererPort = 41002
-            mainProbe = 'Valid'
-            rendererProbe = 'Valid'
+            mainProbe = 'Closed'
+            rendererProbe = 'BridgeValid'
         }
     }
 }
@@ -164,6 +170,76 @@ try {
         Assert-CcodThrows { Write-CcodStatus -StateRoot $state -Status $status -LiveProbeResult $mismatchedProbe } 'CCOD_LIVE_PROBE_MISMATCH'
         Write-CcodStatus -StateRoot $state -Status $status -LiveProbeResult (New-CcodLiveProbeFixture) | Out-Null
         Assert-CcodEqual 'Active' (Read-CcodStatus -StateRoot $state -Adapters (New-CcodStateTestAdapters)).session.sessionState 'a matching complete live probe permits status reconstruction'
+    }
+
+    Invoke-CcodTest 'quarantines invalid status and verified semantic combinations' {
+        $statusCases = @(
+            [pscustomobject]@{ Name = 'unknown state'; Mutate = { param($status) $status.session.sessionState = 'Whatever' } },
+            [pscustomobject]@{ Name = 'codex ordinary'; Mutate = { param($status) $status.session.sessionState = 'Ordinary' } },
+            [pscustomobject]@{ Name = 'active without codex'; Mutate = { param($status) $status.session.codex = $null } },
+            [pscustomobject]@{ Name = 'open main inspector'; Mutate = { param($status) $status.session.codex.mainProbe = 'Open' } },
+            [pscustomobject]@{ Name = 'invalid renderer bridge'; Mutate = { param($status) $status.session.codex.rendererProbe = 'Valid' } }
+        )
+        foreach ($case in $statusCases) {
+            $state = Join-Path $root ('status-semantic-' + $case.Name.Replace(' ', '-'))
+            Initialize-CcodStateFixture -StateRoot $state
+            $status = New-CcodStatusFixture
+            & $case.Mutate $status
+            Write-CcodStateJson -StateRoot $state -Leaf 'status.json' -Value $status
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodEqual $true $loaded.StatusRebuildRequired "$($case.Name) status is not adopted"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'status.json.corrupt.*').Count "$($case.Name) status is quarantined"
+        }
+        $verifiedCases = @(
+            [pscustomobject]@{ Name = 'success invalid probe'; Static = 'CandidateCompatible'; Outcome = 'Succeeded'; Probe = 'Invalid' },
+            [pscustomobject]@{ Name = 'failure valid probe'; Static = 'CandidateCompatible'; Outcome = 'Failed'; Probe = 'Valid' },
+            [pscustomobject]@{ Name = 'native success'; Static = 'NativeModulePresent'; Outcome = 'Succeeded'; Probe = 'Valid' },
+            [pscustomobject]@{ Name = 'unknown success'; Static = 'UnknownOrIncompatible'; Outcome = 'Succeeded'; Probe = 'Valid' }
+        )
+        foreach ($case in $verifiedCases) {
+            $state = Join-Path $root ('verified-semantic-' + $case.Name.Replace(' ', '-'))
+            Initialize-CcodStateFixture -StateRoot $state
+            $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+            $record = New-CcodVerifiedRecord
+            $record.staticClassification = $case.Static
+            $record.dynamicOutcome = $case.Outcome
+            $record.probeState = $case.Probe
+            Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion = 1; packages = [ordered]@{ $key = $record } })
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodEqual $false $loaded.AutomaticCandidateTrialsAllowed "$($case.Name) cannot authorize another trial"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'verified-packages.json.corrupt.*').Count "$($case.Name) verified record is quarantined"
+        }
+    }
+
+    Invoke-CcodTest 'rejects coercive live-probe types and case changes before writing status' {
+        $state = Join-Path $root 'live-probe-types'
+        Initialize-CcodStateFixture -StateRoot $state
+        $badCases = @(
+            [pscustomobject]@{ Name = 'numeric valid'; Field = 'Valid'; Value = 1; ErrorId = 'CCOD_LIVE_PROBE_INVALID' },
+            [pscustomobject]@{ Name = 'string valid'; Field = 'Valid'; Value = 'True'; ErrorId = 'CCOD_LIVE_PROBE_INVALID' },
+            [pscustomobject]@{ Name = 'string PID'; Field = 'pid'; Value = '22'; ErrorId = 'CCOD_LIVE_PROBE_INVALID' },
+            [pscustomobject]@{ Name = 'string port'; Field = 'rendererPort'; Value = '41002'; ErrorId = 'CCOD_LIVE_PROBE_INVALID' },
+            [pscustomobject]@{ Name = 'case package'; Field = 'packageFullName'; Value = 'PKG'; ErrorId = 'CCOD_LIVE_PROBE_MISMATCH' },
+            [pscustomobject]@{ Name = 'case hash'; Field = 'appAsarSha256'; Value = ('A' * 64); ErrorId = 'CCOD_LIVE_PROBE_INVALID' },
+            [pscustomobject]@{ Name = 'case runtime'; Field = 'runtimeId'; Value = 'RUNTIME-1'; ErrorId = 'CCOD_LIVE_PROBE_MISMATCH' }
+        )
+        foreach ($case in $badCases) {
+            $probe = New-CcodLiveProbeFixture
+            $probe.($case.Field) = $case.Value
+            Assert-CcodThrows { Write-CcodStatus -StateRoot $state -Status (New-CcodStatusFixture) -LiveProbeResult $probe } $case.ErrorId
+        }
+        Assert-CcodEqual $null (Read-CcodStatus -StateRoot $state -Adapters (New-CcodStateTestAdapters)).session 'invalid probes leave the existing empty status intact'
+    }
+
+    Invoke-CcodTest 'quarantines noncanonical Node candidate paths even when installer evidence accepts them' {
+        foreach ($candidate in @('C:\Node\.\node.exe', 'C:\Node\child\..\node.exe', 'C:\Node\\node.exe')) {
+            $state = Join-Path $root ('node-canonical-' + [Guid]::NewGuid().ToString('N'))
+            Initialize-CcodStateFixture -StateRoot $state
+            Write-CcodStateJson -StateRoot $state -Leaf 'settings.json' -Value ([ordered]@{ schemaVersion = 1; automationEnabled = $true; candidateCompatibleOptIn = $true; nodeCandidates = @($candidate); updatedAtUtc = '2030-02-03T04:05:06.0000000Z' })
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodPermissiveNodeTestAdapters)
+            Assert-CcodEqual $false $loaded.AutomationEnabled "$candidate cannot reauthorize automation"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'settings.json.corrupt.*').Count "$candidate settings evidence is quarantined"
+        }
     }
 
     Invoke-CcodTest 'quarantines every invalid transition shape and disables all actions' {
