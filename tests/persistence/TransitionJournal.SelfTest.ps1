@@ -106,6 +106,7 @@ function New-CcodObserved {
         [string]$StopObservation = 'NotApplicable',
         [string]$RecoveryObservation = 'NotApplicable',
         [string]$SpecialObservation = 'NoCandidate',
+        [string]$PortObservation = 'NotApplicable',
         [object[]]$SpecialCandidates = @(),
         [object[]]$OrdinaryCandidates = @()
     )
@@ -114,6 +115,7 @@ function New-CcodObserved {
         StopObservation = $StopObservation
         RecoveryObservation = $RecoveryObservation
         SpecialObservation = $SpecialObservation
+        PortObservation = $PortObservation
         SpecialCandidates = @($SpecialCandidates)
         OrdinaryCandidates = @($OrdinaryCandidates)
     }
@@ -385,7 +387,7 @@ Invoke-CcodTest 'accepts and preserves Task6 top-level ParentPid snapshots acros
             $specialDecision = Get-CcodReplayDecision -Transition (New-CcodTransitionForStage -Stage OrdinaryStopped -WithPorts) `
                 -Observed (New-CcodObserved -SpecialObservation Confirmed -SpecialCandidates @(
                     (New-CcodSpecialFact -Process $special -Validation Valid)
-                ))
+                ) -PortObservation Indeterminate)
         } catch { $failures.Add("special replay: $($_.FullyQualifiedErrorId)") }
 
         $recovered = New-CcodTransitionForStage -Stage RecoveryLaunchRequested
@@ -607,7 +609,7 @@ Invoke-CcodTest 'distinguishes safe absence from incomplete ambiguous and confli
     foreach ($stage in @('OrdinaryStopped','SpecialLaunchRequested')) {
         $transition = New-CcodTransitionForStage -Stage $stage -WithPorts
         foreach ($case in $cases) {
-            $observed = New-CcodObserved -SpecialObservation $case.Special -SpecialCandidates $case.Facts
+            $observed = New-CcodObserved -SpecialObservation $case.Special -SpecialCandidates $case.Facts -PortObservation Indeterminate
             $decision = Get-CcodReplayDecision -Transition $transition -Observed $observed
             Assert-CcodEqual $case.Action $decision.Action "$stage/$($case.Name) action"
             Assert-CcodEqual $case.Reason $decision.Reason "$stage/$($case.Name) stable reason"
@@ -643,7 +645,7 @@ Invoke-CcodTest 'requires the exact journal special identity at SpecialStarted a
         @{ Name='port-conflict-invalid'; Special='PortConflict'; Facts=@($exactInvalid); Action='SuppressAndWaitForUser'; Reason='JournalSpecialPortConflict'; Suppress=$true; Adopt=$null }
     )
     foreach ($case in $startedCases) {
-        $decision = Get-CcodReplayDecision -Transition $specialStarted -Observed (New-CcodObserved -SpecialObservation $case.Special -SpecialCandidates $case.Facts)
+        $decision = Get-CcodReplayDecision -Transition $specialStarted -Observed (New-CcodObserved -SpecialObservation $case.Special -SpecialCandidates $case.Facts -PortObservation Indeterminate)
         Assert-CcodEqual $case.Action $decision.Action "SpecialStarted/$($case.Name) action"
         Assert-CcodEqual $case.Reason $decision.Reason "SpecialStarted/$($case.Name) reason"
         Assert-CcodEqual $case.Suppress $decision.MustSuppress "SpecialStarted/$($case.Name) suppression"
@@ -661,7 +663,7 @@ Invoke-CcodTest 'requires the exact journal special identity at SpecialStarted a
         @{ Name='port-conflict'; Special='PortConflict'; Facts=@(); Action='SuppressAndWaitForUser'; Reason='ValidatedSpecialContradictory'; Suppress=$true; Adopt=$null }
     )
     foreach ($case in $validatedCases) {
-        $decision = Get-CcodReplayDecision -Transition $validated -Observed (New-CcodObserved -SpecialObservation $case.Special -SpecialCandidates $case.Facts)
+        $decision = Get-CcodReplayDecision -Transition $validated -Observed (New-CcodObserved -SpecialObservation $case.Special -SpecialCandidates $case.Facts -PortObservation Indeterminate)
         Assert-CcodEqual $case.Action $decision.Action "Validated/$($case.Name) action"
         Assert-CcodEqual $case.Reason $decision.Reason "Validated/$($case.Name) reason"
         Assert-CcodEqual $case.Suppress $decision.MustSuppress "Validated/$($case.Name) suppression"
@@ -696,7 +698,7 @@ Invoke-CcodTest 'observes recovery once adopts ordinary roots and never erases i
 
     $withSpecial = New-CcodTransitionForStage -Stage RecoveryLaunchRequested -WithPorts -WithSpecial
     $exact = New-CcodSpecialFact -Process (New-CcodJournalSnapshot -ProcessId 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002) -Evidence PersistedIdentity -Validation Valid
-    $exactDecision = Get-CcodReplayDecision -Transition $withSpecial -Observed (New-CcodObserved -RecoveryObservation NotStarted -SpecialObservation Confirmed -SpecialCandidates @($exact))
+    $exactDecision = Get-CcodReplayDecision -Transition $withSpecial -Observed (New-CcodObserved -RecoveryObservation NotStarted -SpecialObservation Confirmed -SpecialCandidates @($exact) -PortObservation Indeterminate)
     Assert-CcodEqual 'TerminateSpecialThenRecover' $exactDecision.Action 'exact journal special is terminated before recovery'
     Assert-CcodEqual 'RecoverySpecialStillAlive' $exactDecision.Reason 'exact live special has a stable recovery reason'
     Assert-CcodEqual 201 $exactDecision.AdoptedProcess.Pid 'termination action carries only the exact journal special snapshot'
@@ -710,7 +712,7 @@ Invoke-CcodTest 'observes recovery once adopts ordinary roots and never erases i
         @{ Name='ambiguous-invalid'; Special='Ambiguous'; Facts=@($exactInvalid,$mismatch); Action='SuppressAndWaitForUser'; Reason='RecoverySpecialAmbiguous'; Adopt=$null }
     )
     foreach ($case in $specialOutcomeCases) {
-        $decision = Get-CcodReplayDecision -Transition $withSpecial -Observed (New-CcodObserved -RecoveryObservation NotStarted -SpecialObservation $case.Special -SpecialCandidates $case.Facts)
+        $decision = Get-CcodReplayDecision -Transition $withSpecial -Observed (New-CcodObserved -RecoveryObservation NotStarted -SpecialObservation $case.Special -SpecialCandidates $case.Facts -PortObservation Indeterminate)
         Assert-CcodEqual $case.Action $decision.Action "recovery/$($case.Name) action is dominated by the Task6 outcome"
         Assert-CcodEqual $case.Reason $decision.Reason "recovery/$($case.Name) stable reason"
         if ($null -eq $case.Adopt) { Assert-CcodEqual $null $decision.AdoptedProcess "recovery/$($case.Name) never selects incomplete evidence" }
@@ -1160,5 +1162,166 @@ Invoke-CcodTest 'resumes a durable ArchiveFailed receipt as Completed WriteFaile
         Assert-CcodEqual $null (Read-CcodTransition -Path $path) 'retry clears after durable failed receipt'
     } finally {
         if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
+Invoke-CcodTest 'advances exact durable close edges with special injection and fixed fifteen fields' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-close-edges-' + [guid]::NewGuid().ToString('N'))
+    $special = New-CcodJournalSnapshot -ProcessId 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
+    try {
+        $ordinaryPath = Join-Path $root 'ordinary.json'
+        $ordinary = New-CcodTransitionForStage -Stage IntentWritten
+        $ordinary.mainPort = $null
+        $ordinary.rendererPort = $null
+        Write-CcodJournalJson -Path $ordinaryPath -Value ([ordered]@{ schemaVersion=1; activeTransaction=$ordinary })
+        $ordinaryRequested = Set-CcodTransitionStage -Path $ordinaryPath -TransactionId $ordinary.transactionId -ExpectedStage IntentWritten -NewStage CloseRequested -Adapters $fixedAdapters
+        Assert-CcodEqual 'CloseRequested' $ordinaryRequested.stage 'ordinary close request is durable before stop'
+        Assert-CcodEqual 15 @($ordinaryRequested.PSObject.Properties).Count 'ordinary close adds no transition field'
+        Assert-CcodEqual $null $ordinaryRequested.specialPid 'ordinary close preserves source-only target'
+        $ordinaryClosed = Set-CcodTransitionStage -Path $ordinaryPath -TransactionId $ordinary.transactionId -ExpectedStage CloseRequested -NewStage Closed -Adapters $fixedAdapters
+        Assert-CcodEqual 'Closed' $ordinaryClosed.stage 'ordinary close reaches terminal Closed'
+
+        $specialPath = Join-Path $root 'special.json'
+        $specialIntent = New-CcodTransitionForStage -Stage IntentWritten -Manual -WithPorts
+        Write-CcodJournalJson -Path $specialPath -Value ([ordered]@{ schemaVersion=1; activeTransaction=$specialIntent })
+        $specialRequested = Set-CcodTransitionStage -Path $specialPath -TransactionId $specialIntent.transactionId -ExpectedStage IntentWritten -NewStage CloseRequested -SpecialIdentity $special -Adapters $fixedAdapters
+        Assert-CcodEqual 201 $specialRequested.specialPid 'special close injects exact existing identity on the durable close edge'
+        Assert-CcodEqual 15 @($specialRequested.PSObject.Properties).Count 'special close adds no transition field'
+        $specialClosed = Set-CcodTransitionStage -Path $specialPath -TransactionId $specialIntent.transactionId -ExpectedStage CloseRequested -NewStage Closed -Adapters $fixedAdapters
+        Assert-CcodEqual 201 $specialClosed.specialPid 'Closed preserves the exact special identity'
+
+        $illegalPath = Join-Path $root 'illegal.json'
+        Write-CcodJournalJson -Path $illegalPath -Value ([ordered]@{ schemaVersion=1; activeTransaction=(New-CcodTransitionForStage -Stage IntentWritten -Manual -WithPorts) })
+        Assert-CcodThrows {
+            Set-CcodTransitionStage -Path $illegalPath -TransactionId $specialIntent.transactionId -ExpectedStage IntentWritten -NewStage StopRequested -SpecialIdentity $special -Adapters $fixedAdapters
+        } 'CCOD_TRANSITION_STAGE_INVALID'
+    } finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
+Invoke-CcodTest 'decides close replay from exact root and explicit port observation without recovery launch' {
+    $specialProcess = New-CcodJournalSnapshot -ProcessId 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
+    $specialFact = New-CcodSpecialFact -Process $specialProcess -Evidence PersistedIdentity -Validation Indeterminate
+    $specialClose = New-CcodTransitionForStage -Stage CloseRequested -Manual -WithPorts -WithSpecial
+    $liveSpecial = Get-CcodReplayDecision -Transition $specialClose -Observed (New-CcodObserved -StopObservation CloseTreePresent -SpecialObservation Confirmed -SpecialCandidates @($specialFact) -PortObservation Open)
+    Assert-CcodEqual 'CloseRecordedTree' $liveSpecial.Action 'exact recorded special tree is closed even when renderer validation is broken'
+    Assert-CcodEqual 201 $liveSpecial.AdoptedProcess.Pid 'close action carries only the exact recorded root'
+    Assert-CcodEqual $false $liveSpecial.MustSuppress 'exact close target does not itself imply recovery suppression'
+
+    $coldSpecialGone = Get-CcodReplayDecision -Transition $specialClose -Observed (New-CcodObserved -StopObservation CloseTreeIndeterminate -SpecialObservation NoCandidate -PortObservation BothRefused)
+    Assert-CcodEqual 'SuppressAndWaitForUser' $coldSpecialGone.Action 'cold replay cannot promote a missing root to complete-tree absence'
+    $specialGone = Get-CcodReplayDecision -Transition $specialClose -Observed (New-CcodObserved -StopObservation CloseTreeAbsent -SpecialObservation NoCandidate -PortObservation BothRefused)
+    Assert-CcodEqual 'CompleteClosed' $specialGone.Action 'retained verified special tree plus two explicit refusals completes close'
+    Assert-CcodEqual $null $specialGone.AdoptedProcess 'completed close performs no process action'
+
+    $ordinary = New-CcodJournalSnapshot -ProcessId 100 -CreationTimeUtc '2030-02-03T04:00:00.0000000Z' -Mode Ordinary
+    $ordinaryClose = New-CcodTransitionForStage -Stage CloseRequested
+    $ordinaryClose.mainPort = $null
+    $ordinaryClose.rendererPort = $null
+    $liveOrdinary = Get-CcodReplayDecision -Transition $ordinaryClose -Observed (New-CcodObserved -StopObservation CloseTreePresent -OrdinaryCandidates @($ordinary) -PortObservation NotApplicable)
+    Assert-CcodEqual 'CloseRecordedTree' $liveOrdinary.Action 'exact recorded ordinary root is closed without a port requirement'
+    $coldOrdinaryGone = Get-CcodReplayDecision -Transition $ordinaryClose -Observed (New-CcodObserved -StopObservation CloseTreeIndeterminate -PortObservation NotApplicable)
+    Assert-CcodEqual 'SuppressAndWaitForUser' $coldOrdinaryGone.Action 'cold ordinary close remains indeterminate when the recorded root is already gone'
+    $ordinaryGone = Get-CcodReplayDecision -Transition $ordinaryClose -Observed (New-CcodObserved -StopObservation CloseTreeAbsent -PortObservation NotApplicable)
+    Assert-CcodEqual 'CompleteClosed' $ordinaryGone.Action 'retained verified ordinary target completes when ports are inapplicable'
+
+    foreach ($case in @(
+        @{ Name='open-port'; Observed=(New-CcodObserved -StopObservation CloseTreeIndeterminate -PortObservation Open) },
+        @{ Name='indeterminate-port'; Observed=(New-CcodObserved -StopObservation CloseTreeIndeterminate -PortObservation Indeterminate) },
+        @{ Name='incomplete-tree'; Observed=(New-CcodObserved -StopObservation CloseTreeIndeterminate -SpecialObservation Incomplete -PortObservation BothRefused) },
+        @{ Name='mismatched-tree'; Observed=(New-CcodObserved -StopObservation CloseTreeIndeterminate -SpecialObservation Confirmed -SpecialCandidates @((New-CcodSpecialFact -Process (New-CcodJournalSnapshot -ProcessId 202 -CreationTimeUtc '2030-02-03T04:05:08.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002))) -PortObservation Open) }
+    )) {
+        $decision = Get-CcodReplayDecision -Transition $specialClose -Observed $case.Observed
+        Assert-CcodEqual 'SuppressAndWaitForUser' $decision.Action "$($case.Name) never reinterprets unsafe close evidence as absence"
+    }
+
+    $closed = Copy-CcodJournalValue $specialClose
+    $closed.stage = 'Closed'
+    $terminal = Get-CcodReplayDecision -Transition $closed -Observed (New-CcodObserved -StopObservation CloseTreeAbsent -SpecialObservation NoCandidate -PortObservation Indeterminate)
+    Assert-CcodEqual 'CompleteClosed' $terminal.Action 'durable Closed performs archival only'
+    Assert-CcodTrue ($terminal.Action -cnotmatch 'Recover|Launch') 'close replay action set never requests ordinary recovery'
+}
+
+Invoke-CcodTest 'enforces the close observed-fact XOR matrix without weakening normal replay' {
+    $specialClose = New-CcodTransitionForStage -Stage CloseRequested -Manual -WithPorts -WithSpecial
+    $specialFact = New-CcodSpecialFact -Process (New-CcodJournalSnapshot -ProcessId 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002) -Evidence PersistedIdentity -Validation Indeterminate
+    $ordinaryClose = New-CcodTransitionForStage -Stage CloseRequested
+    $ordinary = New-CcodJournalSnapshot
+    $normal = New-CcodTransitionForStage -Stage StopRequested
+
+    foreach ($case in @(
+        @{ Name='close uses normal stop enum'; Transition=$specialClose; Observed=(New-CcodObserved -StopObservation NotApplicable -PortObservation BothRefused) },
+        @{ Name='present lacks exact target'; Transition=$specialClose; Observed=(New-CcodObserved -StopObservation CloseTreePresent -PortObservation Open) },
+        @{ Name='absent carries a target'; Transition=$specialClose; Observed=(New-CcodObserved -StopObservation CloseTreeAbsent -SpecialObservation Confirmed -SpecialCandidates @($specialFact) -PortObservation BothRefused) },
+        @{ Name='special close carries ordinary candidate'; Transition=$specialClose; Observed=(New-CcodObserved -StopObservation CloseTreePresent -OrdinaryCandidates @($ordinary) -PortObservation Open) },
+        @{ Name='ordinary close carries special candidate'; Transition=$ordinaryClose; Observed=(New-CcodObserved -StopObservation CloseTreePresent -SpecialObservation Confirmed -SpecialCandidates @($specialFact) -PortObservation NotApplicable) },
+        @{ Name='normal replay uses close stop enum'; Transition=$normal; Observed=(New-CcodObserved -StopObservation CloseTreeIndeterminate) },
+        @{ Name='normal replay uses close port evidence with null pair'; Transition=$normal; Observed=(New-CcodObserved -PortObservation BothRefused) }
+    )) {
+        Assert-CcodThrows { Get-CcodReplayDecision -Transition $case.Transition -Observed $case.Observed } 'CCOD_REPLAY_INPUT_INVALID'
+    }
+
+    $legalNormal = Get-CcodReplayDecision -Transition $normal -Observed (New-CcodObserved -StopObservation NotStarted)
+    Assert-CcodEqual 'ObserveStopRequested' $legalNormal.Action 'normal replay retains its existing observed-fact domain'
+
+    $normalWithPorts = New-CcodTransitionForStage -Stage SpecialStarted -WithPorts -WithSpecial
+    $normalFact = New-CcodSpecialFact -Process (New-CcodJournalSnapshot -ProcessId 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002) -Evidence PersistedIdentity -Validation Valid
+    $legalPairedNormal = Get-CcodReplayDecision -Transition $normalWithPorts -Observed (New-CcodObserved -SpecialObservation Confirmed -SpecialCandidates @($normalFact) -PortObservation Open)
+    Assert-CcodEqual 'AdoptValidatedSpecial' $legalPairedNormal.Action 'paired normal replay validates then ignores the semantically valid port observation'
+
+    foreach ($port in @('Open','BothRefused','Indeterminate')) {
+        $closed = Copy-CcodJournalValue $specialClose
+        $closed.stage = 'Closed'
+        $decision = Get-CcodReplayDecision -Transition $closed -Observed (New-CcodObserved -StopObservation CloseTreeAbsent -PortObservation $port)
+        Assert-CcodEqual 'CompleteClosed' $decision.Action "Closed archives with paired-port observation $port"
+    }
+}
+
+Invoke-CcodTest 'completes and deduplicates Closed through the existing durable receipt windows' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-close-completion-' + [guid]::NewGuid().ToString('N'))
+    $completedUtc = [DateTime]::Parse('2030-02-03T04:06:00.0000000Z').ToUniversalTime()
+    try {
+        $path = Join-Path $root 'state\transition.json'
+        $logPath = Join-Path $root 'logs\transactions.log'
+        $closed = New-CcodTransitionForStage -Stage Closed -Manual -WithPorts -WithSpecial
+        Write-CcodJournalJson -Path $path -Value ([ordered]@{ schemaVersion=1; activeTransaction=$closed })
+        $first = Complete-CcodTransition -Path $path -LogPath $logPath -TransactionId $closed.transactionId -Disposition Closed -Adapters @{ UtcNow={ $completedUtc }.GetNewClosure() }
+        Assert-CcodEqual 'Completed' $first.Outcome 'Closed completion archives and clears'
+        Assert-CcodEqual $null (Read-CcodTransition -Path $path) 'Closed completion clears active evidence'
+        $repeat = Complete-CcodTransition -Path $path -LogPath $logPath -TransactionId $closed.transactionId -Disposition Closed -Adapters @{ UtcNow={ $completedUtc }.GetNewClosure() }
+        Assert-CcodEqual 'AlreadyCompleted' $repeat.Outcome 'Closed completion is disk-idempotent'
+        Assert-CcodEqual 1 @([IO.File]::ReadAllLines($logPath)).Count 'Closed completion archives exactly once'
+    } finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
+Invoke-CcodTest 'replays every Closed completion crash window with the fixed archive whitelist' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-close-crashes-' + [guid]::NewGuid().ToString('N'))
+    $completedUtc = [DateTime]::Parse('2030-02-03T04:06:00.0000000Z').ToUniversalTime()
+    try {
+        foreach($case in @(
+            @{Point='AfterPreparedReceipt';Active=$true},
+            @{Point='AfterArchiveAppend';Active=$true},
+            @{Point='AfterTerminalReceipt';Active=$true},
+            @{Point='AfterClear';Active=$false}
+        )){
+            $caseRoot=Join-Path $root $case.Point;$path=Join-Path $caseRoot 'state\transition.json';$logPath=Join-Path $caseRoot 'logs\transactions.log'
+            $closed=New-CcodTransitionForStage -Stage Closed -Manual -WithPorts -WithSpecial
+            Write-CcodJournalJson -Path $path -Value ([ordered]@{schemaVersion=1;activeTransaction=$closed})
+            $point=$case.Point;$adapters=@{UtcNow={$completedUtc}.GetNewClosure();Checkpoint={param($Name)if($Name -ceq $point){throw [Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('close crash'),'CCOD_TEST_CRASH',[Management.Automation.ErrorCategory]::OperationStopped,$Name)}}.GetNewClosure()}
+            Assert-CcodThrows {Complete-CcodTransition -Path $path -LogPath $logPath -TransactionId $closed.transactionId -Disposition Closed -Adapters $adapters} 'CCOD_TEST_CRASH'
+            Assert-CcodEqual $case.Active ($null -ne (Read-CcodTransition -Path $path)) "$($case.Point) preserves the expected active close evidence"
+            Remove-Module TransitionJournal -Force;Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\TransitionJournal.psm1') -Force
+            $retry=Complete-CcodTransition -Path $path -LogPath $logPath -TransactionId $closed.transactionId -Disposition Closed -Adapters @{UtcNow={$completedUtc}.GetNewClosure()}
+            Assert-CcodTrue (@('Completed','AlreadyCompleted') -ccontains $retry.Outcome) "$($case.Point) retry closes idempotently"
+            $records=@([IO.File]::ReadAllLines($logPath)|ForEach-Object{$_|ConvertFrom-Json});Assert-CcodEqual 1 $records.Count "$($case.Point) leaves one close archive record"
+            Assert-CcodEqual 'schemaVersion,transactionId,disposition,terminalStage,sourcePid,sourceCreationTimeUtc,specialPid,specialCreationTimeUtc,recoveryPid,recoveryCreationTimeUtc,appAsarSha256,runtimeId,completedAtUtc,archiveState' (($records[0].PSObject.Properties.Name)-join ',') "$($case.Point) close archive remains fixed whitelist"
+            Assert-CcodEqual 'Closed' $records[0].disposition "$($case.Point) archive disposition remains Closed"
+        }
+    } finally {
+        if(Get-Module TransitionJournal){Remove-Module TransitionJournal -Force};Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\TransitionJournal.psm1') -Force
+        if(Test-Path -LiteralPath $root){Remove-Item -LiteralPath $root -Recurse -Force}
     }
 }

@@ -18,7 +18,13 @@ const {
   resolveWindowsPowerShellPath,
   runDpapi,
 } = require("../src/runtime/main-payload.js");
-const { checkPortOnce, chooseTarget, waitForExplicitRefusal } = require("../src/runtime/orchestrator.js");
+const {
+  checkPortOnce,
+  chooseTarget,
+  parseArguments,
+  runRendererBridge,
+  waitForExplicitRefusal,
+} = require("../src/runtime/orchestrator.js");
 
 function listJavaScriptFiles(directory) {
   const output = [];
@@ -414,6 +420,75 @@ async function rendererPayloadTest(root) {
   };
 }
 
+async function orchestratorModesTest(root) {
+  const mainPayload = path.join(root, "..", "src", "runtime", "main-payload.js");
+  const legacy = parseArguments([
+    "--renderer-port", "41001", "--main-port", "41002", "--timeout-ms", "30000", "--main-payload", mainPayload,
+  ]);
+  assert.equal(legacy.mode, "full");
+  assert.equal(legacy.mainPort, 41002);
+  const explicitFull = parseArguments([
+    "--mode", "full", "--renderer-port", "41001", "--main-port", "41002", "--timeout-ms", "30000", "--main-payload", mainPayload,
+  ]);
+  assert.equal(explicitFull.mode, "full");
+  const rendererOnly = parseArguments([
+    "--mode", "renderer", "--renderer-port", "41001", "--timeout-ms", "30000",
+  ]);
+  assert.deepEqual(
+    Object.keys(rendererOnly).sort(),
+    ["help", "mode", "rendererPort", "timeoutMs"].sort(),
+  );
+  assert.throws(
+    () => parseArguments(["--mode", "renderer", "--renderer-port", "41001", "--main-port", "41002", "--timeout-ms", "30000"]),
+    { code: "ARGUMENT_MODE_CONFLICT" },
+  );
+  assert.throws(
+    () => parseArguments(["--mode", "renderer", "--renderer-port", "41001", "--timeout-ms", "30000", "--main-payload", mainPayload]),
+    { code: "ARGUMENT_MODE_CONFLICT" },
+  );
+
+  const calls = [];
+  const fakeClient = {
+    async call(method, parameters) {
+      calls.push({ method, parameters });
+      if (method === "Page.addScriptToEvaluateOnNewDocument") return { identifier: "renderer-script-1" };
+      return {};
+    },
+    close() { calls.push({ method: "close" }); },
+  };
+  const result = await runRendererBridge(rendererOnly, {
+    connectTarget: async (target, port) => {
+      calls.push({ method: "connectTarget", port, target });
+      assert.equal(port, 41001);
+      return fakeClient;
+    },
+    evaluate: async (_client, expression) => {
+      if (expression.includes("__CODEX_STATSIG_GATE_BRIDGE__")) {
+        return { proof: true, targetGate: "782640499" };
+      }
+      return { installed: true };
+    },
+    readPayload: () => "globalThis.__rendererInstalled = true; ({ installed: true })",
+    waitForTarget: async (port, kind) => {
+      calls.push({ method: "waitForTarget", port, kind });
+      assert.equal(kind, "renderer");
+      return { id: "renderer-1", type: "page", url: "app://-/index.html" };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.protocolVersion, 1);
+  assert.equal(Object.hasOwn(result, "main"), false);
+  assert.equal(result.renderer.targetUrl, "app://-/index.html");
+  assert.deepEqual(result.renderer.currentDocument, { installed: true });
+  assert.equal(result.renderer.newDocumentScriptInstalled, true);
+  assert.deepEqual(result.renderer.probe, { proof: true, targetGate: "782640499" });
+  assert.equal(calls.filter((entry) => entry.method === "connectTarget").length, 1);
+  assert.equal(calls.some((entry) => entry.port === 41002), false);
+  assert.equal(calls.some((entry) => entry.method === "Runtime.enable"), true);
+  assert.equal(calls.some((entry) => entry.method === "Page.addScriptToEvaluateOnNewDocument"), true);
+  return { defaultFull: true, exactRendererTarget: true, rendererNeverConnectedMain: true };
+}
+
 async function inspectorClosureTest(root, tempDirectory) {
   const port = await reservePort();
   assert(Number.isInteger(port));
@@ -460,6 +535,7 @@ async function main() {
     ["synchronous-key-generation-fallback", () => synchronousKeyGenerationFallbackTest(root, path.join(tempDirectory, "sync-crypto.json"))],
     ["incomplete-crypto-rejection", () => incompleteCryptoRejectionTest(root)],
     ["renderer-existing-and-delayed", () => rendererPayloadTest(root)],
+    ["orchestrator-full-renderer-modes", () => orchestratorModesTest(root)],
     ["inspector-explicit-refusal", () => inspectorClosureTest(root, tempDirectory)],
   ];
   const results = [];

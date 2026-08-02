@@ -280,7 +280,7 @@ function Assert-CcodTransitionShape {
     Assert-CcodExactProperties -Value $transaction -Expected $required -ErrorId 'CCOD_TRANSITION_INVALID' -Kind 'Active transition'
     foreach ($name in @('transactionId', 'packageFullName', 'runtimeId')) { if ($transaction.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($transaction.$name)) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' "$name must be a non-empty string" $transaction } }
     Assert-CcodCanonicalGuid -Value $transaction.transactionId -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'transactionId'
-    if ($transaction.stage -isnot [string] -or @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered') -cnotcontains $transaction.stage) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition stage is invalid' $transaction }
+    if ($transaction.stage -isnot [string] -or @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered', 'CloseRequested', 'Closed') -cnotcontains $transaction.stage) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition stage is invalid' $transaction }
     Assert-CcodNullableProcessIdentity -Value $transaction -PidName 'sourcePid' -TimeName 'sourceCreationTimeUtc' -ErrorId 'CCOD_TRANSITION_INVALID'
     if ($transaction.appAsarSha256 -isnot [string] -or $transaction.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$') { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'appAsarSha256 must be lowercase SHA-256' $transaction }
     Assert-CcodNullablePortPair -Value $transaction -ErrorId 'CCOD_TRANSITION_INVALID'
@@ -311,6 +311,17 @@ function Assert-CcodTransitionShape {
     }
     if ($hasSpecial -and -not $hasPorts) {
         Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'A recorded special identity requires its allocated ports' $transaction
+    }
+    if (@('CloseRequested', 'Closed') -ccontains $transaction.stage) {
+        if ($hasSource -eq $hasSpecial) {
+            Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'A close transaction requires exactly one recorded source or special root' $transaction
+        }
+        if ($hasSource -and $hasPorts) {
+            Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'An ordinary close target cannot retain debug ports' $transaction
+        }
+        if ($hasRecovery) {
+            Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'A close transaction cannot record a recovery identity' $transaction
+        }
     }
     if ($transaction.stage -cne 'Recovered' -and $hasRecovery) {
         Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'recovery identity cannot exist before Recovered' $transaction

@@ -39,7 +39,7 @@ function parseArguments(argv) {
       throw cliError("ARGUMENT_UNKNOWN", `Unexpected argument: ${token}`);
     }
     const name = token.slice(2);
-    if (!["renderer-port", "main-port", "timeout-ms", "main-payload"].includes(name) || values.has(name)) {
+    if (!["mode", "renderer-port", "main-port", "timeout-ms", "main-payload"].includes(name) || values.has(name)) {
       throw cliError("ARGUMENT_UNKNOWN", `Unknown or duplicate option: ${token}`);
     }
     const value = argv[index + 1];
@@ -49,18 +49,35 @@ function parseArguments(argv) {
     values.set(name, value);
     index += 1;
   }
-  for (const required of ["renderer-port", "main-port", "timeout-ms", "main-payload"]) {
+  const mode = values.get("mode") ?? "full";
+  if (mode !== "full" && mode !== "renderer") {
+    throw cliError("ARGUMENT_INVALID", "mode must be exactly full or renderer");
+  }
+  if (mode === "renderer" && (values.has("main-port") || values.has("main-payload"))) {
+    throw cliError("ARGUMENT_MODE_CONFLICT", "renderer mode forbids main Inspector options");
+  }
+  const requiredOptions = mode === "full"
+    ? ["renderer-port", "main-port", "timeout-ms", "main-payload"]
+    : ["renderer-port", "timeout-ms"];
+  for (const required of requiredOptions) {
     if (!values.has(required)) {
       throw cliError("ARGUMENT_MISSING", `Required option is missing: --${required}`);
     }
   }
-  return {
+  const parsed = {
     help: false,
-    mainPayload: path.resolve(values.get("main-payload")),
-    mainPort: parseInteger(values.get("main-port"), "main port", 1, 65_535),
+    mode,
     rendererPort: parseInteger(values.get("renderer-port"), "renderer port", 1, 65_535),
     timeoutMs: parseInteger(values.get("timeout-ms"), "timeout", 500, 300_000),
   };
+  if (mode === "full") {
+    parsed.mainPayload = path.resolve(values.get("main-payload"));
+    parsed.mainPort = parseInteger(values.get("main-port"), "main port", 1, 65_535);
+    if (parsed.mainPort === parsed.rendererPort) {
+      throw cliError("ARGUMENT_INVALID", "main and renderer ports must be distinct");
+    }
+  }
+  return parsed;
 }
 
 function remaining(deadline) {
@@ -228,9 +245,10 @@ async function installMainPayload(options, source, deadline) {
   return { closure, report: sanitizeReport(report) };
 }
 
-async function waitForRendererProof(client, deadline) {
+async function waitForRendererProof(client, deadline, dependencies = {}) {
+  const evaluateRenderer = dependencies.evaluate ?? evaluate;
   while (Date.now() < deadline) {
-    const probe = await evaluate(
+    const probe = await evaluateRenderer(
       client,
       "globalThis.__CODEX_STATSIG_GATE_BRIDGE__?.scan?.() ?? null",
       remaining(deadline),
@@ -243,19 +261,26 @@ async function waitForRendererProof(client, deadline) {
   throw cliError("RENDERER_PROBE_FAILED", "Renderer payload did not prove the target gate override before timeout");
 }
 
-async function installRendererPayload(options, source, deadline) {
-  const target = await waitForTarget(options.rendererPort, "renderer", deadline);
-  const client = await connectTarget(target, options.rendererPort, remaining(deadline));
+async function installRendererPayload(options, source, deadline, dependencies = {}) {
+  const waitForRendererTarget = dependencies.waitForTarget ?? waitForTarget;
+  const connectRendererTarget = dependencies.connectTarget ?? connectTarget;
+  const evaluateRenderer = dependencies.evaluate ?? evaluate;
+  const target = await waitForRendererTarget(options.rendererPort, "renderer", deadline);
+  if (target?.url !== "app://-/index.html" || (target?.type !== "page" && target?.type !== "webview")) {
+    throw cliError("TARGET_NOT_FOUND", "Renderer target must be the exact Codex page or webview URL");
+  }
+  const client = await connectRendererTarget(target, options.rendererPort, remaining(deadline));
   try {
     await client.call("Runtime.enable", {}, remaining(deadline));
     await client.call("Page.enable", {}, remaining(deadline));
     const persistent = await client.call("Page.addScriptToEvaluateOnNewDocument", { source }, remaining(deadline));
-    const installReport = await evaluate(client, source, remaining(deadline));
-    const probe = await waitForRendererProof(client, deadline);
+    const installReport = await evaluateRenderer(client, source, remaining(deadline));
+    const probe = await waitForRendererProof(client, deadline, dependencies);
     return {
       currentDocument: sanitizeReport(installReport),
       newDocumentScriptInstalled: typeof persistent.identifier === "string",
       probe,
+      targetUrl: target.url,
     };
   } finally {
     client.close();
@@ -286,6 +311,20 @@ async function runBridge(options) {
   }
 }
 
+async function runRendererBridge(options, dependencies = {}) {
+  const deadline = Date.now() + options.timeoutMs;
+  const loadPayload = dependencies.readPayload ?? readPayload;
+  const rendererSource = loadPayload(path.join(__dirname, "renderer-payload.js"));
+  let stage = "renderer-install";
+  try {
+    const renderer = await installRendererPayload(options, rendererSource, deadline, dependencies);
+    return { ok: true, protocolVersion: 1, renderer };
+  } catch (error) {
+    error.stage = error.stage ?? stage;
+    throw error;
+  }
+}
+
 function safeError(error) {
   const code = typeof error?.code === "string" ? error.code : "UNEXPECTED_ERROR";
   const message = typeof error?.message === "string" ? error.message.replace(/[\r\n]+/gu, " ").slice(0, 300) : "Unexpected error";
@@ -299,11 +338,11 @@ async function main(argv = process.argv.slice(2)) {
     if (options.help) {
       process.stdout.write(`${JSON.stringify({
         ok: true,
-        usage: "node orchestrator.js --renderer-port PORT --main-port PORT --timeout-ms MS --main-payload FILE",
+        usage: "node orchestrator.js [--mode full|renderer] --renderer-port PORT --timeout-ms MS [--main-port PORT --main-payload FILE]",
       })}\n`);
       return 0;
     }
-    const result = await runBridge(options);
+    const result = options.mode === "renderer" ? await runRendererBridge(options) : await runBridge(options);
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {
@@ -324,6 +363,7 @@ module.exports = {
   injectionExpression,
   parseArguments,
   runBridge,
+  runRendererBridge,
   waitForTarget,
   waitForExplicitRefusal,
 };

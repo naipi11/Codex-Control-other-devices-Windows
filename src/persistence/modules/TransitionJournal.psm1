@@ -119,7 +119,7 @@ function Assert-CcodTransitionValue {
     if (-not (Test-CcodCanonicalGuid -Value $Transition.transactionId)) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_INVALID' 'transactionId must be a canonical lowercase GUID in D form' $Transition
     }
-    if ($Transition.stage -isnot [string] -or @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered') -cnotcontains $Transition.stage) {
+    if ($Transition.stage -isnot [string] -or @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered', 'CloseRequested', 'Closed') -cnotcontains $Transition.stage) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_INVALID' 'stage is not a fixed transition stage' $Transition
     }
     Assert-CcodJournalNullableIdentity -Transition $Transition -PidName 'sourcePid' -TimeName 'sourceCreationTimeUtc'
@@ -168,6 +168,17 @@ function Assert-CcodTransitionValue {
     }
     if ($hasSpecial -and -not $hasPorts) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_INVALID' 'A recorded special identity requires its allocated ports' $Transition
+    }
+    if (@('CloseRequested', 'Closed') -ccontains $Transition.stage) {
+        if ($hasSource -eq $hasSpecial) {
+            Throw-CcodTransitionError 'CCOD_TRANSITION_INVALID' 'A close transition requires exactly one recorded source or special root' $Transition
+        }
+        if ($hasSource -and $hasPorts) {
+            Throw-CcodTransitionError 'CCOD_TRANSITION_INVALID' 'An ordinary close target cannot retain debug ports' $Transition
+        }
+        if ($hasRecovery) {
+            Throw-CcodTransitionError 'CCOD_TRANSITION_INVALID' 'A close transition cannot record a recovery identity' $Transition
+        }
     }
     if ($Transition.stage -cne 'Recovered' -and $hasRecovery) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_INVALID' 'recovery identity cannot exist before Recovered' $Transition
@@ -256,10 +267,11 @@ function Assert-CcodObservedFacts {
     if ($Observed -isnot [pscustomobject] -and $Observed -isnot [Collections.IDictionary]) {
         Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'Observed facts must be an exact object' $Observed
     }
-    Assert-CcodJournalExactProperties -Value $Observed -Expected @('StopObservation', 'RecoveryObservation', 'SpecialObservation', 'SpecialCandidates', 'OrdinaryCandidates') -Kind 'Observed replay facts' -ErrorId 'CCOD_REPLAY_INPUT_INVALID'
+    Assert-CcodJournalExactProperties -Value $Observed -Expected @('StopObservation', 'RecoveryObservation', 'SpecialObservation', 'PortObservation', 'SpecialCandidates', 'OrdinaryCandidates') -Kind 'Observed replay facts' -ErrorId 'CCOD_REPLAY_INPUT_INVALID'
     if ($Observed.StopObservation -isnot [string] -or @(
         'NotStarted', 'ExitedDuringPrimary5s', 'IdentityChangedDuringPrimary5s', 'SameAliveAfterPrimary5s',
-        'ExitedDuringGuard5s', 'IdentityChangedDuringGuard5s', 'SameAliveAfterGuard5s', 'Indeterminate', 'NotApplicable'
+        'ExitedDuringGuard5s', 'IdentityChangedDuringGuard5s', 'SameAliveAfterGuard5s', 'Indeterminate', 'NotApplicable',
+        'CloseTreePresent', 'CloseTreeAbsent', 'CloseTreeIndeterminate'
     ) -cnotcontains $Observed.StopObservation) {
         Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'StopObservation is not a fixed observed-fact enum' $Observed
     }
@@ -270,6 +282,9 @@ function Assert-CcodObservedFacts {
     }
     if ($Observed.SpecialObservation -isnot [string] -or @('Confirmed', 'NoCandidate', 'Incomplete', 'Ambiguous', 'PortConflict') -cnotcontains $Observed.SpecialObservation) {
         Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'SpecialObservation is not a Task 6 detailed outcome' $Observed
+    }
+    if ($Observed.PortObservation -isnot [string] -or @('NotApplicable', 'BothRefused', 'Open', 'Indeterminate') -cnotcontains $Observed.PortObservation) {
+        Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'PortObservation is not a fixed observed-fact enum' $Observed
     }
     if ($null -eq $Observed.SpecialCandidates -or $Observed.SpecialCandidates -is [string] -or $Observed.SpecialCandidates -isnot [Collections.IEnumerable] -or
         $null -eq $Observed.OrdinaryCandidates -or $Observed.OrdinaryCandidates -is [string] -or $Observed.OrdinaryCandidates -isnot [Collections.IEnumerable]) {
@@ -298,6 +313,61 @@ function Assert-CcodObservedFacts {
     }
     if ($Observed.RecoveryObservation -ceq 'OrdinaryAppearedWithin5s' -and $ordinaryCandidates.Count -eq 0) {
         Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'OrdinaryAppearedWithin5s requires at least one exact ordinary candidate' $Observed
+    }
+    $hasPorts = $null -ne $Transition.mainPort
+    if (($hasPorts -and $Observed.PortObservation -ceq 'NotApplicable') -or
+        (-not $hasPorts -and $Observed.PortObservation -cne 'NotApplicable')) {
+        Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'PortObservation contradicts the transaction port pair' $Observed
+    }
+
+    $closeStopObservations = @('CloseTreePresent', 'CloseTreeAbsent', 'CloseTreeIndeterminate')
+    $isCloseStage = @('CloseRequested', 'Closed') -ccontains $Transition.stage
+    if (-not $isCloseStage) {
+        if ($closeStopObservations -ccontains $Observed.StopObservation) {
+            Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'Close-only stop evidence is forbidden for a normal replay stage' $Observed
+        }
+        return
+    }
+
+    if ($Observed.RecoveryObservation -cne 'NotApplicable') {
+        Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'Close replay cannot carry ordinary recovery-window evidence' $Observed
+    }
+    if ($closeStopObservations -cnotcontains $Observed.StopObservation) {
+        Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'Close replay requires close-tree stop evidence' $Observed
+    }
+
+    if ($Transition.stage -ceq 'Closed') {
+        if ($Observed.StopObservation -cne 'CloseTreeAbsent' -or $Observed.SpecialObservation -cne 'NoCandidate' -or
+            $specialCandidates.Count -ne 0 -or $ordinaryCandidates.Count -ne 0) {
+            Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'Closed replay requires the durable complete-tree absence proof shape' $Observed
+        }
+        return
+    }
+
+    if ($Observed.StopObservation -ceq 'CloseTreeIndeterminate') {
+        return
+    }
+    if ($Observed.StopObservation -ceq 'CloseTreeAbsent') {
+        if ($Observed.SpecialObservation -cne 'NoCandidate' -or $specialCandidates.Count -ne 0 -or $ordinaryCandidates.Count -ne 0 -or
+            ($hasPorts -and $Observed.PortObservation -cne 'BothRefused')) {
+            Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'CloseTreeAbsent requires empty candidate channels and proven port closure' $Observed
+        }
+        return
+    }
+
+    if ($null -ne $Transition.specialPid) {
+        if ($ordinaryCandidates.Count -ne 0 -or $specialCandidates.Count -ne 1 -or
+            -not (Test-CcodSpecialFactMatchesJournal -Fact $specialCandidates[0] -Transition $Transition) -or
+            $specialCandidates[0].Evidence -cne 'PersistedIdentity' -or $Observed.SpecialObservation -ceq 'Ambiguous') {
+            Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'CloseTreePresent must prove only the exact recorded special root' $Observed
+        }
+        return
+    }
+
+    if ($specialCandidates.Count -ne 0 -or $Observed.SpecialObservation -cne 'NoCandidate' -or $ordinaryCandidates.Count -ne 1 -or
+        -not [object]::Equals([int]$ordinaryCandidates[0].Pid, [int]$Transition.sourcePid) -or
+        $ordinaryCandidates[0].CreationTimeUtc -cne $Transition.sourceCreationTimeUtc) {
+        Throw-CcodTransitionError 'CCOD_REPLAY_INPUT_INVALID' 'CloseTreePresent must prove only the exact recorded ordinary root' $Observed
     }
 }
 
@@ -423,9 +493,9 @@ function Set-CcodTransitionStage {
         Throw-CcodTransitionError 'CCOD_TRANSITION_CONFLICT' 'Transition ID or expected stage is stale under the caller-held transition lease' $current
     }
 
-    $knownStages = @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered')
+    $knownStages = @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered', 'CloseRequested', 'Closed')
     $legal = @{
-        IntentWritten = @('StopRequested')
+        IntentWritten = @('StopRequested', 'CloseRequested')
         StopRequested = @('OrdinaryStopped', 'RecoveryLaunchRequested')
         OrdinaryStopped = @('SpecialLaunchRequested', 'RecoveryLaunchRequested')
         SpecialLaunchRequested = @('SpecialStarted', 'RecoveryLaunchRequested')
@@ -433,6 +503,8 @@ function Set-CcodTransitionStage {
         Validated = @('RecoveryLaunchRequested')
         RecoveryLaunchRequested = @('Recovered')
         Recovered = @()
+        CloseRequested = @('Closed')
+        Closed = @()
     }
     if ($knownStages -cnotcontains $NewStage -or $legal[$ExpectedStage] -cnotcontains $NewStage) {
         $manualEdge = $ExpectedStage -ceq 'IntentWritten' -and $NewStage -ceq 'OrdinaryStopped' -and $null -eq $current.sourcePid
@@ -450,7 +522,7 @@ function Set-CcodTransitionStage {
     $hasMainParameter = $PSBoundParameters.ContainsKey('MainPort')
     if (($hasSpecialParameter -and $null -eq $SpecialIdentity) -or ($hasRecoveryParameter -and $null -eq $RecoveryIdentity) -or
         ($hasSpecialParameter -and $hasRecoveryParameter) -or
-        ($hasSpecialParameter -and $NewStage -cne 'SpecialStarted') -or
+        ($hasSpecialParameter -and $NewStage -cne 'SpecialStarted' -and -not ($ExpectedStage -ceq 'IntentWritten' -and $NewStage -ceq 'CloseRequested')) -or
         ($hasRecoveryParameter -and $NewStage -cne 'Recovered')) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_STAGE_INVALID' 'Identity parameters are exclusive and valid only for their identity-recording stages' $current
     }
@@ -459,6 +531,19 @@ function Set-CcodTransitionStage {
     }
     if ($NewStage -ceq 'Recovered' -and -not $hasRecoveryParameter) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_STAGE_INVALID' 'Entering Recovered requires RecoveryIdentity' $current
+    }
+    if ($NewStage -ceq 'CloseRequested') {
+        $willHaveSource = $null -ne $current.sourcePid
+        $willHaveSpecial = $hasSpecialParameter
+        if ($willHaveSource -eq $willHaveSpecial) {
+            Throw-CcodTransitionError 'CCOD_TRANSITION_STAGE_INVALID' 'Entering CloseRequested requires exactly one source or injected special identity' $current
+        }
+        if ($willHaveSource -and $null -ne $current.mainPort) {
+            Throw-CcodTransitionError 'CCOD_TRANSITION_STAGE_INVALID' 'An ordinary close target cannot retain debug ports' $current
+        }
+        if ($willHaveSpecial -and $null -eq $current.mainPort) {
+            Throw-CcodTransitionError 'CCOD_TRANSITION_STAGE_INVALID' 'A special close target requires constructor-preserved ports' $current
+        }
     }
     if ($hasRendererParameter -ne $hasMainParameter -or (($hasRendererParameter -or $hasMainParameter) -and $NewStage -cne 'SpecialLaunchRequested')) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_STAGE_INVALID' 'Port parameters must be paired and supplied only while entering SpecialLaunchRequested' $current
@@ -656,6 +741,31 @@ function Get-CcodRecoveredReplayDecision {
     return New-CcodReplayDecisionResult -Action 'CancelKeepOrdinary' -Reason 'RecoveredProcessAbsent' -AdoptedProcess $null -MustSuppress $true
 }
 
+function Get-CcodCloseReplayDecision {
+    param([Parameter(Mandatory)]$Transition, [Parameter(Mandatory)]$Observed)
+
+    if ($Transition.stage -ceq 'Closed') {
+        return New-CcodReplayDecisionResult -Action 'CompleteClosed' -Reason 'CloseAlreadyCommitted' -AdoptedProcess $null -MustSuppress $false
+    }
+
+    switch ($Observed.StopObservation) {
+        'CloseTreePresent' {
+            if ($null -ne $Transition.specialPid) {
+                return New-CcodReplayDecisionResult -Action 'CloseRecordedTree' -Reason 'CloseSpecialStillAlive' `
+                    -AdoptedProcess (Copy-CcodJournalProcessSnapshot -Snapshot @($Observed.SpecialCandidates)[0].Process) -MustSuppress $false
+            }
+            return New-CcodReplayDecisionResult -Action 'CloseRecordedTree' -Reason 'CloseOrdinaryStillAlive' `
+                -AdoptedProcess (Copy-CcodJournalProcessSnapshot -Snapshot @($Observed.OrdinaryCandidates)[0]) -MustSuppress $false
+        }
+        'CloseTreeAbsent' {
+            return New-CcodReplayDecisionResult -Action 'CompleteClosed' -Reason 'CloseTreeAndPortsProvenAbsent' -AdoptedProcess $null -MustSuppress $false
+        }
+        default {
+            return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'CloseTreeIndeterminate' -AdoptedProcess $null -MustSuppress $true
+        }
+    }
+}
+
 function New-CcodCompletionResult {
     param(
         [Parameter(Mandatory)][string]$Outcome,
@@ -701,15 +811,16 @@ function Assert-CcodCompletionReceipt {
         -Kind 'Completion receipt' -ErrorId 'CCOD_TRANSITION_RECEIPT_INVALID'
     if (($Receipt.schemaVersion -isnot [int] -and $Receipt.schemaVersion -isnot [long]) -or $Receipt.schemaVersion -ne 1 -or
         -not (Test-CcodCanonicalGuid -Value $Receipt.transactionId) -or
-        $Receipt.disposition -isnot [string] -or @('Cancelled', 'Activated', 'Recovered') -cnotcontains $Receipt.disposition -or
-        $Receipt.terminalStage -isnot [string] -or @('IntentWritten', 'StopRequested', 'Validated', 'Recovered') -cnotcontains $Receipt.terminalStage -or
+        $Receipt.disposition -isnot [string] -or @('Cancelled', 'Activated', 'Recovered', 'Closed') -cnotcontains $Receipt.disposition -or
+        $Receipt.terminalStage -isnot [string] -or @('IntentWritten', 'StopRequested', 'Validated', 'Recovered', 'Closed') -cnotcontains $Receipt.terminalStage -or
         -not (Test-CcodCanonicalUtc -Value $Receipt.completedAtUtc) -or
         $Receipt.state -isnot [string] -or @('Prepared', 'Archived', 'ArchiveFailed') -cnotcontains $Receipt.state) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_RECEIPT_INVALID' 'Completion receipt fields are invalid' $Receipt
     }
     $terminalValid = ($Receipt.disposition -ceq 'Cancelled' -and @('IntentWritten', 'StopRequested') -ccontains $Receipt.terminalStage) -or
         ($Receipt.disposition -ceq 'Activated' -and $Receipt.terminalStage -ceq 'Validated') -or
-        ($Receipt.disposition -ceq 'Recovered' -and $Receipt.terminalStage -ceq 'Recovered')
+        ($Receipt.disposition -ceq 'Recovered' -and $Receipt.terminalStage -ceq 'Recovered') -or
+        ($Receipt.disposition -ceq 'Closed' -and $Receipt.terminalStage -ceq 'Closed')
     $errorValid = ($Receipt.state -ceq 'ArchiveFailed' -and $Receipt.archiveErrorId -ceq 'CCOD_TRANSITION_ARCHIVE_FAILED') -or
         ($Receipt.state -cne 'ArchiveFailed' -and $null -eq $Receipt.archiveErrorId)
     if (-not $terminalValid -or -not $errorValid) {
@@ -729,13 +840,14 @@ function Read-CcodCompletionReceipt {
 function Assert-CcodCompletionRequest {
     param($Transition, [string]$TransactionId, [string]$Disposition)
 
-    if (-not (Test-CcodCanonicalGuid -Value $TransactionId) -or @('Cancelled', 'Activated', 'Recovered') -cnotcontains $Disposition -or
+    if (-not (Test-CcodCanonicalGuid -Value $TransactionId) -or @('Cancelled', 'Activated', 'Recovered', 'Closed') -cnotcontains $Disposition -or
         $null -eq $Transition -or $Transition.transactionId -cne $TransactionId) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_COMPLETION_INVALID' 'Completion does not match the active transition' $Transition
     }
     $validTerminal = ($Disposition -ceq 'Cancelled' -and @('IntentWritten', 'StopRequested') -ccontains $Transition.stage) -or
         ($Disposition -ceq 'Activated' -and $Transition.stage -ceq 'Validated') -or
-        ($Disposition -ceq 'Recovered' -and $Transition.stage -ceq 'Recovered')
+        ($Disposition -ceq 'Recovered' -and $Transition.stage -ceq 'Recovered') -or
+        ($Disposition -ceq 'Closed' -and $Transition.stage -ceq 'Closed')
     if (-not $validTerminal) {
         Throw-CcodTransitionError 'CCOD_TRANSITION_COMPLETION_INVALID' 'Disposition is not legal for the active terminal stage' $Transition
     }
@@ -792,7 +904,8 @@ function Assert-CcodArchiveRecord {
 
     $terminalValid = ($Record.disposition -ceq 'Cancelled' -and @('IntentWritten', 'StopRequested') -ccontains $Record.terminalStage) -or
         ($Record.disposition -ceq 'Activated' -and $Record.terminalStage -ceq 'Validated') -or
-        ($Record.disposition -ceq 'Recovered' -and $Record.terminalStage -ceq 'Recovered')
+        ($Record.disposition -ceq 'Recovered' -and $Record.terminalStage -ceq 'Recovered') -or
+        ($Record.disposition -ceq 'Closed' -and $Record.terminalStage -ceq 'Closed')
     if (($Record.schemaVersion -isnot [int] -and $Record.schemaVersion -isnot [long]) -or $Record.schemaVersion -ne 1 -or
         -not (Test-CcodCanonicalGuid -Value $Record.transactionId) -or $Record.transactionId -cne $TransactionId -or
         $Record.disposition -cne $Disposition -or (-not [string]::IsNullOrEmpty($TerminalStage) -and $Record.terminalStage -cne $TerminalStage) -or -not $terminalValid -or
@@ -848,6 +961,9 @@ function Get-CcodReplayDecision {
 
     Assert-CcodTransitionValue -Transition $Transition
     Assert-CcodObservedFacts -Transition $Transition -Observed $Observed
+    if (@('CloseRequested', 'Closed') -ccontains $Transition.stage) {
+        return Get-CcodCloseReplayDecision -Transition $Transition -Observed $Observed
+    }
     if ($Transition.stage -ceq 'IntentWritten') {
         return New-CcodReplayDecisionResult -Action 'CancelKeepOrdinary' -Reason 'IntentNotCommitted' -AdoptedProcess $null -MustSuppress $false
     }
@@ -917,7 +1033,7 @@ function Complete-CcodTransition {
     $receipt = Read-CcodCompletionReceipt -Path $receiptPath -Adapters $adapter
     $transition = Read-CcodTransition -Path $Path -Adapters $adapter
     if ($null -eq $transition) {
-        if (-not (Test-CcodCanonicalGuid -Value $TransactionId) -or @('Cancelled', 'Activated', 'Recovered') -cnotcontains $Disposition) {
+        if (-not (Test-CcodCanonicalGuid -Value $TransactionId) -or @('Cancelled', 'Activated', 'Recovered', 'Closed') -cnotcontains $Disposition) {
             Throw-CcodTransitionError 'CCOD_TRANSITION_COMPLETION_INVALID' 'Completion identity or disposition is invalid' $TransactionId
         }
         if ($null -ne $receipt -and $receipt.transactionId -ceq $TransactionId -and $receipt.disposition -ceq $Disposition -and

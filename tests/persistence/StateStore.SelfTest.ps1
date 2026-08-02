@@ -340,6 +340,60 @@ try {
         Assert-CcodEqual $null $loaded.Transition.activeTransaction.mainPort 'unallocated port pair stays null'
     }
 
+    Invoke-CcodTest 'cross-reads exact ordinary and special durable close transactions without adding a field' {
+        $cases = @(
+            @{ Name='ordinary-close-requested'; Stage='CloseRequested'; Source=$true; Special=$false; Ports=$false },
+            @{ Name='ordinary-closed'; Stage='Closed'; Source=$true; Special=$false; Ports=$false },
+            @{ Name='special-close-requested'; Stage='CloseRequested'; Source=$false; Special=$true; Ports=$true },
+            @{ Name='special-closed'; Stage='Closed'; Source=$false; Special=$true; Ports=$true }
+        )
+        foreach ($case in $cases) {
+            $state = Join-Path $root $case.Name
+            Initialize-CcodStateFixture -StateRoot $state
+            $transaction = New-CcodTransitionFixture
+            $transaction.stage = $case.Stage
+            if (-not $case.Source) {
+                $transaction.sourcePid = $null
+                $transaction.sourceCreationTimeUtc = $null
+            }
+            if ($case.Special) {
+                $transaction.specialPid = 202
+                $transaction.specialCreationTimeUtc = '2030-02-03T04:05:07.0000000Z'
+            }
+            if (-not $case.Ports) {
+                $transaction.mainPort = $null
+                $transaction.rendererPort = $null
+            }
+            Write-CcodStateJson -StateRoot $state -Leaf 'transition.json' -Value ([ordered]@{ schemaVersion=1; activeTransaction=$transaction })
+
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodEqual $true $loaded.TransitionActionsAllowed "$($case.Name) remains actionable"
+            Assert-CcodEqual 15 @($loaded.Transition.activeTransaction.PSObject.Properties).Count "$($case.Name) preserves the fixed field count"
+            Assert-CcodEqual $case.Stage $loaded.Transition.activeTransaction.stage "$($case.Name) preserves the exact close stage"
+        }
+    }
+
+    Invoke-CcodTest 'quarantines illegal durable close target identity and port shapes' {
+        $cases = @(
+            @{ Name='close-no-root'; Mutate={ param($tx) $tx.stage='CloseRequested'; $tx.sourcePid=$null; $tx.sourceCreationTimeUtc=$null; $tx.mainPort=$null; $tx.rendererPort=$null } },
+            @{ Name='close-both-roots'; Mutate={ param($tx) $tx.stage='CloseRequested'; $tx.specialPid=202; $tx.specialCreationTimeUtc='2030-02-03T04:05:07.0000000Z' } },
+            @{ Name='ordinary-close-with-ports'; Mutate={ param($tx) $tx.stage='Closed' } },
+            @{ Name='special-close-without-ports'; Mutate={ param($tx) $tx.stage='Closed'; $tx.sourcePid=$null; $tx.sourceCreationTimeUtc=$null; $tx.specialPid=202; $tx.specialCreationTimeUtc='2030-02-03T04:05:07.0000000Z'; $tx.mainPort=$null; $tx.rendererPort=$null } },
+            @{ Name='close-with-recovery'; Mutate={ param($tx) $tx.stage='Closed'; $tx.mainPort=$null; $tx.rendererPort=$null; $tx.recoveryPid=303; $tx.recoveryCreationTimeUtc='2030-02-03T04:05:08.0000000Z' } }
+        )
+        foreach ($case in $cases) {
+            $state = Join-Path $root ('invalid-' + $case.Name)
+            Initialize-CcodStateFixture -StateRoot $state
+            $transaction = New-CcodTransitionFixture
+            & $case.Mutate $transaction
+            Write-CcodStateJson -StateRoot $state -Leaf 'transition.json' -Value ([ordered]@{ schemaVersion=1; activeTransaction=$transaction })
+
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodEqual $false $loaded.TransitionActionsAllowed "$($case.Name) cannot authorize process action"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'transition.json.corrupt.*').Count "$($case.Name) is quarantined"
+        }
+    }
+
     Invoke-CcodTest 'quarantines semantically inconsistent transition stages and identities' {
         $cases = @(
             @{ Name='noncanonical-guid'; Mutate={ param($tx) $tx.transactionId = '5F496D99-C839-4458-A6A2-D37EA1AFDBDA' } },
