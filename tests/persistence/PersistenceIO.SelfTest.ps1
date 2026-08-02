@@ -63,15 +63,15 @@ try {
     }
 
 
-    Invoke-CcodTest 'uses the native null-backup replacement path without leftover siblings' {
+    Invoke-CcodTest 'uses the native handle commit without leftover siblings' {
         $path = Join-Path $root 'replace-native\settings.json'
         Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'before' })
         $nativeState = [pscustomobject]@{ Called = $false }
         $adapters = @{
-            ReplaceFileNoBackup = {
-                param([string]$Source, [string]$Destination)
+            CommitFileByHandle = {
+                param([IO.FileStream]$Source, [string]$Destination)
                 $nativeState.Called = $true
-                $errorCode = [CcodNativeAtomicReplace]::ReplaceFileNoBackup($Destination, $Source)
+                $errorCode = [CcodNativeAtomicFile]::MoveFileByHandle($Source.SafeFileHandle, $Destination)
                 return [pscustomobject]@{ Success = ($errorCode -eq 0); ErrorCode = $errorCode }
             }
         }
@@ -83,12 +83,65 @@ try {
         Assert-CcodEqual 1 $siblings.Count 'successful native replacement must leave no sibling artifact'
     }
 
+    Invoke-CcodTest 'commits only the owned replacement object when its pathname is attacked' {
+        $path = Join-Path $root 'replace-source-race\settings.json'
+        $directory = Split-Path $path -Parent
+        $replacement = Join-Path $directory 'owned-replacement.json'
+        $displaced = Join-Path $directory 'displaced-owned-replacement.json'
+        Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'before' })
+        $raceState = [pscustomobject]@{
+            Attempted = $false
+            RenameBlocked = $false
+            ForeignInserted = $false
+            ForeignSourceConsumed = $false
+        }
+        $attemptSourceSwap = {
+            param([string]$Source)
+            $raceState.Attempted = $true
+            try {
+                [IO.File]::Move($Source, $displaced)
+                [IO.File]::WriteAllText($Source, "{`"schemaVersion`":1,`"value`":`"foreign`"}`n", [Text.UTF8Encoding]::new($false))
+                $raceState.ForeignInserted = $true
+            } catch [IO.IOException] {
+                $raceState.RenameBlocked = $true
+            }
+        }
+        $adapters = @{
+            GetRandomFileName = { param([string]$Purpose) 'owned-replacement.json' }
+            ReplaceFileNoBackup = {
+                param([string]$Source, [string]$Destination)
+                & $attemptSourceSwap $Source
+                [IO.File]::Delete($Destination)
+                [IO.File]::Move($Source, $Destination)
+                $raceState.ForeignSourceConsumed = $raceState.ForeignInserted -and -not [IO.File]::Exists($Source)
+                return [pscustomobject]@{ Success = $true; ErrorCode = 0 }
+            }
+            CommitFileByHandle = {
+                param([IO.FileStream]$Source, [string]$Destination)
+                & $attemptSourceSwap $replacement
+                $errorCode = [CcodNativeAtomicFile]::MoveFileByHandle($Source.SafeFileHandle, $Destination)
+                $raceState.ForeignSourceConsumed = $raceState.ForeignInserted -and -not [IO.File]::Exists($replacement)
+                return [pscustomobject]@{ Success = ($errorCode -eq 0); ErrorCode = $errorCode }
+            }
+        }
+
+        Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'after' }) -Adapters $adapters
+        $siblings = @(Get-ChildItem -LiteralPath $directory -Force)
+        Assert-CcodEqual 'after' (Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings').value 'commit must not substitute foreign replacement bytes'
+        Assert-CcodEqual $true $raceState.Attempted 'the source pathname attack must run after replacement bytes are written'
+        Assert-CcodEqual $true $raceState.RenameBlocked 'the open owned source handle must block pathname rename'
+        Assert-CcodEqual $false $raceState.ForeignInserted 'the attacker must not install a foreign source path object'
+        Assert-CcodEqual $false $raceState.ForeignSourceConsumed 'commit must never consume a foreign source object'
+        Assert-CcodTrue (-not [IO.File]::Exists($displaced)) 'the owned replacement object must not be displaced from its open handle'
+        Assert-CcodEqual 1 $siblings.Count 'successful handle commit must leave only the target'
+    }
+
     Invoke-CcodTest 'restores the old JSON when a simulated 1176 leaves the target missing' {
         $path = Join-Path $root 'replace-1176\settings.json'
         Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'before' })
         $adapters = @{
-            ReplaceFileNoBackup = {
-                param([string]$Source, [string]$Destination)
+            CommitFileByHandle = {
+                param([IO.FileStream]$Source, [string]$Destination)
                 [IO.File]::Delete($Destination)
                 return [pscustomobject]@{ Success = $false; ErrorCode = 1176 }
             }
@@ -110,8 +163,8 @@ try {
                 if ($Purpose -eq 'replacement') { return 'new-replacement.json' }
                 return 'old-recovery.json'
             }
-            ReplaceFileNoBackup = {
-                param([string]$Source, [string]$Destination)
+            CommitFileByHandle = {
+                param([IO.FileStream]$Source, [string]$Destination)
                 [IO.File]::Move($Destination, $displaced)
                 [IO.File]::WriteAllText($Destination, 'foreign path object', [Text.UTF8Encoding]::new($false))
                 return [pscustomobject]@{ Success = $false; ErrorCode = 1177 }

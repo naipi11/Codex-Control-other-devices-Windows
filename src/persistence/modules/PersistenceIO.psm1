@@ -94,21 +94,104 @@ function Resolve-CcodContainedPath {
     return $candidate
 }
 
-function Initialize-CcodNativeAtomicReplace {
-    if ($null -ne ('CcodNativeAtomicReplace' -as [type])) { return }
+function Initialize-CcodNativeAtomicFile {
+    if ($null -ne ('CcodNativeAtomicFile' -as [type])) { return }
 
     Add-Type -TypeDefinition @'
 using System;
+using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
-public static class CcodNativeAtomicReplace
+public static class CcodNativeAtomicFile
 {
-    [DllImport("kernel32.dll", EntryPoint = "ReplaceFileW", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool ReplaceFile(string replacedFileName, string replacementFileName, string backupFileName, uint replaceFlags, IntPtr exclude, IntPtr reserved);
+    private const uint GenericWrite = 0x40000000U;
+    private const uint Delete = 0x00010000U;
+    private const uint CreateNew = 1U;
+    private const uint FileAttributeNormal = 0x00000080U;
+    private const uint FileFlagWriteThrough = 0x80000000U;
+    private const int FileRenameInfo = 3;
 
-    public static int ReplaceFileNoBackup(string targetFileName, string replacementFileName)
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle file,
+        int fileInformationClass,
+        IntPtr fileInformation,
+        uint bufferSize);
+
+    public static FileStream CreateNewFile(string path)
     {
-        return ReplaceFile(targetFileName, replacementFileName, null, 0, IntPtr.Zero, IntPtr.Zero) ? 0 : Marshal.GetLastWin32Error();
+        SafeFileHandle handle = CreateFile(
+            path,
+            GenericWrite | Delete,
+            0,
+            IntPtr.Zero,
+            CreateNew,
+            FileAttributeNormal | FileFlagWriteThrough,
+            IntPtr.Zero);
+
+        if (handle.IsInvalid)
+        {
+            int errorCode = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new IOException("Could not create an owned atomic file", new Win32Exception(errorCode));
+        }
+
+        try
+        {
+            return new FileStream(handle, FileAccess.Write, 4096, false);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    public static int MoveFileByHandle(SafeFileHandle source, string destination)
+    {
+        string fullPath = Path.GetFullPath(destination);
+        string nativePath = fullPath.StartsWith(@"\\", StringComparison.Ordinal)
+            ? @"\??\UNC\" + fullPath.Substring(2)
+            : @"\??\" + fullPath;
+        byte[] name = Encoding.Unicode.GetBytes(nativePath);
+        int rootDirectoryOffset = IntPtr.Size;
+        int fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
+        int fileNameOffset = fileNameLengthOffset + sizeof(uint);
+        int bufferSize = checked(fileNameOffset + name.Length + sizeof(char));
+        IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
+
+        try
+        {
+            for (int index = 0; index < bufferSize; index++)
+            {
+                Marshal.WriteByte(buffer, index, 0);
+            }
+            Marshal.WriteByte(buffer, 0, 1);
+            Marshal.WriteIntPtr(buffer, rootDirectoryOffset, IntPtr.Zero);
+            Marshal.WriteInt32(buffer, fileNameLengthOffset, name.Length);
+            Marshal.Copy(name, 0, IntPtr.Add(buffer, fileNameOffset), name.Length);
+
+            return SetFileInformationByHandle(source, FileRenameInfo, buffer, (uint)bufferSize)
+                ? 0
+                : Marshal.GetLastWin32Error();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 }
 '@
@@ -120,10 +203,10 @@ function Get-CcodAtomicWriteAdapters {
     $resolved = @{
         GetRandomFileName = { param([string]$Purpose) [IO.Path]::GetRandomFileName() }
         FileExists = { param([string]$Path) [IO.File]::Exists($Path) }
-        CreateNewFile = { param([string]$Path) [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
-        ReplaceFileNoBackup = {
-            param([string]$Source, [string]$Destination)
-            $errorCode = [CcodNativeAtomicReplace]::ReplaceFileNoBackup($Destination, $Source)
+        CreateNewFile = { param([string]$Path) [CcodNativeAtomicFile]::CreateNewFile($Path) }
+        CommitFileByHandle = {
+            param([IO.FileStream]$Source, [string]$Destination)
+            $errorCode = [CcodNativeAtomicFile]::MoveFileByHandle($Source.SafeFileHandle, $Destination)
             return [pscustomobject]@{ Success = ($errorCode -eq 0); ErrorCode = $errorCode }
         }
     }
@@ -190,7 +273,8 @@ function Test-CcodPathMatchesFingerprint {
 function Write-CcodOwnedBytes {
     param(
         [Parameter(Mandatory)]$OwnedFile,
-        [Parameter(Mandatory)][byte[]]$Bytes
+        [Parameter(Mandatory)][byte[]]$Bytes,
+        [switch]$KeepOpen
     )
 
     try {
@@ -201,7 +285,9 @@ function Write-CcodOwnedBytes {
             $OwnedFile.Stream.Flush()
         }
     } finally {
-        $OwnedFile.Stream.Dispose()
+        if (-not $KeepOpen) {
+            $OwnedFile.Stream.Dispose()
+        }
     }
 }
 
@@ -242,35 +328,42 @@ function Write-CcodAtomicJson {
         [hashtable]$Adapters
     )
 
-    Initialize-CcodNativeAtomicReplace
+    Initialize-CcodNativeAtomicFile
     $Adapters = Get-CcodAtomicWriteAdapters -Adapters $Adapters
     $directory = Split-Path -Path $Path -Parent
     [IO.Directory]::CreateDirectory($directory) | Out-Null
     $json = ($Value | ConvertTo-Json -Depth 16) + "`n"
     $encoding = [Text.UTF8Encoding]::new($false)
     $temporary = New-CcodAtomicOwnedFile -Directory $directory -Purpose 'replacement' -Adapters $Adapters
-    Write-CcodOwnedBytes -OwnedFile $temporary -Bytes $encoding.GetBytes($json)
-
-    if (-not [IO.File]::Exists($Path)) {
-        [IO.File]::Move($temporary.Path, $Path)
-        return
+    $oldBytes = $null
+    $oldFingerprint = $null
+    try {
+        Write-CcodOwnedBytes -OwnedFile $temporary -Bytes $encoding.GetBytes($json) -KeepOpen
+        if (& $Adapters.FileExists $Path) {
+            $oldBytes = [IO.File]::ReadAllBytes($Path)
+            $oldFingerprint = Get-CcodByteFingerprint -Bytes $oldBytes
+        }
+        $result = & $Adapters.CommitFileByHandle $temporary.Stream $Path
+    } finally {
+        $temporary.Stream.Dispose()
     }
 
-    $oldBytes = [IO.File]::ReadAllBytes($Path)
-    $oldFingerprint = Get-CcodByteFingerprint -Bytes $oldBytes
-    $result = & $Adapters.ReplaceFileNoBackup $temporary.Path $Path
     if ($result.Success) { return }
 
+    if ($null -eq $oldBytes) {
+        Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' "Native atomic JSON commit failed with Windows error $($result.ErrorCode); no prior target required recovery" $Path
+    }
+
     if (Test-CcodPathMatchesFingerprint -Path $Path -Fingerprint $oldFingerprint -Adapters $Adapters) {
-        Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' "Native atomic JSON replacement failed with Windows error $($result.ErrorCode); the old target remains valid" $Path
+        Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' "Native atomic JSON commit failed with Windows error $($result.ErrorCode); the old target remains valid" $Path
     }
 
     if (-not (& $Adapters.FileExists $Path) -and (Restore-CcodAtomicOldTarget -Path $Path -OldBytes $oldBytes -OldFingerprint $oldFingerprint -Adapters $Adapters)) {
-        Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' "Native atomic JSON replacement failed with Windows error $($result.ErrorCode); the old target was restored" $Path
+        Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' "Native atomic JSON commit failed with Windows error $($result.ErrorCode); the old target was restored" $Path
     }
 
     $artifact = New-CcodAtomicRecoveryArtifact -Directory $directory -OldBytes $oldBytes -Adapters $Adapters
-    Throw-CcodError 'CCOD_ATOMIC_RECOVERY_FAILED' "Native atomic JSON replacement failed with Windows error $($result.ErrorCode); old bytes were retained in a recovery artifact" ([pscustomobject]@{ TargetPath = $Path; RecoveryArtifact = $artifact })
+    Throw-CcodError 'CCOD_ATOMIC_RECOVERY_FAILED' "Native atomic JSON commit failed with Windows error $($result.ErrorCode); old bytes were retained in a recovery artifact" ([pscustomobject]@{ TargetPath = $Path; RecoveryArtifact = $artifact })
 }
 
 function Read-CcodStrictJson {
