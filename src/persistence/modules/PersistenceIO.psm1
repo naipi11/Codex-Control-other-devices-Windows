@@ -94,18 +94,38 @@ function Resolve-CcodContainedPath {
     return $candidate
 }
 
+function Initialize-CcodNativeAtomicReplace {
+    if ($null -ne ('CcodNativeAtomicReplace' -as [type])) { return }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class CcodNativeAtomicReplace
+{
+    [DllImport("kernel32.dll", EntryPoint = "ReplaceFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ReplaceFile(string replacedFileName, string replacementFileName, string backupFileName, uint replaceFlags, IntPtr exclude, IntPtr reserved);
+
+    public static int ReplaceFileNoBackup(string targetFileName, string replacementFileName)
+    {
+        return ReplaceFile(targetFileName, replacementFileName, null, 0, IntPtr.Zero, IntPtr.Zero) ? 0 : Marshal.GetLastWin32Error();
+    }
+}
+'@
+}
+
 function Get-CcodAtomicWriteAdapters {
     param([hashtable]$Adapters)
 
     $resolved = @{
         GetRandomFileName = { param([string]$Purpose) [IO.Path]::GetRandomFileName() }
         FileExists = { param([string]$Path) [IO.File]::Exists($Path) }
-        DeleteFile = { param([string]$Path) [IO.File]::Delete($Path) }
-        MoveFile = { param([string]$Source, [string]$Destination) [IO.File]::Move($Source, $Destination) }
-        CopyFile = { param([string]$Source, [string]$Destination) [IO.File]::Copy($Source, $Destination, $true) }
         CreateNewFile = { param([string]$Path) [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
-        BeforeReplace = { param([string]$Backup) }
-        ReplaceFile = { param([string]$Source, [string]$Destination, [string]$Backup) [IO.File]::Replace($Source, $Destination, $Backup, $true) }
+        ReplaceFileNoBackup = {
+            param([string]$Source, [string]$Destination)
+            $errorCode = [CcodNativeAtomicReplace]::ReplaceFileNoBackup($Destination, $Source)
+            return [pscustomobject]@{ Success = ($errorCode -eq 0); ErrorCode = $errorCode }
+        }
     }
     if ($null -ne $Adapters) {
         foreach ($name in $Adapters.Keys) {
@@ -115,7 +135,7 @@ function Get-CcodAtomicWriteAdapters {
     return $resolved
 }
 
-function Get-CcodAtomicUnusedSiblingPath {
+function New-CcodAtomicOwnedFile {
     param(
         [Parameter(Mandatory)][string]$Directory,
         [Parameter(Mandatory)][string]$Purpose,
@@ -128,66 +148,30 @@ function Get-CcodAtomicUnusedSiblingPath {
             Throw-CcodError 'CCOD_ATOMIC_NAME_INVALID' 'Atomic JSON helper supplied an unsafe sibling name' $leaf
         }
         $candidate = Join-Path $Directory $leaf
-        if (-not (& $Adapters.FileExists $candidate)) {
-            return $candidate
-        }
-    }
-    Throw-CcodError 'CCOD_ATOMIC_NAME_EXHAUSTED' 'Could not allocate a unique atomic JSON sibling name' $Directory
-}
-
-function New-CcodAtomicBackupPlaceholder {
-    param(
-        [Parameter(Mandatory)][string]$Directory,
-        [Parameter(Mandatory)][hashtable]$Adapters
-    )
-
-    for ($attempt = 0; $attempt -lt 32; $attempt++) {
-        $leaf = [string](& $Adapters.GetRandomFileName 'backup')
-        if ([string]::IsNullOrWhiteSpace($leaf) -or [IO.Path]::IsPathRooted($leaf) -or $leaf -ne [IO.Path]::GetFileName($leaf)) {
-            Throw-CcodError 'CCOD_ATOMIC_NAME_INVALID' 'Atomic JSON helper supplied an unsafe sibling name' $leaf
-        }
-        $candidate = Join-Path $Directory $leaf
-        $stream = $null
         try {
-            $stream = & $Adapters.CreateNewFile $candidate
+            return [pscustomobject]@{ Path = $candidate; Stream = (& $Adapters.CreateNewFile $candidate) }
         } catch [IO.IOException] {
             continue
         }
-        try {
-            $marker = [Text.Encoding]::UTF8.GetBytes('CCOD-atomic-backup-' + [guid]::NewGuid().ToString('N'))
-            $stream.Write($marker, 0, $marker.Length)
-            if ($stream -is [IO.FileStream]) {
-                $stream.Flush($true)
-            } else {
-                $stream.Flush()
-            }
-            $stream.Dispose()
-            $stream = $null
-            return [pscustomobject]@{
-                Path = $candidate
-                PlaceholderFingerprint = Get-CcodFileFingerprint -Path $candidate
-            }
-        } catch {
-            if (& $Adapters.FileExists $candidate) { & $Adapters.DeleteFile $candidate }
-            throw
-        } finally {
-            if ($null -ne $stream) { $stream.Dispose() }
+    }
+    Throw-CcodError 'CCOD_ATOMIC_NAME_EXHAUSTED' 'Could not atomically claim a unique JSON sibling name' $Directory
+}
+
+function Get-CcodByteFingerprint {
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [pscustomobject]@{
+            Length = [int64]$Bytes.LongLength
+            Sha256 = [BitConverter]::ToString($sha256.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant()
         }
-    }
-    Throw-CcodError 'CCOD_ATOMIC_NAME_EXHAUSTED' 'Could not atomically claim a unique backup name' $Directory
-}
-
-function Get-CcodFileFingerprint {
-    param([Parameter(Mandatory)][string]$Path)
-
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    return [pscustomobject]@{
-        Length = [int64]$item.Length
-        Sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
     }
 }
 
-function Test-CcodFileFingerprint {
+function Test-CcodPathMatchesFingerprint {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]$Fingerprint,
@@ -196,11 +180,58 @@ function Test-CcodFileFingerprint {
 
     if (-not (& $Adapters.FileExists $Path)) { return $false }
     try {
-        $actual = Get-CcodFileFingerprint -Path $Path
+        $actual = Get-CcodByteFingerprint -Bytes ([IO.File]::ReadAllBytes($Path))
         return $actual.Length -eq $Fingerprint.Length -and $actual.Sha256 -ceq $Fingerprint.Sha256
     } catch {
         return $false
     }
+}
+
+function Write-CcodOwnedBytes {
+    param(
+        [Parameter(Mandatory)]$OwnedFile,
+        [Parameter(Mandatory)][byte[]]$Bytes
+    )
+
+    try {
+        $OwnedFile.Stream.Write($Bytes, 0, $Bytes.Length)
+        if ($OwnedFile.Stream -is [IO.FileStream]) {
+            $OwnedFile.Stream.Flush($true)
+        } else {
+            $OwnedFile.Stream.Flush()
+        }
+    } finally {
+        $OwnedFile.Stream.Dispose()
+    }
+}
+
+function New-CcodAtomicRecoveryArtifact {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][byte[]]$OldBytes,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    $artifact = New-CcodAtomicOwnedFile -Directory $Directory -Purpose 'recovery' -Adapters $Adapters
+    Write-CcodOwnedBytes -OwnedFile $artifact -Bytes $OldBytes
+    return $artifact.Path
+}
+
+function Restore-CcodAtomicOldTarget {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][byte[]]$OldBytes,
+        [Parameter(Mandatory)]$OldFingerprint,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    try {
+        $target = [pscustomobject]@{ Path = $Path; Stream = (& $Adapters.CreateNewFile $Path) }
+    } catch [IO.IOException] {
+        return $false
+    }
+    Write-CcodOwnedBytes -OwnedFile $target -Bytes $OldBytes
+    return Test-CcodPathMatchesFingerprint -Path $Path -Fingerprint $OldFingerprint -Adapters $Adapters
 }
 
 function Write-CcodAtomicJson {
@@ -211,75 +242,35 @@ function Write-CcodAtomicJson {
         [hashtable]$Adapters
     )
 
+    Initialize-CcodNativeAtomicReplace
     $Adapters = Get-CcodAtomicWriteAdapters -Adapters $Adapters
     $directory = Split-Path -Path $Path -Parent
     [IO.Directory]::CreateDirectory($directory) | Out-Null
-    $temporary = Get-CcodAtomicUnusedSiblingPath -Directory $directory -Purpose 'temporary' -Adapters $Adapters
-    $backup = $null
-    $temporaryOwned = $false
-    $backupOwned = $false
-    $backupConsumable = $false
-    $replaceCompleted = $false
-    try {
-        $json = ($Value | ConvertTo-Json -Depth 16) + "`n"
-        $encoding = [Text.UTF8Encoding]::new($false)
-        $stream = [IO.FileStream]::new($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $temporaryOwned = $true
-        try {
-            $writer = [IO.StreamWriter]::new($stream, $encoding)
-            try {
-                $writer.Write($json)
-                $writer.Flush()
-                $stream.Flush($true)
-            } finally {
-                $writer.Dispose()
-            }
-        } finally {
-            $stream.Dispose()
-        }
+    $json = ($Value | ConvertTo-Json -Depth 16) + "`n"
+    $encoding = [Text.UTF8Encoding]::new($false)
+    $temporary = New-CcodAtomicOwnedFile -Directory $directory -Purpose 'replacement' -Adapters $Adapters
+    Write-CcodOwnedBytes -OwnedFile $temporary -Bytes $encoding.GetBytes($json)
 
-        if ([IO.File]::Exists($Path)) {
-            $oldTarget = Get-CcodFileFingerprint -Path $Path
-            $backupClaim = New-CcodAtomicBackupPlaceholder -Directory $directory -Adapters $Adapters
-            $backup = $backupClaim.Path
-            $backupOwned = $true
-            & $Adapters.BeforeReplace $backup
-            if (-not (Test-CcodFileFingerprint -Path $backup -Fingerprint $backupClaim.PlaceholderFingerprint -Adapters $Adapters)) {
-                Throw-CcodError 'CCOD_ATOMIC_RECOVERY_FAILED' 'Atomic JSON backup placeholder ownership cannot be verified before replacement' $backup
-            }
-            try {
-                & $Adapters.ReplaceFile $temporary $Path $backup
-                $replaceCompleted = $true
-                $temporaryOwned = $false
-                if (-not (Test-CcodFileFingerprint -Path $backup -Fingerprint $oldTarget -Adapters $Adapters)) {
-                    Throw-CcodError 'CCOD_ATOMIC_RECOVERY_FAILED' 'Atomic JSON replacement backup cannot be verified as the old target' $backup
-                }
-                $backupConsumable = $true
-            } catch {
-                if ($backupOwned -and (Test-CcodFileFingerprint -Path $backup -Fingerprint $oldTarget -Adapters $Adapters)) {
-                    try {
-                        if (& $Adapters.FileExists $Path) {
-                            & $Adapters.CopyFile $backup $Path
-                            & $Adapters.DeleteFile $backup
-                        } else {
-                            & $Adapters.MoveFile $backup $Path
-                        }
-                    } catch {
-                        Throw-CcodError 'CCOD_ATOMIC_RECOVERY_FAILED' 'Atomic JSON replacement failed and the old target could not be restored' $Path
-                    }
-                } elseif ($backupOwned) {
-                    Throw-CcodError 'CCOD_ATOMIC_RECOVERY_FAILED' 'Atomic JSON replacement failed and its backup cannot be verified as the old target' $backup
-                }
-                Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' 'Atomic JSON replacement failed; the old target was preserved or restored' $Path
-            }
-        } else {
-            [IO.File]::Move($temporary, $Path)
-            $temporaryOwned = $false
-        }
-    } finally {
-        if ($temporaryOwned -and (& $Adapters.FileExists $temporary)) { & $Adapters.DeleteFile $temporary }
-        if ($replaceCompleted -and $backupOwned -and $backupConsumable -and (& $Adapters.FileExists $backup)) { & $Adapters.DeleteFile $backup }
+    if (-not [IO.File]::Exists($Path)) {
+        [IO.File]::Move($temporary.Path, $Path)
+        return
     }
+
+    $oldBytes = [IO.File]::ReadAllBytes($Path)
+    $oldFingerprint = Get-CcodByteFingerprint -Bytes $oldBytes
+    $result = & $Adapters.ReplaceFileNoBackup $temporary.Path $Path
+    if ($result.Success) { return }
+
+    if (Test-CcodPathMatchesFingerprint -Path $Path -Fingerprint $oldFingerprint -Adapters $Adapters) {
+        Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' "Native atomic JSON replacement failed with Windows error $($result.ErrorCode); the old target remains valid" $Path
+    }
+
+    if (-not (& $Adapters.FileExists $Path) -and (Restore-CcodAtomicOldTarget -Path $Path -OldBytes $oldBytes -OldFingerprint $oldFingerprint -Adapters $Adapters)) {
+        Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' "Native atomic JSON replacement failed with Windows error $($result.ErrorCode); the old target was restored" $Path
+    }
+
+    $artifact = New-CcodAtomicRecoveryArtifact -Directory $directory -OldBytes $oldBytes -Adapters $Adapters
+    Throw-CcodError 'CCOD_ATOMIC_RECOVERY_FAILED' "Native atomic JSON replacement failed with Windows error $($result.ErrorCode); old bytes were retained in a recovery artifact" ([pscustomobject]@{ TargetPath = $Path; RecoveryArtifact = $artifact })
 }
 
 function Read-CcodStrictJson {
