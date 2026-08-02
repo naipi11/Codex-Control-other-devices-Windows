@@ -100,7 +100,7 @@ function Invoke-CcodLeasedTestController {
 $root=Join-Path ([IO.Path]::GetTempPath()) ('ccod-controller-selftest-'+[guid]::NewGuid().ToString('N'))
 try{
     $paths=New-CcodControllerPaths $root;$resultPath=Join-Path $root 'result.json'
-    Invoke-CcodTest 'writes the atomic result before exactly one compressed stdout line' {
+    Invoke-CcodTest 'writes provisional and final atomic results before exactly one compressed stdout line' {
         $events=[Collections.Generic.List[string]]::new();$stdout=[Collections.Generic.List[string]]::new();$captured=[pscustomobject]@{Written=$null}
         $request=New-CcodControllerRequest
         $run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
@@ -109,7 +109,7 @@ try{
             WriteStdout={param($Line)$events.Add('stdout');$stdout.Add($Line)}.GetNewClosure()
             WriteStderr={param($Line)$events.Add('stderr')}.GetNewClosure()
         }
-        Assert-CcodEqual 'write,stdout' ($events -join ',') 'atomic result write precedes stdout and no diagnostic leaks'
+        Assert-CcodEqual 'write,write,stdout' ($events -join ',') 'provisional and final atomic result writes precede stdout with no diagnostic leaks'
         Assert-CcodEqual 1 $stdout.Count 'stdout receives exactly one call'
         Assert-CcodTrue ($stdout[0] -cnotmatch '[\r\n]') 'compressed JSON argument contains no embedded newline'
         Assert-CcodEqual ($captured.Written|ConvertTo-Json -Depth 16 -Compress) $stdout[0] 'stdout is the same object that was written atomically'
@@ -128,9 +128,31 @@ try{
             WriteStdout={param($Line)$events.Add('stdout')}.GetNewClosure()
             WriteStderr={param($Line)}
         }
-        Assert-CcodEqual 'enter:AccountTransition:,enter:Transition:1,journal,engine,write,exit:Transition,exit:AccountTransition,stdout' ($events -join ',') 'lease wrapper covers journal engine and result, then releases before stdout'
+        Assert-CcodEqual 'enter:AccountTransition:,enter:Transition:1,journal,engine,write,exit:Transition,exit:AccountTransition,write,stdout' ($events -join ',') 'lease wrapper persists unsafe provisional, releases, then publishes final result before stdout'
         Assert-CcodEqual '5000,3750' ($timeouts -join ',') 'one five-second budget supplies exact remaining milliseconds to the second wait'
         Assert-CcodEqual 0 $run.ExitCode 'normal leased inspect remains safe'
+    }
+
+    Invoke-CcodTest 'publishes one exact unsafe provisional before releases and success only afterward' {
+        $events=[Collections.Generic.List[string]]::new();$writes=[Collections.Generic.List[string]]::new();$stdout=[Collections.Generic.List[string]]::new();$request=New-CcodControllerRequest
+        $run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
+            EngineInvoker={param($Action,$Request,$Paths)New-CcodControllerResult $Action $Request.transactionId Inspected}.GetNewClosure()
+            WriteResult={param($Path,$Value)$events.Add('write');$writes.Add(($Value|ConvertTo-Json -Depth 16 -Compress))}.GetNewClosure()
+            ExitMutex={param($Lease)$events.Add("exit:$($Lease.Kind)");Close-CcodControllerTestLease $Lease}.GetNewClosure()
+            WriteStdout={param($Line)$events.Add('stdout');$stdout.Add($Line)}.GetNewClosure();WriteStderr={param($Line)}
+        }
+        Assert-CcodEqual 'write,exit:Transition,exit:AccountTransition,write,stdout' ($events -join ',') 'no final success is durable until both releases validate'
+        Assert-CcodEqual 2 $writes.Count 'leased completion uses one provisional and one final atomic write'
+        $provisional=$writes[0]|ConvertFrom-Json
+        Assert-CcodEqual 'schemaVersion,action,ok,outcome,safeState,stage,transactionId,package,source,special,probes,recovery,error,logFile' (($provisional.PSObject.Properties.Name)-join ',') 'provisional has the exact 14-field result contract'
+        Assert-CcodEqual $false $provisional.ok 'provisional is never success'
+        Assert-CcodEqual 'Error' $provisional.outcome 'provisional cannot imply completion'
+        Assert-CcodEqual 'CCOD_CONTROLLER_RESULT_WRITE_FAILED' $provisional.error.code 'provisional uses the stable unpublished-result code'
+        Assert-CcodEqual 'ResultWrite' $provisional.stage 'provisional has the exact unsafe stage'
+        Assert-CcodEqual $request.transactionId $provisional.transactionId 'provisional preserves exact correlation'
+        Assert-CcodEqual $writes[1] $stdout[0] 'final post-release success is the one stdout frame'
+        Assert-CcodEqual $true (($writes[1]|ConvertFrom-Json).ok) 'success becomes durable only after releases'
+        Assert-CcodEqual 0 $run.ExitCode 'validated two-phase publication remains successful'
     }
 
     Invoke-CcodTest 'first timeout prevents local lease journal and engine and returns correlated busy' {
@@ -155,7 +177,7 @@ try{
             ReadJournal={param($Path)$events.Add('journal');throw 'must not read'}.GetNewClosure();EngineInvoker={param($Action,$Request,$Paths)$events.Add('engine');throw 'must not invoke'}.GetNewClosure()
             WriteResult={param($Path,$Value)$events.Add('write')}.GetNewClosure();WriteStdout={param($Line)$events.Add('stdout')}.GetNewClosure();WriteStderr={param($Line)}
         }
-        Assert-CcodEqual 'enter:AccountTransition,enter:Transition,write,exit:AccountTransition,stdout' ($events -join ',') 'account is released after local timeout and before stdout'
+        Assert-CcodEqual 'enter:AccountTransition,enter:Transition,write,exit:AccountTransition,write,stdout' ($events -join ',') 'account is released after provisional local-timeout framing and before final stdout result'
         Assert-CcodEqual 'CCOD_TRANSITION_BUSY' $run.Result.error.code 'second timeout is stable busy'
     }
 
@@ -314,7 +336,7 @@ try{
             }
             Assert-CcodEqual 'write,exit:Transition,exit:AccountTransition,write,stdout' ($events -join ',') 'success is corrected only after local then account release are each attempted once'
             Assert-CcodEqual 2 $writes.Count 'release failure overwrites the earlier durable success with one corrected result'
-            Assert-CcodEqual $true (($writes[0]|ConvertFrom-Json).ok) 'the initial under-lease write records the engine result'
+            Assert-CcodEqual $false (($writes[0]|ConvertFrom-Json).ok) 'the initial under-lease write is the unsafe provisional'
             Assert-CcodEqual 1 $stdout.Count 'release failure still emits exactly one stdout frame'
             Assert-CcodEqual $writes[1] $stdout[0] 'the corrected durable result and stdout are identical'
             Assert-CcodEqual $writes[1] ($run.Result|ConvertTo-Json -Depth 16 -Compress) 'the returned result is the corrected durable result'
@@ -327,6 +349,58 @@ try{
             Assert-CcodEqual 1 $run.ExitCode 'release failure exits unsafe'
             Assert-CcodEqual 1 $logs.Count 'release failure emits one bounded diagnostic'
             Assert-CcodTrue ((($writes -join '')+($stdout -join '')+($logs -join '')) -cnotmatch 'private|hunter2|release-Transition|release-AccountTransition') 'release callback secrets never enter durable public or diagnostic framing'
+        }finally{foreach($lease in $leases){[void](Close-CcodControllerTestLease $lease)}}
+    }
+
+    Invoke-CcodTest 'keeps every two-phase write and release failure window durably unsafe' {
+        foreach($mode in @('ProvisionalWriteFailure','FinalWriteFailure','ReleaseFailure','ReleaseAndFinalWriteFailure')){
+            $request=New-CcodControllerRequest;$leases=[Collections.Generic.List[object]]::new();$releases=[Collections.Generic.List[string]]::new();$stdout=[Collections.Generic.List[string]]::new();$state=[pscustomobject]@{WriteCount=0;Durable=$null}
+            try{
+                $run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
+                    EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$lease=New-CcodControllerTestLease $Kind;$leases.Add($lease);$lease}.GetNewClosure()
+                    EngineInvoker={param($Action,$Request,$Paths)New-CcodControllerResult $Action $Request.transactionId Inspected}.GetNewClosure()
+                    WriteResult={
+                        param($Path,$Value)
+                        $state.WriteCount++
+                        if(($mode -ceq 'ProvisionalWriteFailure' -and $state.WriteCount -eq 1) -or (($mode -ceq 'FinalWriteFailure' -or $mode -ceq 'ReleaseAndFinalWriteFailure') -and $state.WriteCount -eq 2)){throw "C:\private\write-window`n--token hunter2"}
+                        $state.Durable=$Value|ConvertTo-Json -Depth 16 -Compress
+                    }.GetNewClosure()
+                    ExitMutex={param($Lease)$releases.Add($Lease.Kind);if($mode.StartsWith('Release',[StringComparison]::Ordinal)){throw "C:\private\release-window`n--token hunter2"};Close-CcodControllerTestLease $Lease}.GetNewClosure()
+                    WriteStdout={param($Line)$stdout.Add($Line)}.GetNewClosure();WriteStderr={param($Line)};WriteLog={param($Path,$Line)}
+                }
+                Assert-CcodEqual 2 $state.WriteCount "$mode attempts one provisional and one post-release final write"
+                Assert-CcodEqual 'Transition,AccountTransition' ($releases -join ',') "$mode attempts local then account release exactly once"
+                Assert-CcodTrue ($null -ne $state.Durable) "$mode leaves an atomic durable frame"
+                $durable=$state.Durable|ConvertFrom-Json
+                Assert-CcodEqual $false $durable.ok "$mode never leaves durable success"
+                Assert-CcodEqual 'Error' $durable.outcome "$mode durable frame is explicitly unsafe"
+                Assert-CcodEqual $request.transactionId $durable.transactionId "$mode durable frame remains correlated"
+                Assert-CcodEqual 1 $stdout.Count "$mode emits one stdout frame"
+                Assert-CcodEqual $false (($stdout[0]|ConvertFrom-Json).ok) "$mode stdout never claims success"
+                Assert-CcodEqual 1 $run.ExitCode "$mode exits unsafe"
+                $expectedCode=if($mode -ceq 'ReleaseFailure'){'CCOD_KERNEL_RELEASE_FAILED'}else{'CCOD_CONTROLLER_RESULT_WRITE_FAILED'}
+                Assert-CcodEqual $expectedCode $run.Result.error.code "$mode returns the stable final failure code"
+                Assert-CcodTrue (($state.Durable+$stdout[0]) -cnotmatch 'private|hunter2|write-window|release-window') "$mode public framing is sanitized"
+            }finally{foreach($lease in $leases){[void](Close-CcodControllerTestLease $lease)}}
+        }
+    }
+
+    Invoke-CcodTest 'a true release return without the exact released lease mutation cannot publish success' {
+        $request=New-CcodControllerRequest;$leases=[Collections.Generic.List[object]]::new();$releases=[Collections.Generic.List[string]]::new();$writes=[Collections.Generic.List[string]]::new()
+        try{
+            $run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
+                EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$lease=New-CcodControllerTestLease $Kind;$leases.Add($lease);$lease}.GetNewClosure()
+                EngineInvoker={param($Action,$Request,$Paths)New-CcodControllerResult $Action $Request.transactionId Inspected}.GetNewClosure()
+                ExitMutex={param($Lease)$releases.Add($Lease.Kind);$true}.GetNewClosure()
+                WriteResult={param($Path,$Value)$writes.Add(($Value|ConvertTo-Json -Depth 16 -Compress))}.GetNewClosure();WriteStdout={param($Line)};WriteStderr={param($Line)};WriteLog={param($Path,$Line)}
+            }
+            Assert-CcodEqual 'Transition,AccountTransition' ($releases -join ',') 'both deceptive release callbacks are attempted exactly once'
+            Assert-CcodEqual 2 $writes.Count 'deceptive release return retains provisional then publishes one unsafe correction'
+            Assert-CcodEqual $false (($writes[0]|ConvertFrom-Json).ok) 'pre-release provisional is unsafe'
+            Assert-CcodEqual $false (($writes[1]|ConvertFrom-Json).ok) 'post-release correction is unsafe'
+            Assert-CcodEqual 'CCOD_KERNEL_RELEASE_FAILED' $run.Result.error.code 'missing released-state mutation is a stable release failure'
+            Assert-CcodEqual 'LeaseRelease' $run.Result.stage 'missing released-state mutation uses the exact release stage'
+            Assert-CcodEqual 1 $run.ExitCode 'missing released-state mutation exits unsafe'
         }finally{foreach($lease in $leases){[void](Close-CcodControllerTestLease $lease)}}
     }
 
