@@ -18,17 +18,73 @@ function New-CcodControllerResult([string]$Action,[string]$TransactionId,[string
     [pscustomobject][ordered]@{schemaVersion=1;action=$Action;ok=$true;outcome=$Outcome;safeState=$safe;stage='Completed';transactionId=$TransactionId;package=$null;source=$null;special=$null;probes=$null;recovery=$null;error=$null;logFile=$null}
 }
 
+$script:CcodControllerTestUserSid='S-1-5-21-111-222-333-1001'
+$script:CcodControllerTestSessionId=[int]1
+
 function New-CcodControllerTestLease([string]$Kind,[string]$Outcome='Acquired',[bool]$Abandoned=$false){
-    [pscustomobject][ordered]@{SchemaVersion=1;Name="PrivateTest.$Kind";Kind=$Kind;Outcome=$Outcome;CreatedNew=$true;Abandoned=$Abandoned;Handle=$null;OwnerManagedThreadId=1;Released=($Outcome -cne 'Acquired')}
+    $name=if($Kind -ceq 'AccountTransition'){Get-CcodKernelObjectName -Kind $Kind -UserSid $script:CcodControllerTestUserSid}else{Get-CcodKernelObjectName -Kind $Kind -UserSid $script:CcodControllerTestUserSid -SessionId $script:CcodControllerTestSessionId}
+    if($Outcome -ceq 'TimedOut'){
+        return [pscustomobject][ordered]@{SchemaVersion=1;Name=$name;Kind=$Kind;Outcome='TimedOut';CreatedNew=$true;Abandoned=$false;Handle=$null;OwnerManagedThreadId=$null;Released=$true}
+    }
+    [pscustomobject][ordered]@{SchemaVersion=1;Name=$name;Kind=$Kind;Outcome='Acquired';CreatedNew=$true;Abandoned=$Abandoned;Handle=[Threading.Mutex]::new($false);OwnerManagedThreadId=[Threading.Thread]::CurrentThread.ManagedThreadId;Released=$false}
+}
+
+function Close-CcodControllerTestLease($Lease){
+    if($null -eq $Lease -or $Lease -isnot [pscustomobject]){return $false}
+    if($null -ne $Lease.PSObject.Properties['Handle'] -and $Lease.Handle -is [Threading.Mutex]){$Lease.Handle.Dispose();$Lease.Handle=$null}
+    if($null -ne $Lease.PSObject.Properties['Released'] -and $Lease.PSObject.Properties['Released'].MemberType -eq [Management.Automation.PSMemberTypes]::NoteProperty){$Lease.Released=$true}
+    return $true
+}
+
+function New-CcodMalformedControllerTestLease([string]$Case){
+    if($Case -ceq 'Minimal'){return [pscustomobject][ordered]@{Kind='AccountTransition'}}
+    if($Case -ceq 'Dictionary'){
+        $name=Get-CcodKernelObjectName -Kind AccountTransition -UserSid $script:CcodControllerTestUserSid
+        return [ordered]@{SchemaVersion=1;Name=$name;Kind='AccountTransition';Outcome='TimedOut';CreatedNew=$false;Abandoned=$false;Handle=$null;OwnerManagedThreadId=$null;Released=$true}
+    }
+    $timeout=$Case.StartsWith('Timeout',[StringComparison]::Ordinal)
+    $lease=New-CcodControllerTestLease -Kind AccountTransition -Outcome $(if($timeout){'TimedOut'}else{'Acquired'})
+    switch($Case){
+        'MissingField' {[void]$lease.PSObject.Properties.Remove('Name')}
+        'ExtraField' {$lease|Add-Member -NotePropertyName Extra -NotePropertyValue $true}
+        'WrongOrder' {$lease=[pscustomobject][ordered]@{Name=$lease.Name;SchemaVersion=$lease.SchemaVersion;Kind=$lease.Kind;Outcome=$lease.Outcome;CreatedNew=$lease.CreatedNew;Abandoned=$lease.Abandoned;Handle=$lease.Handle;OwnerManagedThreadId=$lease.OwnerManagedThreadId;Released=$lease.Released}}
+        'ScriptProperty' {[void]$lease.PSObject.Properties.Remove('Released');$lease|Add-Member -MemberType ScriptProperty -Name Released -Value {$false}}
+        'SchemaType' {$lease.SchemaVersion=[long]1}
+        'SchemaValue' {$lease.SchemaVersion=2}
+        'NameMismatch' {$lease.Name=$lease.Name+'.foreign'}
+        'NameType' {$lease.Name=7}
+        'KindCase' {$lease.Kind='accounttransition'}
+        'KindMismatch' {$lease.Kind='Transition'}
+        'KindType' {$lease.Kind=7}
+        'OutcomeCase' {$lease.Outcome='acquired'}
+        'OutcomeUnknown' {$lease.Outcome='Unknown'}
+        'OutcomeType' {$lease.Outcome=7}
+        'CreatedNewType' {$lease.CreatedNew=1}
+        'AbandonedType' {$lease.Abandoned=0}
+        'AcquiredHandleNull' {$lease.Handle.Dispose();$lease.Handle=$null}
+        'AcquiredHandleType' {$lease.Handle.Dispose();$lease.Handle='not-a-mutex'}
+        'AcquiredHandleClosed' {$lease.Handle.Dispose()}
+        'AcquiredOwnerType' {$lease.OwnerManagedThreadId=[long]$lease.OwnerManagedThreadId}
+        'AcquiredOwnerMismatch' {$lease.OwnerManagedThreadId=[int]($lease.OwnerManagedThreadId+1)}
+        'AcquiredOwnerZero' {$lease.OwnerManagedThreadId=[int]0}
+        'AcquiredReleased' {$lease.Released=$true}
+        'ReleasedType' {$lease.Released=0}
+        'TimeoutAbandoned' {$lease.Abandoned=$true}
+        'TimeoutHandle' {$lease.Handle=[Threading.Mutex]::new($false)}
+        'TimeoutOwner' {$lease.OwnerManagedThreadId=[Threading.Thread]::CurrentThread.ManagedThreadId}
+        'TimeoutNotReleased' {$lease.Released=$false}
+        default {throw "unknown malformed lease case $Case"}
+    }
+    return $lease
 }
 
 function Merge-CcodControllerTestAdapters([hashtable]$Overrides){
     $resolved=@{
-        GetIdentity={ [pscustomobject][ordered]@{UserSid='S-1-5-21-111-222-333-1001';SessionId=[int]1} }
+        GetIdentity={ [pscustomobject][ordered]@{UserSid=$script:CcodControllerTestUserSid;SessionId=$script:CcodControllerTestSessionId} }
         StartStopwatch={ [pscustomobject]@{Marker='test-clock'} }
         GetElapsedMilliseconds={param($Clock)[long]0}
         EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)New-CcodControllerTestLease -Kind $Kind}
-        ExitMutex={param($Lease)$Lease.Released=$true;$true}
+        ExitMutex={param($Lease)Close-CcodControllerTestLease $Lease}
         ReadJournal={param($Path)$null}
         UtcNow={ [DateTime]::Parse('2030-02-03T03:00:00Z').ToUniversalTime() }
     }
@@ -65,7 +121,7 @@ try{
         $request=New-CcodControllerRequest;$run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
             GetElapsedMilliseconds={param($Clock)$elapsed.Dequeue()}.GetNewClosure()
             EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$events.Add("enter:${Kind}:$SessionId");$timeouts.Add($TimeoutMilliseconds);New-CcodControllerTestLease $Kind}.GetNewClosure()
-            ExitMutex={param($Lease)$events.Add("exit:$($Lease.Kind)");$Lease.Released=$true;$true}.GetNewClosure()
+            ExitMutex={param($Lease)$events.Add("exit:$($Lease.Kind)");Close-CcodControllerTestLease $Lease}.GetNewClosure()
             ReadJournal={param($Path)$events.Add('journal');$null}.GetNewClosure()
             EngineInvoker={param($Action,$Request,$Paths)$events.Add('engine');New-CcodControllerResult $Action $Request.transactionId}.GetNewClosure()
             WriteResult={param($Path,$Value)$events.Add('write')}.GetNewClosure()
@@ -95,7 +151,7 @@ try{
         $events=[Collections.Generic.List[string]]::new();$request=New-CcodControllerRequest
         $run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
             EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$events.Add("enter:$Kind");if($Kind -ceq 'Transition'){New-CcodControllerTestLease $Kind TimedOut}else{New-CcodControllerTestLease $Kind}}.GetNewClosure()
-            ExitMutex={param($Lease)$events.Add("exit:$($Lease.Kind)");$Lease.Released=$true;$true}.GetNewClosure()
+            ExitMutex={param($Lease)$events.Add("exit:$($Lease.Kind)");Close-CcodControllerTestLease $Lease}.GetNewClosure()
             ReadJournal={param($Path)$events.Add('journal');throw 'must not read'}.GetNewClosure();EngineInvoker={param($Action,$Request,$Paths)$events.Add('engine');throw 'must not invoke'}.GetNewClosure()
             WriteResult={param($Path,$Value)$events.Add('write')}.GetNewClosure();WriteStdout={param($Line)$events.Add('stdout')}.GetNewClosure();WriteStderr={param($Line)}
         }
@@ -122,6 +178,72 @@ try{
         Assert-CcodEqual 0 $mismatchEvents.Count 'request session mismatch has no lease or engine action'
         Assert-CcodEqual 'CCOD_REQUEST_INVALID' $mismatch.Result.error.code 'actual session mismatch is stable request invalid'
         Assert-CcodEqual 'InputValidation' $mismatch.Result.stage 'session mismatch is input validation'
+    }
+
+    Invoke-CcodTest 'stopwatch initialization failure is correlated redacted and framed once' {
+        $request=New-CcodControllerRequest;$events=[Collections.Generic.List[string]]::new();$writes=[Collections.Generic.List[string]]::new();$stdout=[Collections.Generic.List[string]]::new();$escaped=$null;$run=$null
+        try{
+            $run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
+                StartStopwatch={throw "C:\private\clock-init`n--token hunter2"};EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$events.Add('enter');throw 'must not acquire'}.GetNewClosure();ReadJournal={param($Path)$events.Add('journal')}.GetNewClosure();EngineInvoker={param($Action,$Request,$Paths)$events.Add('engine')}.GetNewClosure()
+                WriteResult={param($Path,$Value)$writes.Add(($Value|ConvertTo-Json -Depth 16 -Compress))}.GetNewClosure();WriteStdout={param($Line)$stdout.Add($Line)}.GetNewClosure();WriteStderr={param($Line)};WriteLog={param($Path,$Line)}
+            }
+        }catch{$escaped=$_}
+        Assert-CcodEqual $null $escaped 'stopwatch adapter failure never escapes controller framing'
+        Assert-CcodEqual 0 $events.Count 'clock initialization failure occurs before leases journal or engine'
+        Assert-CcodEqual 'CCOD_KERNEL_OPEN_FAILED' $run.Result.error.code 'clock initialization uses one stable lease code'
+        Assert-CcodEqual 'LeaseAcquire' $run.Result.stage 'clock initialization is a lease-stage failure'
+        Assert-CcodEqual $request.transactionId $run.Result.transactionId 'clock initialization retains exact correlation'
+        Assert-CcodEqual 1 $writes.Count 'clock initialization writes one atomic error result'
+        Assert-CcodEqual 1 $stdout.Count 'clock initialization emits one stdout frame'
+        Assert-CcodEqual $writes[0] $stdout[0] 'clock initialization file/stdout frames match'
+        Assert-CcodEqual 1 $run.ExitCode 'clock initialization failure is unsafe'
+        Assert-CcodTrue ((($run.Result|ConvertTo-Json -Depth 16 -Compress)+$stdout[0]) -cnotmatch 'private|hunter2|clock-init') 'clock initialization secret is redacted'
+    }
+
+    Invoke-CcodTest 'rejects every malformed exact lease before journal engine or cleanup dereference' {
+        $cases=@('Minimal','Dictionary','MissingField','ExtraField','WrongOrder','ScriptProperty','SchemaType','SchemaValue','NameMismatch','NameType','KindCase','KindMismatch','KindType','OutcomeCase','OutcomeUnknown','OutcomeType','CreatedNewType','AbandonedType','AcquiredHandleNull','AcquiredHandleType','AcquiredHandleClosed','AcquiredOwnerType','AcquiredOwnerMismatch','AcquiredOwnerZero','AcquiredReleased','ReleasedType','TimeoutAbandoned','TimeoutHandle','TimeoutOwner','TimeoutNotReleased')
+        foreach($case in $cases){
+            $lease=New-CcodMalformedControllerTestLease $case;$events=[Collections.Generic.List[string]]::new();$writes=[Collections.Generic.List[string]]::new();$stdout=[Collections.Generic.List[string]]::new();$escaped=$null;$run=$null
+            try{
+                try{
+                    $run=Invoke-CcodLeasedTestController -Request (New-CcodControllerRequest) -Paths $paths -ResultPath $resultPath -Adapters @{
+                        EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$events.Add("enter:$Kind");$lease}.GetNewClosure()
+                        ExitMutex={param($Lease)$events.Add("exit:$($Lease.Kind)");throw 'invalid lease must never be released'}.GetNewClosure()
+                        ReadJournal={param($Path)$events.Add('journal');throw 'invalid lease must never reach journal'}.GetNewClosure()
+                        EngineInvoker={param($Action,$Request,$Paths)$events.Add('engine');throw 'invalid lease must never reach engine'}.GetNewClosure()
+                        WriteResult={param($Path,$Value)$writes.Add(($Value|ConvertTo-Json -Depth 16 -Compress))}.GetNewClosure()
+                        WriteStdout={param($Line)$stdout.Add($Line)}.GetNewClosure();WriteStderr={param($Line)};WriteLog={param($Path,$Line)}
+                    }
+                }catch{$escaped=$_}
+                Assert-CcodEqual $null $escaped "$case malformed lease never escapes cleanup framing"
+                Assert-CcodEqual 'enter:AccountTransition' ($events -join ',') "$case stops before journal engine or release"
+                Assert-CcodEqual 'CCOD_KERNEL_LEASE_INVALID' $run.Result.error.code "$case maps to the stable invalid-lease code"
+                Assert-CcodEqual 'LeaseAcquire' $run.Result.stage "$case remains a lease-acquire failure"
+                Assert-CcodEqual 1 $writes.Count "$case persists one unsafe result"
+                Assert-CcodEqual 1 $stdout.Count "$case emits one stdout frame"
+                Assert-CcodEqual $writes[0] $stdout[0] "$case file and stdout frames match"
+                Assert-CcodEqual 1 $run.ExitCode "$case exits unsafe"
+            }finally{[void](Close-CcodControllerTestLease $lease)}
+        }
+    }
+
+    Invoke-CcodTest 'a malformed session lease releases only the validated account lease' {
+        $account=New-CcodControllerTestLease AccountTransition;$session=[pscustomobject][ordered]@{Kind='Transition'};$events=[Collections.Generic.List[string]]::new();$escaped=$null;$run=$null
+        try{
+            try{
+                $run=Invoke-CcodLeasedTestController -Request (New-CcodControllerRequest) -Paths $paths -ResultPath $resultPath -Adapters @{
+                    EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$events.Add("enter:$Kind");if($Kind -ceq 'AccountTransition'){$account}else{$session}}.GetNewClosure()
+                    ExitMutex={param($Lease)$events.Add("exit:$($Lease.Kind)");Close-CcodControllerTestLease $Lease}.GetNewClosure()
+                    ReadJournal={param($Path)$events.Add('journal');throw 'invalid session lease must never reach journal'}.GetNewClosure()
+                    EngineInvoker={param($Action,$Request,$Paths)$events.Add('engine');throw 'invalid session lease must never reach engine'}.GetNewClosure()
+                    WriteResult={param($Path,$Value)};WriteStdout={param($Line)};WriteStderr={param($Line)};WriteLog={param($Path,$Line)}
+                }
+            }catch{$escaped=$_}
+            Assert-CcodEqual $null $escaped 'malformed session lease cannot break cleanup framing'
+            Assert-CcodEqual 'enter:AccountTransition,enter:Transition,exit:AccountTransition' ($events -join ',') 'only the validated account lease is released exactly once'
+            Assert-CcodEqual 'CCOD_KERNEL_LEASE_INVALID' $run.Result.error.code 'malformed session lease maps to the stable invalid-lease code'
+            Assert-CcodEqual 1 $run.ExitCode 'malformed session lease exits unsafe'
+        }finally{[void](Close-CcodControllerTestLease $account)}
     }
 
     Invoke-CcodTest 'active journal permits only Recover and otherwise requires a fresh replay request' {
@@ -167,7 +289,7 @@ try{
         foreach($failurePoint in @('Engine','Write')){
             $releases=[Collections.Generic.List[string]]::new();$request=New-CcodControllerRequest
             $adapters=@{
-                ExitMutex={param($Lease)$releases.Add($Lease.Kind);$Lease.Released=$true;$true}.GetNewClosure()
+                ExitMutex={param($Lease)$releases.Add($Lease.Kind);Close-CcodControllerTestLease $Lease}.GetNewClosure()
                 EngineInvoker={param($Action,$Request,$Paths)if($failurePoint -ceq 'Engine'){throw 'engine secret path C:\private\x'}else{New-CcodControllerResult $Action $Request.transactionId}}.GetNewClosure()
                 WriteResult={param($Path,$Value)if($failurePoint -ceq 'Write'){throw 'write secret token hunter2'}}.GetNewClosure()
                 WriteStdout={param($Line)};WriteStderr={param($Line)};WriteLog={param($Path,$Line)}
@@ -179,6 +301,35 @@ try{
         }
     }
 
+    Invoke-CcodTest 'release failures correct the durable result after both exact release attempts' {
+        $request=New-CcodControllerRequest;$leases=[Collections.Generic.List[object]]::new();$events=[Collections.Generic.List[string]]::new();$writes=[Collections.Generic.List[string]]::new();$stdout=[Collections.Generic.List[string]]::new();$logs=[Collections.Generic.List[string]]::new()
+        try{
+            $run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
+                EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$lease=New-CcodControllerTestLease $Kind;$leases.Add($lease);$lease}.GetNewClosure()
+                EngineInvoker={param($Action,$Request,$Paths)New-CcodControllerResult $Action $Request.transactionId Inspected}.GetNewClosure()
+                WriteResult={param($Path,$Value)$events.Add('write');$writes.Add(($Value|ConvertTo-Json -Depth 16 -Compress))}.GetNewClosure()
+                ExitMutex={param($Lease)$events.Add("exit:$($Lease.Kind)");throw "C:\private\release-$($Lease.Kind)`n--token hunter2"}.GetNewClosure()
+                WriteStdout={param($Line)$events.Add('stdout');$stdout.Add($Line)}.GetNewClosure();WriteStderr={param($Line)}
+                WriteLog={param($Path,$Line)$logs.Add($Line)}.GetNewClosure()
+            }
+            Assert-CcodEqual 'write,exit:Transition,exit:AccountTransition,write,stdout' ($events -join ',') 'success is corrected only after local then account release are each attempted once'
+            Assert-CcodEqual 2 $writes.Count 'release failure overwrites the earlier durable success with one corrected result'
+            Assert-CcodEqual $true (($writes[0]|ConvertFrom-Json).ok) 'the initial under-lease write records the engine result'
+            Assert-CcodEqual 1 $stdout.Count 'release failure still emits exactly one stdout frame'
+            Assert-CcodEqual $writes[1] $stdout[0] 'the corrected durable result and stdout are identical'
+            Assert-CcodEqual $writes[1] ($run.Result|ConvertTo-Json -Depth 16 -Compress) 'the returned result is the corrected durable result'
+            Assert-CcodEqual 'schemaVersion,action,ok,outcome,safeState,stage,transactionId,package,source,special,probes,recovery,error,logFile' (($run.Result.PSObject.Properties.Name)-join ',') 'release correction retains the exact 14-field result contract'
+            Assert-CcodEqual $false $run.Result.ok 'release failure cannot claim success'
+            Assert-CcodEqual 'Error' $run.Result.outcome 'release failure has an unsafe outcome'
+            Assert-CcodEqual 'LeaseRelease' $run.Result.stage 'release failure has the exact stage'
+            Assert-CcodEqual 'CCOD_KERNEL_RELEASE_FAILED' $run.Result.error.code 'release failure has the stable code'
+            Assert-CcodEqual $request.transactionId $run.Result.transactionId 'release failure preserves correlation'
+            Assert-CcodEqual 1 $run.ExitCode 'release failure exits unsafe'
+            Assert-CcodEqual 1 $logs.Count 'release failure emits one bounded diagnostic'
+            Assert-CcodTrue ((($writes -join '')+($stdout -join '')+($logs -join '')) -cnotmatch 'private|hunter2|release-Transition|release-AccountTransition') 'release callback secrets never enter durable public or diagnostic framing'
+        }finally{foreach($lease in $leases){[void](Close-CcodControllerTestLease $lease)}}
+    }
+
     Invoke-CcodTest 'clock or warning-log failure cannot bypass release and stable framing' {
         foreach($mode in @('Diagnostic','AbandonedWarning')){
             $releases=[Collections.Generic.List[string]]::new();$engineCalls=[Collections.Generic.List[string]]::new();$request=New-CcodControllerRequest -Action $(if($mode -ceq 'Diagnostic'){'Inspect'}else{'Apply'})
@@ -186,7 +337,7 @@ try{
                 UtcNow={throw "C:\private\clock`n--token hunter2"}
                 EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)New-CcodControllerTestLease $Kind Acquired ($mode -ceq 'AbandonedWarning' -and $Kind -ceq 'AccountTransition')}.GetNewClosure()
                 EngineInvoker={param($Action,$Request,$Paths)$engineCalls.Add($Action);if($mode -ceq 'Diagnostic'){throw 'engine failed'}else{New-CcodControllerResult $Action $Request.transactionId Activated}}.GetNewClosure()
-                ExitMutex={param($Lease)$releases.Add($Lease.Kind);$Lease.Released=$true;$true}.GetNewClosure();WriteResult={param($Path,$Value)};WriteStdout={param($Line)};WriteStderr={param($Line)};WriteLog={param($Path,$Line)throw 'log unavailable'}
+                ExitMutex={param($Lease)$releases.Add($Lease.Kind);Close-CcodControllerTestLease $Lease}.GetNewClosure();WriteResult={param($Path,$Value)};WriteStdout={param($Line)};WriteStderr={param($Line)};WriteLog={param($Path,$Line)throw 'log unavailable'}
             }
             Assert-CcodEqual 'Transition,AccountTransition' ($releases -join ',') "$mode still releases both leases"
             Assert-CcodEqual 1 $engineCalls.Count "$mode retains the intended single engine dispatch"

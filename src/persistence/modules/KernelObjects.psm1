@@ -191,7 +191,8 @@ function Resolve-CcodKernelName {
         if($HasToken){$default=Get-CcodKernelObjectName -Kind $Kind -UserSid $UserSid -SessionId $SessionId -ReadyToken $ReadyToken}
         else{$default=Get-CcodKernelObjectName -Kind $Kind -UserSid $UserSid -SessionId $SessionId}
     }else{$default=Get-CcodKernelObjectName -Kind $Kind -UserSid $UserSid}
-    $name=& $Adapter.GetName $Kind $UserSid $(if($HasSession){$SessionId}else{$null}) $(if($HasToken){$ReadyToken}else{$null}) $default
+    try{$name=& $Adapter.GetName $Kind $UserSid $(if($HasSession){$SessionId}else{$null}) $(if($HasToken){$ReadyToken}else{$null}) $default}
+    catch{Throw-CcodKernelError 'CCOD_KERNEL_OPEN_FAILED' ([Management.Automation.ErrorCategory]::OpenError)}
     if($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name) -or $name.Length -gt $script:CcodKernelMaximumNameLength){Throw-CcodKernelError 'CCOD_KERNEL_INPUT_INVALID' ([Management.Automation.ErrorCategory]::InvalidArgument)}
     $expectedPrefix=if($script:CcodKernelAccountKinds -ccontains $Kind){'Global\'}else{'Local\'}
     if(-not $name.StartsWith($expectedPrefix,[StringComparison]::Ordinal)){Throw-CcodKernelError 'CCOD_KERNEL_INPUT_INVALID' ([Management.Automation.ErrorCategory]::InvalidArgument)}

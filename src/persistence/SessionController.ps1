@@ -149,12 +149,42 @@ function Get-CcodControllerRemainingBudget {
     return [int]($Total-[long]$elapsed)
 }
 
-function Test-CcodControllerLeaseResult {
-    param($Lease,[string]$Kind)
-    return $null -ne $Lease -and ($Lease -is [pscustomobject] -or $Lease -is [Collections.IDictionary]) -and
-        $null -ne $Lease.PSObject.Properties['Kind'] -and $Lease.Kind -ceq $Kind -and
-        $null -ne $Lease.PSObject.Properties['Outcome'] -and @('Acquired','TimedOut') -ccontains $Lease.Outcome -and
-        $null -ne $Lease.PSObject.Properties['Abandoned'] -and $Lease.Abandoned -is [bool]
+function Throw-CcodControllerLeaseInvalid {
+    $exception=[InvalidOperationException]::new('The kernel lease contract is invalid.')
+    throw [Management.Automation.ErrorRecord]::new($exception,'CCOD_KERNEL_LEASE_INVALID',[Management.Automation.ErrorCategory]::InvalidData,$null)
+}
+
+function Assert-CcodControllerLeaseResult {
+    param($Lease,[string]$Kind,$Identity)
+    $expected=@('SchemaVersion','Name','Kind','Outcome','CreatedNew','Abandoned','Handle','OwnerManagedThreadId','Released')
+    if($null -eq $Lease -or $Lease -isnot [pscustomobject]){Throw-CcodControllerLeaseInvalid}
+    $actual=@($Lease.PSObject.Properties.Name)
+    if($actual.Count -ne $expected.Count){Throw-CcodControllerLeaseInvalid}
+    for($index=0;$index -lt $expected.Count;$index++){
+        if($actual[$index] -cne $expected[$index] -or $Lease.PSObject.Properties[$expected[$index]].MemberType -ne [Management.Automation.PSMemberTypes]::NoteProperty){Throw-CcodControllerLeaseInvalid}
+    }
+    if($Lease.SchemaVersion -isnot [int] -or $Lease.SchemaVersion -ne 1 -or
+        $Lease.Name -isnot [string] -or $Lease.Kind -isnot [string] -or $Lease.Kind -cne $Kind -or
+        $Lease.Outcome -isnot [string] -or @('Acquired','TimedOut') -cnotcontains $Lease.Outcome -or
+        $Lease.CreatedNew -isnot [bool] -or $Lease.Abandoned -isnot [bool] -or $Lease.Released -isnot [bool]){Throw-CcodControllerLeaseInvalid}
+    try{
+        $expectedName=if($Kind -ceq 'AccountTransition'){
+            Get-CcodKernelObjectName -Kind $Kind -UserSid $Identity.UserSid
+        }else{
+            Get-CcodKernelObjectName -Kind $Kind -UserSid $Identity.UserSid -SessionId $Identity.SessionId
+        }
+    }catch{Throw-CcodControllerLeaseInvalid}
+    if($Lease.Name -cne $expectedName){Throw-CcodControllerLeaseInvalid}
+    if($Lease.Outcome -ceq 'TimedOut'){
+        if($Lease.Abandoned -or $null -ne $Lease.Handle -or $null -ne $Lease.OwnerManagedThreadId -or -not $Lease.Released){Throw-CcodControllerLeaseInvalid}
+        return
+    }
+    if($Lease.Handle -isnot [Threading.Mutex] -or $Lease.OwnerManagedThreadId -isnot [int] -or
+        $Lease.OwnerManagedThreadId -le 0 -or $Lease.OwnerManagedThreadId -ne [Threading.Thread]::CurrentThread.ManagedThreadId -or $Lease.Released){Throw-CcodControllerLeaseInvalid}
+    try{
+        $safeHandle=$Lease.Handle.SafeWaitHandle
+        if($null -eq $safeHandle -or $safeHandle.IsClosed -or $safeHandle.IsInvalid){Throw-CcodControllerLeaseInvalid}
+    }catch{Throw-CcodControllerLeaseInvalid}
 }
 
 function Get-CcodControllerStableLeaseCode {
@@ -169,24 +199,27 @@ function Get-CcodControllerStableLeaseCode {
 function Invoke-CcodSessionController {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,[Parameter(Mandatory)][string]$ResultPath,[hashtable]$Adapters)
-    $adapter=Get-CcodControllerAdapters $Adapters;$result=$null;$diagnosticWritten=$false;$accountLease=$null;$sessionLease=$null
+    $adapter=Get-CcodControllerAdapters $Adapters;$result=$null;$diagnosticWritten=$false;$accountLease=$null;$sessionLease=$null;$accountLeaseAcquired=$false;$sessionLeaseAcquired=$false;$releaseFailed=$false
     try{
         try{$identity=& $adapter.GetIdentity}catch{$identity=$null}
         if(-not (Test-CcodControllerLeaseInput $Request $identity)){
             $result=New-CcodControllerErrorResult $Request 'CCOD_REQUEST_INVALID' 'InputValidation' 'The request does not match this controller session.'
         }else{
-            $total=[Math]::Min([int]$Request.timeoutMilliseconds,5000);$clock=& $adapter.StartStopwatch
+            $total=[Math]::Min([int]$Request.timeoutMilliseconds,5000)
             try{
+                $clock=& $adapter.StartStopwatch
                 $remaining=Get-CcodControllerRemainingBudget $total $clock $adapter
                 $accountLease=& $adapter.EnterMutex 'AccountTransition' $identity.UserSid $null $remaining
-                if(-not (Test-CcodControllerLeaseResult $accountLease 'AccountTransition')){throw 'invalid account lease result'}
+                Assert-CcodControllerLeaseResult $accountLease 'AccountTransition' $identity
                 if($accountLease.Outcome -ceq 'TimedOut'){$result=New-CcodControllerErrorResult $Request 'CCOD_TRANSITION_BUSY' 'LeaseAcquire' 'The transition lease is busy.'}
                 else{
+                    $accountLeaseAcquired=$true
                     $remaining=Get-CcodControllerRemainingBudget $total $clock $adapter
                     $sessionLease=& $adapter.EnterMutex 'Transition' $identity.UserSid $identity.SessionId $remaining
-                    if(-not (Test-CcodControllerLeaseResult $sessionLease 'Transition')){throw 'invalid session lease result'}
+                    Assert-CcodControllerLeaseResult $sessionLease 'Transition' $identity
                     if($sessionLease.Outcome -ceq 'TimedOut'){$result=New-CcodControllerErrorResult $Request 'CCOD_TRANSITION_BUSY' 'LeaseAcquire' 'The transition lease is busy.'}
                     else{
+                        $sessionLeaseAcquired=$true
                         if($accountLease.Abandoned -or $sessionLease.Abandoned){[void](Write-CcodControllerAbandonedWarning $Request $Paths $adapter)}
                         try{$active=& $adapter.ReadJournal $Paths.TransitionPath}catch{
                             $code=if($_.FullyQualifiedErrorId -like 'CCOD_TRANSITION_*'){($_.FullyQualifiedErrorId -split ',')[0]}else{'CCOD_TRANSITION_INVALID'}
@@ -221,8 +254,17 @@ function Invoke-CcodSessionController {
             try{& $adapter.WriteStderr 'CCOD_CONTROLLER_RESULT_WRITE_FAILED: result persistence failed'|Out-Null}catch{}
         }
     }finally{
-        if($null -ne $sessionLease -and $sessionLease.Outcome -ceq 'Acquired'){try{& $adapter.ExitMutex $sessionLease|Out-Null}catch{}}
-        if($null -ne $accountLease -and $accountLease.Outcome -ceq 'Acquired'){try{& $adapter.ExitMutex $accountLease|Out-Null}catch{}}
+        if($sessionLeaseAcquired){try{$released=& $adapter.ExitMutex $sessionLease;if($released -isnot [bool] -or -not $released){$releaseFailed=$true}}catch{$releaseFailed=$true}}
+        if($accountLeaseAcquired){try{$released=& $adapter.ExitMutex $accountLease;if($released -isnot [bool] -or -not $released){$releaseFailed=$true}}catch{$releaseFailed=$true}}
+    }
+    if($releaseFailed){
+        $result=New-CcodControllerErrorResult $Request 'CCOD_KERNEL_RELEASE_FAILED' 'LeaseRelease' 'The transition lease could not be released safely.'
+        $diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter
+        try{& $adapter.WriteResult $ResultPath $result|Out-Null}catch{
+            $result=New-CcodControllerErrorResult $Request 'CCOD_CONTROLLER_RESULT_WRITE_FAILED' 'ResultWrite' 'The corrected controller result could not be persisted.'
+            [void](Write-CcodControllerDiagnostic $result $Request $Paths $adapter)
+            try{& $adapter.WriteStderr 'CCOD_CONTROLLER_RESULT_WRITE_FAILED: result persistence failed'|Out-Null}catch{}
+        }
     }
     $line=$result|ConvertTo-Json -Depth 16 -Compress
     & $adapter.WriteStdout $line|Out-Null

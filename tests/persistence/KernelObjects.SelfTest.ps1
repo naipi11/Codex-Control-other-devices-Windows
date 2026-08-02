@@ -106,6 +106,25 @@ try{
         )){Assert-CcodThrows $case 'CCOD_KERNEL_INPUT_INVALID'}
     }
 
+    Invoke-CcodTest 'maps every GetName adapter exception to one stable non-secret kernel error' {
+        $token='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        $throwingName={
+            $exception=[InvalidOperationException]::new("C:\private\kernel-name`n--token hunter2")
+            throw [Management.Automation.ErrorRecord]::new($exception,'EVIL_GET_NAME',[Management.Automation.ErrorCategory]::InvalidOperation,$null)
+        }
+        $cases=@(
+            {Enter-CcodMutex -Kind Transition -UserSid $userSid -SessionId $sessionId -TimeoutMilliseconds 0 -Adapters @{GetName=$throwingName}},
+            {New-CcodEvent -Kind Shutdown -UserSid $userSid -SessionId $sessionId -Adapters @{GetName=$throwingName}},
+            {Open-CcodEvent -Kind Ready -UserSid $userSid -SessionId $sessionId -ReadyToken $token -Adapters @{GetName=$throwingName}}
+        )
+        foreach($case in $cases){
+            $caught=$null;try{& $case}catch{$caught=$_}
+            Assert-CcodTrue ($null -ne $caught) 'GetName exception is rejected'
+            Assert-CcodTrue ($caught.FullyQualifiedErrorId -like 'CCOD_KERNEL_OPEN_FAILED*') 'GetName exception maps to the stable open error'
+            Assert-CcodTrue ((($caught.Exception.Message)+$caught.FullyQualifiedErrorId) -cnotmatch 'private|hunter2|EVIL_GET_NAME|kernel-name') 'GetName error exposes no callback data'
+        }
+    }
+
     Invoke-CcodTest 'constructs protected exact mutex and event DACLs' {
         foreach($case in @(
             @{Security=(New-CcodMutexSecurity -UserSid $userSid);Type=[Security.AccessControl.MutexSecurity];Rights='MutexRights'},
