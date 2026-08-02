@@ -28,8 +28,10 @@ $InformationPreference='SilentlyContinue'
 $controllerModuleRoot=Join-Path $PSScriptRoot 'modules'
 $script:CcodControllerScriptPath=[IO.Path]::GetFullPath($PSCommandPath)
 Import-Module (Join-Path $controllerModuleRoot 'SessionEngine.psm1') -Force
-Import-Module (Join-Path $controllerModuleRoot 'PersistenceIO.psm1') -Force -Global
 Import-Module (Join-Path $controllerModuleRoot 'RuntimeManifest.psm1') -Force
+Import-Module (Join-Path $controllerModuleRoot 'TransitionJournal.psm1') -Force
+Import-Module (Join-Path $controllerModuleRoot 'KernelObjects.psm1') -Force
+Import-Module (Join-Path $controllerModuleRoot 'PersistenceIO.psm1') -Force -Global
 
 function Test-CcodControllerCanonicalGuid([object]$Value){
     if($Value -isnot [string]){return $false}
@@ -48,18 +50,36 @@ function New-CcodControllerErrorResult {
 function Write-CcodControllerDiagnostic {
     param($Result,$Request,$Paths,[hashtable]$Adapter)
     if($null -eq $Result -or $null -eq $Paths -or $null -eq $Adapter -or $null -eq $Adapter.WriteLog){return $false}
-    $record=[pscustomobject][ordered]@{
-        schemaVersion=1
-        timestampUtc=[DateTime]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture)
-        action=$Result.action
-        transactionId=$Result.transactionId
-        stage=$Result.stage
-        code=$Result.error.code
-    }
     try{
+        $now=& $Adapter.UtcNow;if($now -isnot [DateTime]){return $false}
+        $record=[pscustomobject][ordered]@{
+            schemaVersion=1
+            timestampUtc=$now.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+            action=$Result.action
+            transactionId=$Result.transactionId
+            stage=$Result.stage
+            code=$Result.error.code
+        }
         & $Adapter.WriteLog $Paths.SessionLogPath ($record|ConvertTo-Json -Depth 4 -Compress)|Out-Null
         $Result.logFile=$Paths.SessionLogPath
         return $true
+    }catch{return $false}
+}
+
+function Write-CcodControllerAbandonedWarning {
+    param($Request,$Paths,[hashtable]$Adapter)
+    if($null -eq $Request -or $null -eq $Paths -or $null -eq $Adapter -or $null -eq $Adapter.WriteLog){return $false}
+    try{
+        $now=& $Adapter.UtcNow;if($now -isnot [DateTime]){return $false}
+        $record=[pscustomobject][ordered]@{
+            schemaVersion=1
+            timestampUtc=$now.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+            action=$Request.action
+            transactionId=$Request.transactionId
+            stage='LeaseAcquire'
+            code='CCOD_TRANSITION_ABANDONED'
+        }
+        & $Adapter.WriteLog $Paths.SessionLogPath ($record|ConvertTo-Json -Depth 4 -Compress)|Out-Null;return $true
     }catch{return $false}
 }
 
@@ -73,6 +93,23 @@ function Assert-CcodControllerEngineResult {
 
 function Get-CcodControllerAdapters($Adapters){
     $defaults=@{
+        GetIdentity={
+            $identity=$null;$process=$null
+            try{
+                $identity=[Security.Principal.WindowsIdentity]::GetCurrent();$process=[Diagnostics.Process]::GetCurrentProcess()
+                [pscustomobject][ordered]@{UserSid=$identity.User.Value;SessionId=[int]$process.SessionId}
+            }finally{if($null -ne $process){$process.Dispose()};if($null -ne $identity){$identity.Dispose()}}
+        }
+        StartStopwatch={ [Diagnostics.Stopwatch]::StartNew() }
+        GetElapsedMilliseconds={param($Clock)[long]$Clock.ElapsedMilliseconds}
+        EnterMutex={
+            param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)
+            if($Kind -ceq 'AccountTransition'){Enter-CcodMutex -Kind $Kind -UserSid $UserSid -TimeoutMilliseconds $TimeoutMilliseconds}
+            else{Enter-CcodMutex -Kind $Kind -UserSid $UserSid -SessionId $SessionId -TimeoutMilliseconds $TimeoutMilliseconds}
+        }
+        ExitMutex={param($Lease)Exit-CcodMutex -Lease $Lease}
+        ReadJournal={param($Path)Read-CcodTransition -Path $Path}
+        UtcNow={ [DateTime]::UtcNow }
         EngineInvoker={param($Action,$Request,$Paths)switch($Action){'Inspect'{Invoke-CcodInspectSession -Request $Request -Paths $Paths}'Apply'{Invoke-CcodApplySession -Request $Request -Paths $Paths}'RepairRenderer'{Invoke-CcodRepairRenderer -Request $Request -Paths $Paths}'Recover'{Invoke-CcodRecoverSession -Request $Request -Paths $Paths}default{throw 'unsupported controller action'}}}
         WriteResult={param($Path,$Value)Write-CcodAtomicJson -Path $Path -Value $Value}
         WriteStdout={param($Line)[Console]::Out.WriteLine($Line)}
@@ -83,25 +120,109 @@ function Get-CcodControllerAdapters($Adapters){
     return $defaults
 }
 
+function Test-CcodControllerCanonicalSid([object]$Value){
+    if($Value -isnot [string]){return $false}
+    try{$sid=[Security.Principal.SecurityIdentifier]::new($Value)}catch{return $false}
+    return $sid.Value -ceq $Value
+}
+
+function Test-CcodControllerLeaseInput {
+    param($Request,$Identity)
+    if($null -eq $Request -or ($Request -isnot [pscustomobject] -and $Request -isnot [Collections.IDictionary]) -or
+        $null -eq $Request.PSObject.Properties['action'] -or $Request.action -isnot [string] -or @('Inspect','Apply','RepairRenderer','Recover') -cnotcontains $Request.action -or
+        $null -eq $Request.PSObject.Properties['transactionId'] -or -not (Test-CcodControllerCanonicalGuid $Request.transactionId) -or
+        $null -eq $Request.PSObject.Properties['timeoutMilliseconds'] -or $Request.timeoutMilliseconds -isnot [int] -or $Request.timeoutMilliseconds -lt 500 -or $Request.timeoutMilliseconds -gt 120000 -or
+        $null -eq $Request.PSObject.Properties['supervisorIdentity'] -or $null -eq $Request.supervisorIdentity -or
+        $null -eq $Request.supervisorIdentity.PSObject.Properties['sessionId'] -or $Request.supervisorIdentity.sessionId -isnot [string] -or
+        $null -eq $Identity -or ($Identity -isnot [pscustomobject] -and $Identity -isnot [Collections.IDictionary]) -or
+        $null -eq $Identity.PSObject.Properties['UserSid'] -or -not (Test-CcodControllerCanonicalSid $Identity.UserSid) -or
+        $null -eq $Identity.PSObject.Properties['SessionId'] -or $Identity.SessionId -isnot [int] -or $Identity.SessionId -lt 0){return $false}
+    $canonicalSession=$Identity.SessionId.ToString([Globalization.CultureInfo]::InvariantCulture)
+    return $Request.supervisorIdentity.sessionId -ceq $canonicalSession
+}
+
+function Get-CcodControllerRemainingBudget {
+    param([int]$Total,$Clock,[hashtable]$Adapter)
+    $elapsed=& $Adapter.GetElapsedMilliseconds $Clock
+    if(($elapsed -isnot [int] -and $elapsed -isnot [long]) -or $elapsed -lt 0){throw 'invalid monotonic clock'}
+    if($elapsed -ge $Total){return [int]0}
+    return [int]($Total-[long]$elapsed)
+}
+
+function Test-CcodControllerLeaseResult {
+    param($Lease,[string]$Kind)
+    return $null -ne $Lease -and ($Lease -is [pscustomobject] -or $Lease -is [Collections.IDictionary]) -and
+        $null -ne $Lease.PSObject.Properties['Kind'] -and $Lease.Kind -ceq $Kind -and
+        $null -ne $Lease.PSObject.Properties['Outcome'] -and @('Acquired','TimedOut') -ccontains $Lease.Outcome -and
+        $null -ne $Lease.PSObject.Properties['Abandoned'] -and $Lease.Abandoned -is [bool]
+}
+
+function Get-CcodControllerStableLeaseCode {
+    param($Failure)
+    if($null -ne $Failure -and $Failure.FullyQualifiedErrorId -is [string]){
+        $id=($Failure.FullyQualifiedErrorId -split ',')[0]
+        if(@('CCOD_KERNEL_INPUT_INVALID','CCOD_KERNEL_ACL_MISMATCH','CCOD_KERNEL_OBJECT_TYPE_MISMATCH','CCOD_KERNEL_ACCESS_DENIED','CCOD_KERNEL_OPEN_FAILED','CCOD_KERNEL_LEASE_INVALID','CCOD_KERNEL_RELEASE_FAILED') -ccontains $id){return $id}
+    }
+    return 'CCOD_KERNEL_OPEN_FAILED'
+}
+
 function Invoke-CcodSessionController {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,[Parameter(Mandatory)][string]$ResultPath,[hashtable]$Adapters)
-    $adapter=Get-CcodControllerAdapters $Adapters;$result=$null;$diagnosticWritten=$false
+    $adapter=Get-CcodControllerAdapters $Adapters;$result=$null;$diagnosticWritten=$false;$accountLease=$null;$sessionLease=$null
     try{
-        $output=@(& $adapter.EngineInvoker $Request.action $Request $Paths)
-        $candidates=@($output|Where-Object{$_ -is [pscustomobject] -and $null -ne $_.PSObject.Properties['schemaVersion']})
-        if($candidates.Count -ne 1){throw 'engine returned zero or multiple framed result objects'}
-        $result=$candidates[0];Assert-CcodControllerEngineResult $result $Request
-    }catch{
-        $result=New-CcodControllerErrorResult $Request 'CCOD_CONTROLLER_ENGINE_RESULT_INVALID' 'EngineResult' $_.Exception.Message
-        $diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter
-    }
-    try{
-        & $adapter.WriteResult $ResultPath $result|Out-Null
-    }catch{
-        $result=New-CcodControllerErrorResult $Request 'CCOD_CONTROLLER_RESULT_WRITE_FAILED' 'ResultWrite' $_.Exception.Message
-        if(-not $diagnosticWritten){$diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter}
-        try{& $adapter.WriteStderr 'CCOD_CONTROLLER_RESULT_WRITE_FAILED: result persistence failed'|Out-Null}catch{}
+        try{$identity=& $adapter.GetIdentity}catch{$identity=$null}
+        if(-not (Test-CcodControllerLeaseInput $Request $identity)){
+            $result=New-CcodControllerErrorResult $Request 'CCOD_REQUEST_INVALID' 'InputValidation' 'The request does not match this controller session.'
+        }else{
+            $total=[Math]::Min([int]$Request.timeoutMilliseconds,5000);$clock=& $adapter.StartStopwatch
+            try{
+                $remaining=Get-CcodControllerRemainingBudget $total $clock $adapter
+                $accountLease=& $adapter.EnterMutex 'AccountTransition' $identity.UserSid $null $remaining
+                if(-not (Test-CcodControllerLeaseResult $accountLease 'AccountTransition')){throw 'invalid account lease result'}
+                if($accountLease.Outcome -ceq 'TimedOut'){$result=New-CcodControllerErrorResult $Request 'CCOD_TRANSITION_BUSY' 'LeaseAcquire' 'The transition lease is busy.'}
+                else{
+                    $remaining=Get-CcodControllerRemainingBudget $total $clock $adapter
+                    $sessionLease=& $adapter.EnterMutex 'Transition' $identity.UserSid $identity.SessionId $remaining
+                    if(-not (Test-CcodControllerLeaseResult $sessionLease 'Transition')){throw 'invalid session lease result'}
+                    if($sessionLease.Outcome -ceq 'TimedOut'){$result=New-CcodControllerErrorResult $Request 'CCOD_TRANSITION_BUSY' 'LeaseAcquire' 'The transition lease is busy.'}
+                    else{
+                        if($accountLease.Abandoned -or $sessionLease.Abandoned){[void](Write-CcodControllerAbandonedWarning $Request $Paths $adapter)}
+                        try{$active=& $adapter.ReadJournal $Paths.TransitionPath}catch{
+                            $code=if($_.FullyQualifiedErrorId -like 'CCOD_TRANSITION_*'){($_.FullyQualifiedErrorId -split ',')[0]}else{'CCOD_TRANSITION_INVALID'}
+                            $result=New-CcodControllerErrorResult $Request $code 'JournalPreflight' 'The transition journal failed strict validation.'
+                            $diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter
+                        }
+                        if($null -eq $result){
+                            if($null -ne $active -and $Request.action -cne 'Recover'){
+                                $result=New-CcodControllerErrorResult $Request 'CCOD_TRANSITION_REPLAY_REQUIRED' 'ReplayRequired' 'An active transition requires recovery.'
+                            }else{
+                                try{
+                                    $output=@(& $adapter.EngineInvoker $Request.action $Request $Paths)
+                                    $candidates=@($output|Where-Object{$_ -is [pscustomobject] -and $null -ne $_.PSObject.Properties['schemaVersion']})
+                                    if($candidates.Count -ne 1){throw 'engine returned zero or multiple framed result objects'}
+                                    $result=$candidates[0];Assert-CcodControllerEngineResult $result $Request
+                                }catch{
+                                    $result=New-CcodControllerErrorResult $Request 'CCOD_CONTROLLER_ENGINE_RESULT_INVALID' 'EngineResult' $_.Exception.Message
+                                    $diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter
+                                }
+                            }
+                        }
+                    }
+                }
+            }catch{
+                $result=New-CcodControllerErrorResult $Request (Get-CcodControllerStableLeaseCode $_) 'LeaseAcquire' 'The transition lease could not be acquired safely.'
+                $diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter
+            }
+        }
+        try{& $adapter.WriteResult $ResultPath $result|Out-Null}catch{
+            $result=New-CcodControllerErrorResult $Request 'CCOD_CONTROLLER_RESULT_WRITE_FAILED' 'ResultWrite' $_.Exception.Message
+            if(-not $diagnosticWritten){$diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter}
+            try{& $adapter.WriteStderr 'CCOD_CONTROLLER_RESULT_WRITE_FAILED: result persistence failed'|Out-Null}catch{}
+        }
+    }finally{
+        if($null -ne $sessionLease -and $sessionLease.Outcome -ceq 'Acquired'){try{& $adapter.ExitMutex $sessionLease|Out-Null}catch{}}
+        if($null -ne $accountLease -and $accountLease.Outcome -ceq 'Acquired'){try{& $adapter.ExitMutex $accountLease|Out-Null}catch{}}
     }
     $line=$result|ConvertTo-Json -Depth 16 -Compress
     & $adapter.WriteStdout $line|Out-Null
