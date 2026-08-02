@@ -192,6 +192,12 @@ function Assert-CcodActiveTransaction {
     if (@('SpecialStarted','Validated') -ccontains $Transition.stage -and (-not $hasSpecial -or -not $hasMain)) {
         Throw-CcodSupervisorError $Code 'Special stage lacks durable identity or ports' $Transition
     }
+    if ($Transition.stage -ceq 'SpecialLaunchRequested' -and -not $hasMain) {
+        Throw-CcodSupervisorError $Code 'Special launch stage lacks durable ports' $Transition
+    }
+    if ($hasSpecial -and -not $hasMain) {
+        Throw-CcodSupervisorError $Code 'Special identity lacks its durable ports' $Transition
+    }
     if ($Transition.stage -ceq 'Recovered' -and -not $hasRecovery) {
         Throw-CcodSupervisorError $Code 'Recovered stage lacks recovery identity' $Transition
     }
@@ -613,23 +619,48 @@ function Assert-CcodControllerEnvelopeShape {
         Throw-CcodSupervisorError $code 'Controller ordinary safe state lacks identity' $Result
     }
     if ($Result.outcome -ceq 'Recovered') {
-        if ($null -eq $Result.recovery -or $Result.source.pid -ne $Result.recovery.pid -or
+        if ($null -eq $Result.package -or $null -eq $Result.recovery -or
+            $Result.source.pid -ne $Result.recovery.pid -or
             $Result.source.creationTimeUtc -cne $Result.recovery.creationTimeUtc) {
             Throw-CcodSupervisorError $code 'Controller recovery does not match ordinary identity' $Result
+        }
+        $suppressionParts = @($Result.recovery.suppressionKey.Split([char]'|'))
+        if ($suppressionParts.Count -ne 3 -or
+            $suppressionParts[0] -cne $Result.package.fullName -or
+            $suppressionParts[1] -cne $Result.package.appAsarSha256) {
+            Throw-CcodSupervisorError $code 'Controller recovery suppression does not match package identity' $Result
         }
     } elseif ($null -ne $Result.recovery) {
         Throw-CcodSupervisorError $code 'Non-recovery result contains recovery evidence' $Result
     }
 }
 
-function Test-CcodActionOutcomeCompatibility {
+function Test-CcodActionOutcomeStageCompatibility {
     param($Result)
-    $tuple = $Result.outcome + '|' + $Result.safeState
+    $tuple = $Result.outcome + '|' + $Result.safeState + '|' + $Result.stage
     switch ($Result.action) {
-        'Inspect' { return @('Inspected|SpecialValidated','Inspected|RendererRepairRequired','Inspected|OrdinaryRunning','Inspected|NoCodex') -ccontains $tuple }
-        'Apply' { return @('Activated|SpecialValidated','NoAction|NoCodex','Recovered|OrdinaryRunning') -ccontains $tuple }
-        'RepairRenderer' { return @('NoAction|SpecialValidated','Recovered|OrdinaryRunning') -ccontains $tuple }
-        'Recover' { return @('NoAction|SpecialValidated','NoAction|OrdinaryRunning','NoAction|NoCodex','Recovered|OrdinaryRunning','Closed|Closed') -ccontains $tuple }
+        'Inspect' {
+            return @(
+                'Inspected|SpecialValidated|Inspected','Inspected|RendererRepairRequired|Inspected',
+                'Inspected|OrdinaryRunning|Inspected','Inspected|NoCodex|Inspected'
+            ) -ccontains $tuple
+        }
+        'Apply' {
+            return @(
+                'Activated|SpecialValidated|Completed','NoAction|NoCodex|Cancelled',
+                'Recovered|OrdinaryRunning|Recovered'
+            ) -ccontains $tuple
+        }
+        'RepairRenderer' {
+            return @('NoAction|SpecialValidated|RendererRepaired','Recovered|OrdinaryRunning|Recovered') -ccontains $tuple
+        }
+        'Recover' {
+            return @(
+                'NoAction|SpecialValidated|Activated','NoAction|OrdinaryRunning|OrdinaryKept',
+                'NoAction|OrdinaryRunning|Cancelled','NoAction|NoCodex|Cancelled',
+                'Recovered|OrdinaryRunning|Recovered','Closed|Closed|Closed'
+            ) -ccontains $tuple
+        }
     }
     return $false
 }
@@ -650,12 +681,14 @@ function New-CcodControllerReduction {
 function Complete-CcodControllerRun {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$Result,
-        [Parameter(Mandatory)]$ExpectedTransactionId,
-        [Parameter(Mandatory)]$ExpectedAction
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$Result,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedTransactionId,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedAction,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedRuntimeId
     )
     if (-not (Test-CcodCanonicalGuid $ExpectedTransactionId) -or
-        $ExpectedAction -isnot [string] -or @('Inspect','Apply','RepairRenderer','Recover') -cnotcontains $ExpectedAction) {
+        $ExpectedAction -isnot [string] -or @('Inspect','Apply','RepairRenderer','Recover') -cnotcontains $ExpectedAction -or
+        $ExpectedRuntimeId -isnot [string] -or $ExpectedRuntimeId -cnotmatch '^[A-Za-z0-9._-]{1,96}$') {
         return New-CcodControllerReduction 'Error' $true $null $null $null 'CCOD_CONTROLLER_RESULT_INVALID' 'ControllerResultInvalid'
     }
     try { Assert-CcodControllerEnvelopeShape $Result }
@@ -668,8 +701,14 @@ function Complete-CcodControllerRun {
     if (-not $Result.ok) {
         return New-CcodControllerReduction 'Error' $true $attemptKey $null $null $Result.error.code 'ControllerFailed'
     }
-    if (-not (Test-CcodActionOutcomeCompatibility $Result)) {
+    if (-not (Test-CcodActionOutcomeStageCompatibility $Result)) {
         return New-CcodControllerReduction 'Error' $true $null $null $null 'CCOD_CONTROLLER_RESULT_INVALID' 'ControllerResultInvalid'
+    }
+    if ($Result.outcome -ceq 'Recovered') {
+        $suppressionParts = @($Result.recovery.suppressionKey.Split([char]'|'))
+        if ($suppressionParts.Count -ne 3 -or $suppressionParts[2] -cne $ExpectedRuntimeId) {
+            return New-CcodControllerReduction 'Error' $true $null $null $null 'CCOD_CONTROLLER_RESULT_INVALID' 'ControllerResultInvalid'
+        }
     }
     if ($Result.safeState -ceq 'SpecialValidated') {
         return New-CcodControllerReduction 'Active' $false $attemptKey $null $null $null 'SpecialValidated'

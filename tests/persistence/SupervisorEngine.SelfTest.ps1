@@ -124,6 +124,16 @@ function New-CcodResultSpecial {
     }
 }
 
+function New-CcodResultPackage {
+    param(
+        [string]$FullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0',
+        [string]$AppAsarSha256=('a' * 64)
+    )
+    [pscustomobject][ordered]@{
+        fullName=$FullName; familyName='OpenAI.Codex_2p2nqsd0c76g0'; version='1.0.0.0'; appAsarSha256=$AppAsarSha256
+    }
+}
+
 function New-CcodRecoveryEvidence {
     param(
         [string]$TransactionId='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -144,15 +154,17 @@ function New-CcodControllerResult {
         [bool]$Ok=$true,
         [string]$Outcome='Activated',
         [string]$SafeState='SpecialValidated',
+        [string]$Stage='Completed',
         [string]$TransactionId='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        $Package=$null,
         $Source=$null,
         $Special=(New-CcodResultSpecial),
         $Recovery=$null,
         $Error=$null
     )
     [pscustomobject][ordered]@{
-        schemaVersion=1; action=$Action; ok=$Ok; outcome=$Outcome; safeState=$SafeState; stage='Completed'
-        transactionId=$TransactionId; package=$null; source=$Source; special=$Special; probes=$null
+        schemaVersion=1; action=$Action; ok=$Ok; outcome=$Outcome; safeState=$SafeState; stage=$Stage
+        transactionId=$TransactionId; package=$Package; source=$Source; special=$Special; probes=$null
         recovery=$Recovery; error=$Error; logFile=$null
     }
 }
@@ -234,6 +246,62 @@ $results += Invoke-CcodTest 'enforces state-damage controller-busy and active-tr
     $replay = Get-CcodSupervisorDecision -Context (New-CcodSupervisorContext -ActiveTransaction (New-CcodActiveTransition))
     Assert-CcodExactEqual 'ReplayTransition' $replay.Action 'durable work replays before new process work'
     Assert-CcodExactEqual $true $replay.RequiresController 'replay reserves the serialized worker'
+}
+
+$results += Invoke-CcodTest 'rejects impossible durable crash stages before replay' {
+    $missingLaunchPorts=New-CcodActiveTransition
+    $missingLaunchPorts.stage='SpecialLaunchRequested'
+    Assert-CcodThrows { Get-CcodSupervisorDecision -Context (New-CcodSupervisorContext -ActiveTransaction $missingLaunchPorts) | Out-Null } 'CCOD_SUPERVISOR_CONTEXT_INVALID'
+
+    $specialWithoutPorts=New-CcodActiveTransition
+    $specialWithoutPorts.stage='RecoveryLaunchRequested'
+    $specialWithoutPorts.specialPid=200
+    $specialWithoutPorts.specialCreationTimeUtc='2030-02-03T04:02:00.0000000Z'
+    Assert-CcodThrows { Get-CcodSupervisorDecision -Context (New-CcodSupervisorContext -ActiveTransaction $specialWithoutPorts) | Out-Null } 'CCOD_SUPERVISOR_CONTEXT_INVALID'
+}
+
+$results += Invoke-CcodTest 'replays representative valid durable crash stages' {
+    $manualIntent=New-CcodActiveTransition
+    $manualIntent.sourcePid=$null
+    $manualIntent.sourceCreationTimeUtc=$null
+
+    $specialLaunch=New-CcodActiveTransition
+    $specialLaunch.stage='SpecialLaunchRequested'
+    $specialLaunch.mainPort=41002
+    $specialLaunch.rendererPort=41001
+
+    $recoveryLaunch=New-CcodActiveTransition
+    $recoveryLaunch.stage='RecoveryLaunchRequested'
+    $recoveryLaunch.mainPort=41002
+    $recoveryLaunch.rendererPort=41001
+    $recoveryLaunch.specialPid=200
+    $recoveryLaunch.specialCreationTimeUtc='2030-02-03T04:02:00.0000000Z'
+
+    $recovered=New-CcodActiveTransition
+    $recovered.stage='Recovered'
+    $recovered.mainPort=41002
+    $recovered.rendererPort=41001
+    $recovered.specialPid=200
+    $recovered.specialCreationTimeUtc='2030-02-03T04:02:00.0000000Z'
+    $recovered.recoveryPid=300
+    $recovered.recoveryCreationTimeUtc='2030-02-03T04:03:00.0000000Z'
+
+    $ordinaryClose=New-CcodActiveTransition
+    $ordinaryClose.stage='CloseRequested'
+
+    $specialClosed=New-CcodActiveTransition
+    $specialClosed.stage='Closed'
+    $specialClosed.sourcePid=$null
+    $specialClosed.sourceCreationTimeUtc=$null
+    $specialClosed.mainPort=41002
+    $specialClosed.rendererPort=41001
+    $specialClosed.specialPid=200
+    $specialClosed.specialCreationTimeUtc='2030-02-03T04:02:00.0000000Z'
+
+    foreach($transition in @($manualIntent,$specialLaunch,$recoveryLaunch,$recovered,$ordinaryClose,$specialClosed)){
+        $decision=Get-CcodSupervisorDecision -Context (New-CcodSupervisorContext -ActiveTransaction $transition)
+        Assert-CcodExactEqual 'ReplayTransition' $decision.Action ("valid {0} remains replayable" -f $transition.stage)
+    }
 }
 
 $results += Invoke-CcodTest 'keeps recovery ignored paused suppressed and already-attempted ordinary lifecycles' {
@@ -348,27 +416,31 @@ $results += Invoke-CcodTest 'deduplicates only exact canonical process lifecycle
 $results += Invoke-CcodTest 'reduces every allowed controller success tuple from proven safe state' {
     $source=New-CcodResultSource
     $special=New-CcodResultSpecial
+    $package=New-CcodResultPackage
     $recovery=New-CcodRecoveryEvidence
     $recoverySource=New-CcodResultSource -ProcessId 300 -CreationTimeUtc '2030-02-03T04:03:00.0000000Z'
     $cases=@(
-        @{Action='Apply';Outcome='Activated';Safe='SpecialValidated';Source=$null;Special=$special;Recovery=$null;State='Active'},
-        @{Action='Inspect';Outcome='Inspected';Safe='SpecialValidated';Source=$null;Special=$special;Recovery=$null;State='Active'},
-        @{Action='Inspect';Outcome='Inspected';Safe='RendererRepairRequired';Source=$null;Special=$special;Recovery=$null;State='Inspecting'},
-        @{Action='Inspect';Outcome='Inspected';Safe='OrdinaryRunning';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
-        @{Action='Inspect';Outcome='Inspected';Safe='NoCodex';Source=$null;Special=$null;Recovery=$null;State='Waiting'},
-        @{Action='Apply';Outcome='NoAction';Safe='NoCodex';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
-        @{Action='RepairRenderer';Outcome='NoAction';Safe='SpecialValidated';Source=$null;Special=$special;Recovery=$null;State='Active'},
-        @{Action='Recover';Outcome='NoAction';Safe='SpecialValidated';Source=$null;Special=$special;Recovery=$null;State='Active'},
-        @{Action='Recover';Outcome='NoAction';Safe='OrdinaryRunning';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
-        @{Action='Recover';Outcome='NoAction';Safe='NoCodex';Source=$null;Special=$null;Recovery=$null;State='Waiting'},
-        @{Action='Apply';Outcome='Recovered';Safe='OrdinaryRunning';Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
-        @{Action='RepairRenderer';Outcome='Recovered';Safe='OrdinaryRunning';Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
-        @{Action='Recover';Outcome='Recovered';Safe='OrdinaryRunning';Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
-        @{Action='Recover';Outcome='Closed';Safe='Closed';Source=$null;Special=$null;Recovery=$null;State='Waiting'}
+        @{Action='Apply';Outcome='Activated';Safe='SpecialValidated';Stage='Completed';Source=$null;Special=$special;Recovery=$null;State='Active'},
+        @{Action='Inspect';Outcome='Inspected';Safe='SpecialValidated';Stage='Inspected';Source=$null;Special=$special;Recovery=$null;State='Active'},
+        @{Action='Inspect';Outcome='Inspected';Safe='RendererRepairRequired';Stage='Inspected';Source=$null;Special=$special;Recovery=$null;State='Inspecting'},
+        @{Action='Inspect';Outcome='Inspected';Safe='OrdinaryRunning';Stage='Inspected';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
+        @{Action='Inspect';Outcome='Inspected';Safe='NoCodex';Stage='Inspected';Source=$null;Special=$null;Recovery=$null;State='Waiting'},
+        @{Action='Apply';Outcome='NoAction';Safe='NoCodex';Stage='Cancelled';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
+        @{Action='RepairRenderer';Outcome='NoAction';Safe='SpecialValidated';Stage='RendererRepaired';Source=$null;Special=$special;Recovery=$null;State='Active'},
+        @{Action='Recover';Outcome='NoAction';Safe='SpecialValidated';Stage='Activated';Source=$null;Special=$special;Recovery=$null;State='Active'},
+        @{Action='Recover';Outcome='NoAction';Safe='OrdinaryRunning';Stage='OrdinaryKept';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
+        @{Action='Recover';Outcome='NoAction';Safe='OrdinaryRunning';Stage='Cancelled';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
+        @{Action='Recover';Outcome='NoAction';Safe='NoCodex';Stage='Cancelled';Source=$null;Special=$null;Recovery=$null;State='Waiting'},
+        @{Action='Apply';Outcome='Recovered';Safe='OrdinaryRunning';Stage='Recovered';Package=$package;Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
+        @{Action='RepairRenderer';Outcome='Recovered';Safe='OrdinaryRunning';Stage='Recovered';Package=$package;Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
+        @{Action='Recover';Outcome='Recovered';Safe='OrdinaryRunning';Stage='Recovered';Package=$package;Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
+        @{Action='Recover';Outcome='Closed';Safe='Closed';Stage='Closed';Source=$null;Special=$null;Recovery=$null;State='Waiting'}
     )
     foreach($case in $cases){
-        $result=New-CcodControllerResult -Action $case.Action -Outcome $case.Outcome -SafeState $case.Safe -Source $case.Source -Special $case.Special -Recovery $case.Recovery
-        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction $case.Action
+        $packageValue=$null
+        if ($case.ContainsKey('Package')) { $packageValue=$case.Package }
+        $result=New-CcodControllerResult -Action $case.Action -Outcome $case.Outcome -SafeState $case.Safe -Stage $case.Stage -Package $packageValue -Source $case.Source -Special $case.Special -Recovery $case.Recovery
+        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction $case.Action -ExpectedRuntimeId 'runtime-1'
         Assert-CcodPropertyOrder $reduced @('SessionState','BlockAutomaticActions','AttemptKey','RecoveryIgnoreKey','SuppressionKey','ErrorCode','Reason') 'completion schema order'
         Assert-CcodExactEqual $case.State $reduced.SessionState ("{0}/{1}/{2} maps from safe tuple" -f $case.Action,$case.Outcome,$case.Safe)
         Assert-CcodExactEqual $false $reduced.BlockAutomaticActions 'proven success does not globally block'
@@ -378,19 +450,41 @@ $results += Invoke-CcodTest 'reduces every allowed controller success tuple from
 $results += Invoke-CcodTest 'copies only validated attempt recovery and suppression keys from proven recovery' {
     $source=New-CcodResultSource -ProcessId 300 -CreationTimeUtc '2030-02-03T04:03:00.0000000Z'
     $recovery=New-CcodRecoveryEvidence
-    $result=New-CcodControllerResult -Action Apply -Outcome Recovered -SafeState OrdinaryRunning -Source $source -Special $null -Recovery $recovery
+    $result=New-CcodControllerResult -Action Apply -Outcome Recovered -SafeState OrdinaryRunning -Stage Recovered -Package (New-CcodResultPackage) -Source $source -Special $null -Recovery $recovery
     $before=$result|ConvertTo-Json -Depth 20 -Compress
-    $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction Apply
+    $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1'
     Assert-CcodExactEqual '300|2030-02-03T04:03:00.0000000Z' $reduced.AttemptKey 'attempt derives only from source identity'
     Assert-CcodExactEqual $recovery.ignoreKey $reduced.RecoveryIgnoreKey 'validated recovery ignore key is copied'
     Assert-CcodExactEqual $recovery.suppressionKey $reduced.SuppressionKey 'validated suppression key is copied'
     Assert-CcodExactEqual $before ($result|ConvertTo-Json -Depth 20 -Compress) 'completion reducer does not mutate input'
 }
 
+$results += Invoke-CcodTest 'binds recovered suppression to exact package hash and expected safe runtime' {
+    $priorId='11111111-2222-3333-4444-555555555555'
+    $source=New-CcodResultSource -ProcessId 300 -CreationTimeUtc '2030-02-03T04:03:00.0000000Z'
+    $recovery=New-CcodRecoveryEvidence -TransactionId $priorId
+    $package=New-CcodResultPackage
+    $valid=New-CcodControllerResult -Action Recover -Outcome Recovered -SafeState OrdinaryRunning -Stage Recovered -Package $package -Source $source -Special $null -Recovery $recovery
+    $accepted=Complete-CcodControllerRun -Result $valid -ExpectedTransactionId $valid.transactionId -ExpectedAction Recover -ExpectedRuntimeId 'runtime-1'
+    Assert-CcodExactEqual 'Recovered' $accepted.SessionState 'older replay prior ID remains independently valid'
+    Assert-CcodExactEqual $recovery.ignoreKey $accepted.RecoveryIgnoreKey 'ignore key remains bound to prior transaction ID'
+
+    $missingPackage=New-CcodControllerResult -Action Recover -Outcome Recovered -SafeState OrdinaryRunning -Stage Recovered -Package $null -Source $source -Special $null -Recovery $recovery
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $missingPackage -ExpectedTransactionId $missingPackage.transactionId -ExpectedAction Recover -ExpectedRuntimeId 'runtime-1').ErrorCode 'recovery requires package identity'
+
+    $wrongName=New-CcodControllerResult -Action Recover -Outcome Recovered -SafeState OrdinaryRunning -Stage Recovered -Package (New-CcodResultPackage -FullName 'OpenAI.Codex_2.0.0.0_x64__2p2nqsd0c76g0') -Source $source -Special $null -Recovery $recovery
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $wrongName -ExpectedTransactionId $wrongName.transactionId -ExpectedAction Recover -ExpectedRuntimeId 'runtime-1').ErrorCode 'suppression package name must match result package'
+
+    $wrongHash=New-CcodControllerResult -Action Recover -Outcome Recovered -SafeState OrdinaryRunning -Stage Recovered -Package (New-CcodResultPackage -AppAsarSha256 ('b' * 64)) -Source $source -Special $null -Recovery $recovery
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $wrongHash -ExpectedTransactionId $wrongHash.transactionId -ExpectedAction Recover -ExpectedRuntimeId 'runtime-1').ErrorCode 'suppression hash must match result package'
+
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $valid -ExpectedTransactionId $valid.transactionId -ExpectedAction Recover -ExpectedRuntimeId 'runtime-2').ErrorCode 'suppression runtime must match safe active runtime'
+}
+
 $results += Invoke-CcodTest 'fails closed for every exact controller failure and preserves only allowlisted stable code' {
     $error=[pscustomobject][ordered]@{code='CCOD_STATE_BLOCKED';stage='StaticProbe';message='The session operation failed safely. See the session log for details.'}
     $result=New-CcodControllerResult -Action Apply -Ok $false -Outcome Error -SafeState Error -Source (New-CcodResultSource) -Special $null -Error $error
-    $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction Apply
+    $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1'
     Assert-CcodExactEqual 'Error' $reduced.SessionState 'false result never infers recovery'
     Assert-CcodExactEqual $true $reduced.BlockAutomaticActions 'false result blocks automatic actions'
     Assert-CcodExactEqual 'CCOD_STATE_BLOCKED' $reduced.ErrorCode 'already-sanitized stable code is preserved'
@@ -399,30 +493,58 @@ $results += Invoke-CcodTest 'fails closed for every exact controller failure and
 
 $results += Invoke-CcodTest 'fails closed on malformed contradictory or correlation-mismatched controller results' {
     $valid=New-CcodControllerResult
-    $mismatch=Complete-CcodControllerRun -Result $valid -ExpectedTransactionId 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff' -ExpectedAction Apply
+    $mismatch=Complete-CcodControllerRun -Result $valid -ExpectedTransactionId 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff' -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1'
     Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_MISMATCH' $mismatch.ErrorCode 'transaction mismatch is distinct'
 
-    $actionMismatch=Complete-CcodControllerRun -Result $valid -ExpectedTransactionId $valid.transactionId -ExpectedAction Inspect
+    $actionMismatch=Complete-CcodControllerRun -Result $valid -ExpectedTransactionId $valid.transactionId -ExpectedAction Inspect -ExpectedRuntimeId 'runtime-1'
     Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_MISMATCH' $actionMismatch.ErrorCode 'action mismatch is distinct'
 
     $changed=New-CcodControllerResult -Action Inspect -Outcome Activated -SafeState SpecialValidated
-    $unsafe=Complete-CcodControllerRun -Result $changed -ExpectedTransactionId $changed.transactionId -ExpectedAction Inspect
+    $unsafe=Complete-CcodControllerRun -Result $changed -ExpectedTransactionId $changed.transactionId -ExpectedAction Inspect -ExpectedRuntimeId 'runtime-1'
     Assert-CcodExactEqual 'Error' $unsafe.SessionState 'changing action cannot turn forbidden tuple active'
     Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' $unsafe.ErrorCode 'forbidden action tuple is invalid'
 
     $extra=New-CcodControllerResult; $extra|Add-Member -NotePropertyName stderr -NotePropertyValue 'secret'
-    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $extra -ExpectedTransactionId $extra.transactionId -ExpectedAction Apply).ErrorCode 'extra top-level data is rejected'
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $extra -ExpectedTransactionId $extra.transactionId -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1').ErrorCode 'extra top-level data is rejected'
 
     $coercive=New-CcodControllerResult; $coercive.ok='true'
-    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $coercive -ExpectedTransactionId $coercive.transactionId -ExpectedAction Apply).ErrorCode 'coercive Boolean is rejected'
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $coercive -ExpectedTransactionId $coercive.transactionId -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1').ErrorCode 'coercive Boolean is rejected'
 
     $badRecovery=New-CcodRecoveryEvidence; $badRecovery|Add-Member -NotePropertyName commandLine -NotePropertyValue 'secret'
     $badRecoveryResult=New-CcodControllerResult -Action Recover -Outcome Recovered -SafeState OrdinaryRunning -Source (New-CcodResultSource -ProcessId 300 -CreationTimeUtc '2030-02-03T04:03:00.0000000Z') -Special $null -Recovery $badRecovery
-    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $badRecoveryResult -ExpectedTransactionId $badRecoveryResult.transactionId -ExpectedAction Recover).ErrorCode 'arbitrary recovery properties are rejected'
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $badRecoveryResult -ExpectedTransactionId $badRecoveryResult.transactionId -ExpectedAction Recover -ExpectedRuntimeId 'runtime-1').ErrorCode 'arbitrary recovery properties are rejected'
 
     $raw=[pscustomobject][ordered]@{code='CCOD_TOKEN_secret';stage='Failure';message='raw token'}
     $rawResult=New-CcodControllerResult -Action Apply -Ok $false -Outcome Error -SafeState Error -Special $null -Error $raw
-    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $rawResult -ExpectedTransactionId $rawResult.transactionId -ExpectedAction Apply).ErrorCode 'untrusted error identifiers are not copied'
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' (Complete-CcodControllerRun -Result $rawResult -ExpectedTransactionId $rawResult.transactionId -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1').ErrorCode 'untrusted error identifiers are not copied'
+}
+
+$results += Invoke-CcodTest 'rejects a success tuple reported from an impossible controller stage' {
+    $impossible=New-CcodControllerResult -Action Apply -Outcome Activated -SafeState SpecialValidated -Stage InputValidation
+    $reduced=Complete-CcodControllerRun -Result $impossible -ExpectedTransactionId $impossible.transactionId -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1'
+    Assert-CcodExactEqual 'Error' $reduced.SessionState 'InputValidation can never prove activation'
+    Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' $reduced.ErrorCode 'impossible success stage is invalid'
+}
+
+$results += Invoke-CcodTest 'reduces explicit null and empty completion inputs without binder exceptions' {
+    $valid=New-CcodControllerResult
+    $cases=@(
+        @{Result=$null;Id=$valid.transactionId;Action='Apply';Runtime='runtime-1'},
+        @{Result='';Id=$valid.transactionId;Action='Apply';Runtime='runtime-1'},
+        @{Result=$valid;Id=$null;Action='Apply';Runtime='runtime-1'},
+        @{Result=$valid;Id='';Action='Apply';Runtime='runtime-1'},
+        @{Result=$valid;Id=$valid.transactionId;Action=$null;Runtime='runtime-1'},
+        @{Result=$valid;Id=$valid.transactionId;Action='';Runtime='runtime-1'},
+        @{Result=$valid;Id=$valid.transactionId;Action='Apply';Runtime=$null},
+        @{Result=$valid;Id=$valid.transactionId;Action='Apply';Runtime=''}
+    )
+    foreach($case in $cases){
+        $reduced=Complete-CcodControllerRun -Result $case.Result -ExpectedTransactionId $case.Id -ExpectedAction $case.Action -ExpectedRuntimeId $case.Runtime
+        Assert-CcodPropertyOrder $reduced @('SessionState','BlockAutomaticActions','AttemptKey','RecoveryIgnoreKey','SuppressionKey','ErrorCode','Reason') 'invalid completion still returns exact schema'
+        Assert-CcodExactEqual 'Error' $reduced.SessionState 'invalid completion is fail closed'
+        Assert-CcodExactEqual $true $reduced.BlockAutomaticActions 'invalid completion blocks actions'
+        Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' $reduced.ErrorCode 'invalid completion uses stable code'
+    }
 }
 
 $results += Invoke-CcodTest 'renders stable colors tooltips and independent tray controls' {
