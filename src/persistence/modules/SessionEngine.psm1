@@ -218,7 +218,7 @@ function ConvertTo-CcodPublicBridgeProbes {
 
 function Invoke-CcodSessionBridge {
     param(
-        [ValidateSet('Full','Renderer')][string]$Mode,
+        [ValidateSet('Full','Renderer','Probe')][string]$Mode,
         [string]$NodePath,
         $Paths,
         [int]$RendererPort,
@@ -226,7 +226,11 @@ function Invoke-CcodSessionBridge {
         [int]$TimeoutMilliseconds,
         [hashtable]$Adapter
     )
-    $arguments=@($Paths.OrchestratorPath,'--mode',$Mode.ToLowerInvariant(),'--renderer-port',[string]$RendererPort,'--timeout-ms',[string]$TimeoutMilliseconds)
+    $arguments=if($Mode -ceq 'Probe'){
+        @($Paths.OrchestratorPath,'--mode','probe','--renderer-port',[string]$RendererPort,'--main-port',[string]$MainPort,'--timeout-ms',[string]$TimeoutMilliseconds)
+    }else{
+        @($Paths.OrchestratorPath,'--mode',$Mode.ToLowerInvariant(),'--renderer-port',[string]$RendererPort,'--timeout-ms',[string]$TimeoutMilliseconds)
+    }
     if($Mode -ceq 'Full'){
         $arguments+=@('--main-port',[string]$MainPort,'--main-payload',$Paths.MainPayloadPath)
     }
@@ -448,6 +452,7 @@ function Complete-CcodCloseResult {
 function Merge-CcodSessionAdapters($Adapters) {
     $defaults = @{
         ReadState={ param($StateRoot,$SuppressionKey) Read-CcodState -StateRoot $StateRoot -CurrentSuppressionKey $SuppressionKey }
+        GetPackageIdentity={ Get-CcodPackageIdentity }
         StaticProbe={ param($NodeCandidates,$CheckerPath) Invoke-CcodStaticProbe -NodeCandidates $NodeCandidates -CheckerPath $CheckerPath }
         ListProcesses={ param($StatusEvidence)
             $current=[Diagnostics.Process]::GetCurrentProcess();try{$sessionId=$current.SessionId}finally{$current.Dispose()}
@@ -505,15 +510,207 @@ function Merge-CcodSessionAdapters($Adapters) {
     return $defaults
 }
 
+function Get-CcodExactPropertyValue {
+    param($Value,[string]$Name,[ref]$Found)
+    $Found.Value=$false
+    if($Value -is [Collections.IDictionary]){
+        foreach($key in $Value.Keys){if([string]$key -ceq $Name){$Found.Value=$true;return $Value[$key]}}
+        return $null
+    }
+    if($null -eq $Value){return $null}
+    foreach($property in $Value.PSObject.Properties){if($property.Name -ceq $Name){$Found.Value=$true;return $property.Value}}
+    return $null
+}
+
+function Get-CcodAuthorizedSessionProvenance {
+    param($VerifiedPackages,$Session)
+    if($null -eq $Session -or $null -eq $Session.codex){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Active session provenance is unavailable' $null}
+    Assert-CcodSessionExactProperties $VerifiedPackages @('schemaVersion','packages') 'CCOD_VERIFIED_PACKAGES_INVALID' 'verified packages'
+    if(($VerifiedPackages.schemaVersion -isnot [int] -and $VerifiedPackages.schemaVersion -isnot [long]) -or $VerifiedPackages.schemaVersion -ne 1 -or
+        ($VerifiedPackages.packages -isnot [pscustomobject] -and $VerifiedPackages.packages -isnot [Collections.IDictionary])){
+        Throw-CcodSessionError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package store is invalid' $VerifiedPackages
+    }
+    $codex=$Session.codex
+    $key='{0}|{1}|{2}' -f $codex.packageFullName,$codex.appAsarSha256,$Session.runtimeId
+    $found=$false;$record=Get-CcodExactPropertyValue $VerifiedPackages.packages $key ([ref]$found)
+    if(-not $found){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Exact successful session provenance is missing' $key}
+    Assert-CcodSessionExactProperties $record @('packageFullName','packageVersion','appAsarSha256','runtimeId','staticClassification','dynamicOutcome','probeState','confirmedAtUtc') 'CCOD_VERIFIED_PACKAGES_INVALID' 'verified package record'
+    foreach($name in @('packageFullName','packageVersion','appAsarSha256','runtimeId','staticClassification','dynamicOutcome','probeState')){
+        if($record.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($record.$name)){Throw-CcodSessionError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package record fields are invalid' $record}
+    }
+    if(-not (Test-CcodSessionCanonicalUtc $record.confirmedAtUtc) -or $record.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$'){
+        Throw-CcodSessionError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package record evidence is malformed' $record
+    }
+    if($record.packageFullName -cne $codex.packageFullName -or $record.packageVersion -cne $codex.packageVersion -or
+        $record.appAsarSha256 -cne $codex.appAsarSha256 -or $record.runtimeId -cne $Session.runtimeId){
+        Throw-CcodSessionError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package record does not match the persisted session tuple' $record
+    }
+    if($record.dynamicOutcome -cne 'Succeeded' -or $record.probeState -cne 'Valid' -or
+        @('NativeModulePresent','UnknownOrIncompatible') -ccontains $record.staticClassification -or
+        @('CandidateCompatible','VerifiedCompatible') -cnotcontains $record.staticClassification){
+        Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Persisted session provenance is not authorized' $record
+    }
+    return $record
+}
+
+function Merge-CcodInspectionAdapters($Adapters) {
+    $defaults=@{
+        ReadInspectionState={param($StateRoot)
+            [pscustomobject][ordered]@{
+                Settings=(Read-CcodSettings -StateRoot $StateRoot)
+                Status=(Read-CcodStatus -StateRoot $StateRoot)
+                VerifiedPackages=(Read-CcodVerifiedPackages -StateRoot $StateRoot)
+            }
+        }
+        GetPackageIdentity={Get-CcodPackageIdentity}
+        ResolveNodeCandidate={param($NodeCandidates) Resolve-CcodNodeCandidate -NodeCandidates $NodeCandidates}
+        GetPersistedSpecialIdentity={param($Status)
+            if($null -ne $Status -and $null -ne $Status.session -and $Status.session.sessionState -ceq 'Active'){return $Status.session.codex}
+            return $null
+        }
+        InvokeNode={param($NodePath,$Arguments)
+            $stderrPath=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("ccod-inspect-node-$([guid]::NewGuid().ToString('N')).err")))
+            try{$output=@(& $NodePath @Arguments 2>$stderrPath);$exitCode=$LASTEXITCODE;$stderr=if([IO.File]::Exists($stderrPath)){[IO.File]::ReadAllText($stderrPath)}else{''}}
+            finally{if([IO.File]::Exists($stderrPath)){[IO.File]::Delete($stderrPath)}}
+            [pscustomobject][ordered]@{ExitCode=$exitCode;Stdout=($output -join "`n");Stderr=$stderr}
+        }
+        CurrentIdentity={
+            $current=[Diagnostics.Process]::GetCurrentProcess();try{$sessionId=[string]$current.SessionId}finally{$current.Dispose()}
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$identity.User.Value}finally{$identity.Dispose()}
+            [pscustomobject][ordered]@{SessionId=$sessionId;UserSid=$sid}
+        }
+        ListProcesses={param($StatusEvidence)
+            $current=[Diagnostics.Process]::GetCurrentProcess();try{$sessionId=$current.SessionId}finally{$current.Dispose()}
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$identity.User.Value}finally{$identity.Dispose()}
+            $snapshots=[Collections.Generic.List[object]]::new()
+            foreach($process in @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue)){
+                $snapshot=Get-CcodProcessSnapshot -ProcessId $process.Id -StatusEvidence $StatusEvidence
+                if($null -ne $snapshot -and $snapshot.SessionId -eq $sessionId -and $snapshot.UserSid -ceq $sid){$snapshots.Add($snapshot)}
+            }
+            return $snapshots.ToArray()
+        }
+        ProcessMatch={param($Expected,$Actual) Test-CcodProcessMatch -Expected $Expected -Actual $Actual}
+    }
+    if($null -ne $Adapters){
+        if($Adapters -isnot [Collections.IDictionary]){Throw-CcodSessionError 'CCOD_REQUEST_INVALID' 'Inspection adapters must be a dictionary' $Adapters}
+        foreach($name in @('ReadInspectionState','GetPackageIdentity','ResolveNodeCandidate','GetPersistedSpecialIdentity','InvokeNode','CurrentIdentity','ListProcesses','ProcessMatch')){
+            $found=$false;$value=Get-CcodExactPropertyValue $Adapters $name ([ref]$found);if($found){$defaults[$name]=$value}
+        }
+    }
+    return $defaults
+}
+
+function Assert-CcodInspectionState {
+    param($State)
+    Assert-CcodSessionExactProperties $State @('Settings','Status','VerifiedPackages') 'CCOD_STATE_BLOCKED' 'inspection state'
+    if($null -eq $State.Settings -or $null -eq $State.Settings.PSObject.Properties['nodeCandidates'] -or $null -eq $State.Status -or $null -eq $State.VerifiedPackages){
+        Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Inspection state is incomplete' $State
+    }
+}
+
+function Get-CcodInspectionPackageIdentity {
+    param([hashtable]$Adapter)
+    $package=& $Adapter.GetPackageIdentity
+    if($null -eq $package -or $null -eq $package.PSObject.Properties['Found'] -or $package.Found -isnot [bool] -or -not $package.Found){
+        Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Current package identity is unavailable' $package
+    }
+    foreach($name in @('FullName','FamilyName','Version','ExecutablePath')){
+        if($package.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($package.$name)){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Current package identity is incomplete' $package}
+    }
+    return $package
+}
+
+function Get-CcodInspectionIdentity {
+    param($Request,[hashtable]$Adapter)
+    $identity=& $Adapter.CurrentIdentity
+    if($null -eq $identity -or [string]::IsNullOrWhiteSpace([string]$identity.UserSid) -or
+        [string]$identity.SessionId -cne [string]$Request.supervisorIdentity.sessionId){
+        Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Current Windows identity does not match the request' $Request.supervisorIdentity
+    }
+    return $identity
+}
+
+function Get-CcodInspectionRoots {
+    param($Status,$Package,$Request,$Identity,[hashtable]$Adapter)
+    $roots=[Collections.Generic.List[object]]::new()
+    foreach($snapshot in @(& $Adapter.ListProcesses $Status)){
+        if($null -eq $snapshot){continue}
+        Assert-CcodSessionExactProperties $snapshot @('Pid','CreationTimeUtc','SessionId','UserSid','Path','PackageFamilyName','CommandLine','ParentPid','IsTopLevel','Mode','RendererPort','MainPort') 'CCOD_SOURCE_CHANGED' 'process snapshot'
+        if($snapshot.IsTopLevel -is [bool] -and $snapshot.IsTopLevel -and
+            [string]$snapshot.SessionId -ceq [string]$Request.supervisorIdentity.sessionId -and $snapshot.UserSid -ceq $Identity.UserSid -and
+            $snapshot.Path -is [string] -and $snapshot.Path.Equals($Package.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -and
+            $snapshot.PackageFamilyName -ceq $Package.FamilyName){$roots.Add($snapshot)}
+    }
+    return @($roots|Sort-Object CreationTimeUtc,Pid)
+}
+
+function Test-CcodExactSpecialCommandLine {
+    param($Snapshot,$Codex)
+    if(@('Special','Unrelated') -cnotcontains $Snapshot.Mode -or $Snapshot.CommandLine -isnot [string]){return $false}
+    $tokens=@([regex]::Matches($Snapshot.CommandLine,'(?i)(?<!\S)(?:--|-|/)(?:remote-debugging|inspect)[^\s"]*')|ForEach-Object{$_.Value})
+    $expected=@('--remote-debugging-address=127.0.0.1',("--remote-debugging-port={0}" -f $Codex.rendererPort),("--inspect=127.0.0.1:{0}" -f $Codex.mainPort))
+    if($tokens.Count -ne $expected.Count){return $false}
+    foreach($item in $expected){if($tokens -cnotcontains $item){return $false}}
+    return $true
+}
+
+function Assert-CcodInspectionSpecialSnapshot {
+    param($Snapshot,$Codex,$Session,$Package,$Request,$Identity)
+    if($null -eq $Snapshot -or $Snapshot.Pid -ne $Codex.pid -or $Snapshot.CreationTimeUtc -cne $Codex.creationTimeUtc -or
+        -not $Snapshot.IsTopLevel -or [string]$Snapshot.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or
+        $Snapshot.UserSid -cne $Identity.UserSid -or -not $Snapshot.Path.Equals($Package.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or
+        $Snapshot.PackageFamilyName -cne $Package.FamilyName -or $Snapshot.RendererPort -ne $Codex.rendererPort -or
+        $Snapshot.MainPort -ne $Codex.mainPort -or -not (Test-CcodExactSpecialCommandLine $Snapshot $Codex) -or
+        $Session.sessionId -cne $Request.supervisorIdentity.sessionId -or $Session.supervisorPid -ne $Request.supervisorIdentity.pid -or
+        $Session.supervisorCreationTimeUtc -cne $Request.supervisorIdentity.creationTimeUtc){
+        Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Persisted special identity changed' $Codex
+    }
+}
+
+function Assert-CcodCurrentRuntimePath {
+    param($Request,$Paths)
+    $runtimeRoot=Split-Path (Split-Path $Paths.CheckerPath -Parent) -Parent
+    if((Split-Path $runtimeRoot -Leaf) -cne $Request.runtimeId){Throw-CcodSessionError 'CCOD_PATHS_INVALID' 'Current runtime paths do not match the authorized request runtime' $Paths}
+}
+
 function Test-CcodBridgeResult {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][ValidateSet('Full','Renderer')][string]$Mode, [Parameter(Mandatory)]$Invocation)
+    param([Parameter(Mandatory)][ValidateSet('Full','Renderer','Probe')][string]$Mode, [Parameter(Mandatory)]$Invocation)
     Assert-CcodSessionExactProperties $Invocation @('ExitCode','Stdout','Stderr') 'BRIDGE_PROOF_INCOMPLETE' 'bridge invocation'
-    if (($Invocation.ExitCode -isnot [int] -and $Invocation.ExitCode -isnot [long]) -or $Invocation.ExitCode -ne 0 -or $Invocation.Stdout -isnot [string] -or $Invocation.Stderr -isnot [string]) {
+    if (($Invocation.ExitCode -isnot [int] -and $Invocation.ExitCode -isnot [long]) -or $Invocation.ExitCode -ne 0 -or $Invocation.Stdout -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Invocation.Stdout) -or $Invocation.Stderr -isnot [string]) {
         Throw-CcodSessionError 'BRIDGE_PROOF_INCOMPLETE' 'Bridge process did not return a successful framed result' $Invocation
     }
     try { $parsed = $Invocation.Stdout | ConvertFrom-Json -ErrorAction Stop } catch { Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Bridge stdout is not one JSON object' $Invocation }
     if ($null -eq $parsed -or $parsed -is [array]) { Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Bridge stdout is not one JSON object' $Invocation }
+    if($Mode -ceq 'Probe'){
+        Assert-CcodSessionExactProperties $parsed @('ok','protocolVersion','main','renderer') 'CCOD_BRIDGE_JSON_INVALID' 'probe bridge proof'
+        if($parsed.ok -isnot [bool] -or -not $parsed.ok -or ($parsed.protocolVersion -isnot [int] -and $parsed.protocolVersion -isnot [long]) -or $parsed.protocolVersion -ne 1){
+            Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Probe bridge header is invalid' $parsed
+        }
+        Assert-CcodSessionExactProperties $parsed.main @('inspectorPortClosed') 'CCOD_BRIDGE_JSON_INVALID' 'probe main'
+        Assert-CcodSessionExactProperties $parsed.main.inspectorPortClosed @('confirmed','code') 'CCOD_BRIDGE_JSON_INVALID' 'probe main closure'
+        $closure=$parsed.main.inspectorPortClosed
+        if($closure.confirmed -isnot [bool] -or $closure.code -isnot [string] -or
+            ($closure.confirmed -and $closure.code -cne 'ECONNREFUSED') -or
+            (-not $closure.confirmed -and @('OPEN','TIMEOUT') -cnotcontains $closure.code)){
+            Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Probe main evidence is contradictory' $closure
+        }
+        Assert-CcodSessionExactProperties $parsed.renderer @('targetUrl','probe') 'CCOD_BRIDGE_JSON_INVALID' 'probe renderer'
+        Assert-CcodSessionExactProperties $parsed.renderer.probe @('proof','targetGate') 'CCOD_BRIDGE_JSON_INVALID' 'probe renderer evidence'
+        $renderer=$parsed.renderer;$proof=$renderer.probe
+        if($proof.proof -isnot [bool]){Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Probe renderer Boolean is invalid' $proof}
+        if($null -eq $renderer.targetUrl){
+            if($proof.proof -or $null -ne $proof.targetGate){Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Absent renderer target has contradictory evidence' $renderer}
+        }elseif($renderer.targetUrl -isnot [string] -or $renderer.targetUrl -cne 'app://-/index.html'){
+            Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Probe renderer target URL is invalid' $renderer
+        }elseif($proof.proof){
+            if($proof.targetGate -isnot [string] -or $proof.targetGate -cne '782640499'){Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Positive renderer evidence is invalid' $proof}
+        }elseif($null -ne $proof.targetGate -and ($proof.targetGate -isnot [string] -or $proof.targetGate -cne '782640499')){
+            Throw-CcodSessionError 'CCOD_BRIDGE_JSON_INVALID' 'Negative renderer evidence is invalid' $proof
+        }
+        return $parsed
+    }
     $expected = if($Mode -ceq 'Full'){@('ok','protocolVersion','main','renderer')}else{@('ok','protocolVersion','renderer')}
     Assert-CcodSessionExactProperties $parsed $expected 'BRIDGE_PROOF_INCOMPLETE' 'bridge proof'
     if ($parsed.ok -isnot [bool] -or -not $parsed.ok -or $parsed.protocolVersion -ne 1) { Throw-CcodSessionError 'BRIDGE_PROOF_INCOMPLETE' 'Bridge proof header is incomplete' $parsed }
@@ -536,7 +733,7 @@ function Test-CcodBridgeResult {
 }
 
 function Invoke-CcodSessionCore {
-    param([string]$Action, $Request, $Paths, $Adapters, [scriptblock]$Body)
+    param([string]$Action, $Request, $Paths, $Adapters, [scriptblock]$Body, [switch]$InspectionAdapters, [switch]$SuppressDiagnostic)
     $transactionId = $null
     if ($null -ne $Request -and $null -ne $Request.PSObject.Properties['transactionId'] -and (Test-CcodSessionCanonicalGuid $Request.transactionId)) { $transactionId=$Request.transactionId }
     $result = New-CcodSessionResult -Action $Action -TransactionId $transactionId
@@ -546,11 +743,11 @@ function Invoke-CcodSessionCore {
         $result.transactionId=$Request.transactionId
         Assert-CcodSessionPaths -Paths $Paths
         $pathsValidated=$true
-        $adapter = Merge-CcodSessionAdapters $Adapters
+        $adapter = if($InspectionAdapters){Merge-CcodInspectionAdapters $Adapters}else{Merge-CcodSessionAdapters $Adapters}
         return & $Body $result $adapter
     } catch {
         $result=Set-CcodSessionFailure -Result $result -Record $_ -Stage $result.stage
-        if($pathsValidated){Write-CcodSessionDiagnostic $result $Action $result.transactionId $result.stage $result.error.code $Paths $adapter}
+        if($pathsValidated -and -not $SuppressDiagnostic){Write-CcodSessionDiagnostic $result $Action $result.transactionId $result.stage $result.error.code $Paths $adapter}
         return $result
     }
 }
@@ -559,22 +756,65 @@ function Invoke-CcodInspectSession {
     [CmdletBinding()] param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,$Adapters)
     return Invoke-CcodSessionCore Inspect $Request $Paths $Adapters {
         param($result,$adapter)
-        $result.stage='InspectState'
-        $state=& $adapter.ReadState $Paths.StateRoot $null
-        if(-not $state.TransitionActionsAllowed){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'State damage blocks session inspection' $state.Damage}
-        $processes=@(& $adapter.ListProcesses $state.Status|Where-Object{[string]$_.SessionId -ceq [string]$Request.supervisorIdentity.sessionId})
-        $ordinary=@($processes|Where-Object{$_.IsTopLevel -and $_.Mode -ceq 'Ordinary'})
-        $statusSession=$state.Status.session
-        if($null -ne $statusSession -and $null -ne $statusSession.codex){
-            $recorded=@($processes|Where-Object{$_.Pid -eq $statusSession.codex.pid -and $_.CreationTimeUtc -ceq $statusSession.codex.creationTimeUtc})
-            if($recorded.Count -eq 1){
-                $result.special=ConvertTo-CcodSessionSpecial $recorded[0]
-                $result.ok=$true;$result.outcome='Inspected';$result.safeState=if($recorded[0].Mode -ceq 'Special'){'SpecialValidated'}else{'RendererRepairRequired'};$result.stage='Inspected';return $result
+        $result.stage='InspectState';$state=& $adapter.ReadInspectionState $Paths.StateRoot;Assert-CcodInspectionState $state
+        Assert-CcodCurrentRuntimePath $Request $Paths
+        Assert-CcodSessionExactProperties $state.Status @('schemaVersion','session') 'CCOD_STATE_BLOCKED' 'inspection status'
+        if(($state.Status.schemaVersion -isnot [int] -and $state.Status.schemaVersion -isnot [long]) -or $state.Status.schemaVersion -ne 1){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Inspection status schema is invalid' $state.Status}
+        $package=Get-CcodInspectionPackageIdentity $adapter;$identity=Get-CcodInspectionIdentity $Request $adapter
+        if($null -eq $state.Status.session){
+            $roots=@(Get-CcodInspectionRoots $state.Status $package $Request $identity $adapter)
+            if($roots.Count -eq 0){$result.safeState='NoCodex'}
+            elseif($roots.Count -eq 1 -and $roots[0].Mode -ceq 'Ordinary' -and $null -eq $roots[0].RendererPort -and $null -eq $roots[0].MainPort){$result.source=ConvertTo-CcodSessionSource $roots[0];$result.safeState='OrdinaryRunning'}
+            else{Throw-CcodSessionError 'CCOD_SOURCE_AMBIGUOUS' 'Inspection found an unowned or ambiguous current-package root set' $roots}
+            $result.ok=$true;$result.outcome='Inspected';$result.stage='Inspected';return $result
+        }
+
+        $session=$state.Status.session
+        Assert-CcodSessionExactProperties $session @('supervisorPid','supervisorCreationTimeUtc','sessionId','runtimeId','sessionState','codex') 'CCOD_STATE_BLOCKED' 'inspection status session'
+        if($session.sessionState -cne 'Active' -or $null -eq $session.codex){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Inspection requires one persisted Active special session' $session}
+        $persisted=& $adapter.GetPersistedSpecialIdentity $state.Status
+        Assert-CcodSessionExactProperties $persisted @('pid','creationTimeUtc','packageFullName','packageVersion','appAsarSha256','mainPort','rendererPort','mainProbe','rendererProbe') 'CCOD_STATE_BLOCKED' 'persisted special identity'
+        foreach($name in @('pid','creationTimeUtc','packageFullName','packageVersion','appAsarSha256','mainPort','rendererPort','mainProbe','rendererProbe')){
+            if(-not [object]::Equals($persisted.$name,$session.codex.$name)){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Persisted special adapter evidence does not match status' $persisted}
+        }
+        $codex=$persisted
+        if(($codex.pid -isnot [int] -and $codex.pid -isnot [long]) -or $codex.pid -lt 1 -or -not (Test-CcodSessionCanonicalUtc $codex.creationTimeUtc) -or
+            $codex.packageFullName -isnot [string] -or $codex.packageVersion -isnot [string] -or $codex.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            ($codex.mainPort -isnot [int] -and $codex.mainPort -isnot [long]) -or ($codex.rendererPort -isnot [int] -and $codex.rendererPort -isnot [long]) -or
+            $codex.mainPort -lt 1 -or $codex.mainPort -gt 65535 -or $codex.rendererPort -lt 1 -or $codex.rendererPort -gt 65535 -or
+            $codex.mainPort -eq $codex.rendererPort -or $codex.mainProbe -cne 'Closed' -or $codex.rendererProbe -cne 'BridgeValid'){
+            Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Persisted special status evidence is invalid' $codex
+        }
+        Get-CcodAuthorizedSessionProvenance $state.VerifiedPackages $session|Out-Null
+        if($package.FullName -cne $codex.packageFullName -or $package.Version -cne $codex.packageVersion){Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Current package build differs from persisted status' $package}
+        $preRoots=@(Get-CcodInspectionRoots $state.Status $package $Request $identity $adapter)
+        if($preRoots.Count -ne 1){Throw-CcodSessionError 'CCOD_SOURCE_AMBIGUOUS' 'Inspection requires exactly one eligible pre-probe root' $preRoots}
+        $special=$preRoots[0];Assert-CcodInspectionSpecialSnapshot $special $codex $session $package $Request $identity
+        $node=& $adapter.ResolveNodeCandidate @($state.Settings.nodeCandidates)
+        if($null -eq $node -or $node.Found -isnot [bool] -or -not $node.Found -or $node.Path -isnot [string] -or [string]::IsNullOrWhiteSpace($node.Path) -or
+            $null -eq $node.Capabilities -or $node.Capabilities.Supported -isnot [bool] -or -not $node.Capabilities.Supported){
+            Throw-CcodSessionError 'CCOD_NODE_CANDIDATE_INVALID' 'No installer-approved Node candidate is available' $node
+        }
+        $nodeAuthorized=$false
+        foreach($candidate in @($state.Settings.nodeCandidates)){
+            if($candidate -is [string] -and -not [string]::IsNullOrWhiteSpace($candidate)){
+                try{if([IO.Path]::GetFullPath($candidate).Equals([IO.Path]::GetFullPath($node.Path),[StringComparison]::OrdinalIgnoreCase)){$nodeAuthorized=$true}}catch{}
             }
         }
-        if($ordinary.Count -gt 0){$result.source=ConvertTo-CcodSessionSource $ordinary[0];$result.safeState='OrdinaryRunning'}else{$result.safeState='NoCodex'}
+        if(-not $nodeAuthorized){Throw-CcodSessionError 'CCOD_NODE_CANDIDATE_INVALID' 'Resolved Node is outside configured candidates' $node}
+        $result.stage='InspectProbe';$bridge=Invoke-CcodSessionBridge -Mode Probe -NodePath $node.Path -Paths $Paths -RendererPort $codex.rendererPort -MainPort $codex.mainPort -TimeoutMilliseconds $Request.timeoutMilliseconds -Adapter $adapter
+        if(-not $bridge.main.inspectorPortClosed.confirmed){Throw-CcodSessionError 'CCOD_MAIN_INSPECTOR_OPEN' 'Main Inspector is not explicitly closed' $bridge.main.inspectorPortClosed}
+        $postRoots=@(Get-CcodInspectionRoots $state.Status $package $Request $identity $adapter)
+        if($postRoots.Count -eq 0){$result.ok=$true;$result.outcome='Inspected';$result.safeState='NoCodex';$result.stage='Inspected';return $result}
+        if($postRoots.Count -eq 1 -and $postRoots[0].Mode -ceq 'Ordinary' -and $null -eq $postRoots[0].RendererPort -and $null -eq $postRoots[0].MainPort){
+            $result.source=ConvertTo-CcodSessionSource $postRoots[0];$result.ok=$true;$result.outcome='Inspected';$result.safeState='OrdinaryRunning';$result.stage='Inspected';return $result
+        }
+        if($postRoots.Count -ne 1 -or -not (& $adapter.ProcessMatch $special $postRoots[0])){Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Eligible root set changed during inspection' $postRoots}
+        Assert-CcodInspectionSpecialSnapshot $postRoots[0] $codex $session $package $Request $identity
+        $result.special=ConvertTo-CcodSessionSpecial $postRoots[0]
+        $result.safeState=if($bridge.renderer.probe.proof){'SpecialValidated'}else{'RendererRepairRequired'}
         $result.ok=$true;$result.outcome='Inspected';$result.stage='Inspected';return $result
-    }
+    } -InspectionAdapters -SuppressDiagnostic
 }
 
 function Invoke-CcodApplySession {
@@ -659,15 +899,37 @@ function Invoke-CcodRepairRenderer {
         param($result,$adapter)
         $result.stage='RepairState';$state=& $adapter.ReadState $Paths.StateRoot $null
         if(-not $state.TransitionActionsAllowed -or $null -eq $state.Status.session -or $null -eq $state.Status.session.codex){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'No persisted special session is repairable' $state.Damage}
-        $codex=$state.Status.session.codex;$current=& $adapter.GetProcess $codex.pid $state.Status
-        $probe=& $adapter.StaticProbe $state.Settings.nodeCandidates $Paths.CheckerPath;$result.package=ConvertTo-CcodSessionPackage $probe
+        $session=$state.Status.session;$codex=$session.codex
+        if($session.sessionState -cne 'Active'){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Only an Active persisted session is repairable' $session}
+        Get-CcodAuthorizedSessionProvenance $state.VerifiedPackages $session|Out-Null
+        Assert-CcodCurrentRuntimePath $Request $Paths
+        $package=& $adapter.GetPackageIdentity
+        if($null -eq $package -or $package.Found -isnot [bool] -or -not $package.Found -or
+            $package.FullName -isnot [string] -or $package.Version -isnot [string] -or $package.FamilyName -isnot [string] -or $package.ExecutablePath -isnot [string] -or
+            $package.FullName -cne $codex.packageFullName -or $package.Version -cne $codex.packageVersion){
+            Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Fresh package identity does not match the persisted session' $package
+        }
         $identity=& $adapter.CurrentIdentity
+        if($null -eq $identity -or [string]$identity.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or [string]::IsNullOrWhiteSpace([string]$identity.UserSid)){
+            Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Current Windows identity does not match renderer repair authority' $Request.supervisorIdentity
+        }
+        $roots=@(Get-CcodInspectionRoots $state.Status $package $Request $identity $adapter)
+        if($roots.Count -ne 1){Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Renderer repair requires one exact current-package root' $roots}
+        $current=$roots[0]
         if($null -eq $current -or $current.Pid -ne $codex.pid -or $current.CreationTimeUtc -cne $codex.creationTimeUtc -or -not $current.IsTopLevel -or
             [string]$current.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or [string]$identity.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or
-            $current.UserSid -cne $identity.UserSid -or -not $current.Path.Equals($probe.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or
-            $current.PackageFamilyName -cne $probe.PackageFamilyName -or $current.RendererPort -ne $codex.rendererPort -or $current.MainPort -ne $codex.mainPort -or
-            $state.Status.session.sessionId -cne $Request.supervisorIdentity.sessionId -or $state.Status.session.runtimeId -cne $Request.runtimeId){Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Persisted special identity changed before renderer repair' $codex}
-        if($probe.PackageFullName -cne $codex.packageFullName -or $probe.AppAsarSha256 -cne $codex.appAsarSha256){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Live package does not match persisted renderer repair evidence' $probe}
+            $current.UserSid -cne $identity.UserSid -or -not $current.Path.Equals($package.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or
+            $current.PackageFamilyName -cne $package.FamilyName -or $current.RendererPort -ne $codex.rendererPort -or $current.MainPort -ne $codex.mainPort -or
+            -not (Test-CcodExactSpecialCommandLine $current $codex) -or $session.sessionId -cne $Request.supervisorIdentity.sessionId -or
+            $session.supervisorPid -ne $Request.supervisorIdentity.pid -or $session.supervisorCreationTimeUtc -cne $Request.supervisorIdentity.creationTimeUtc){
+            Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Persisted special identity changed before renderer repair' $codex
+        }
+        $probe=& $adapter.StaticProbe $state.Settings.nodeCandidates $Paths.CheckerPath;$result.package=ConvertTo-CcodSessionPackage $probe
+        if($null -eq $probe -or -not $probe.Ready -or @('CandidateCompatible','VerifiedCompatible') -cnotcontains $probe.StaticClassification -or
+            $probe.PackageFullName -cne $codex.packageFullName -or $probe.PackageVersion -cne $codex.packageVersion -or $probe.AppAsarSha256 -cne $codex.appAsarSha256 -or
+            $probe.PackageFamilyName -cne $package.FamilyName -or -not $probe.ExecutablePath.Equals($package.ExecutablePath,[StringComparison]::OrdinalIgnoreCase)){
+            Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Live package does not match persisted renderer repair evidence' $probe
+        }
         $recoveryAttempted=$false
         try{
             if(-not (& $adapter.WaitPortClosed $codex.mainPort (Get-CcodProcessControlTimeout $Request.timeoutMilliseconds))){Throw-CcodSessionError 'CCOD_MAIN_INSPECTOR_OPEN' 'Main Inspector refusal is not proven before renderer repair' $codex.mainPort}
@@ -687,7 +949,7 @@ function Invoke-CcodRepairRenderer {
             $transition=& $adapter.SetTransition $Paths.TransitionPath $Request.transactionId 'SpecialLaunchRequested' 'SpecialStarted' $current $null $null $null
             return Invoke-CcodRecoveryOperation $result $Request $Paths $adapter $state $probe 'SpecialStarted' $current $codex.rendererPort $codex.mainPort $Request.transactionId
         }
-    }
+    } -SuppressDiagnostic
 }
 
 function Invoke-CcodRecoverSession {

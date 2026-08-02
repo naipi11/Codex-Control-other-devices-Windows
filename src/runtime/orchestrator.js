@@ -50,15 +50,20 @@ function parseArguments(argv) {
     index += 1;
   }
   const mode = values.get("mode") ?? "full";
-  if (mode !== "full" && mode !== "renderer") {
-    throw cliError("ARGUMENT_INVALID", "mode must be exactly full or renderer");
+  if (mode !== "full" && mode !== "renderer" && mode !== "probe") {
+    throw cliError("ARGUMENT_INVALID", "mode must be exactly full, renderer, or probe");
   }
   if (mode === "renderer" && (values.has("main-port") || values.has("main-payload"))) {
     throw cliError("ARGUMENT_MODE_CONFLICT", "renderer mode forbids main Inspector options");
   }
+  if (mode === "probe" && values.has("main-payload")) {
+    throw cliError("ARGUMENT_MODE_CONFLICT", "probe mode forbids payload options");
+  }
   const requiredOptions = mode === "full"
     ? ["renderer-port", "main-port", "timeout-ms", "main-payload"]
-    : ["renderer-port", "timeout-ms"];
+    : mode === "probe"
+      ? ["renderer-port", "main-port", "timeout-ms"]
+      : ["renderer-port", "timeout-ms"];
   for (const required of requiredOptions) {
     if (!values.has(required)) {
       throw cliError("ARGUMENT_MISSING", `Required option is missing: --${required}`);
@@ -70,11 +75,13 @@ function parseArguments(argv) {
     rendererPort: parseInteger(values.get("renderer-port"), "renderer port", 1, 65_535),
     timeoutMs: parseInteger(values.get("timeout-ms"), "timeout", 500, 300_000),
   };
-  if (mode === "full") {
-    parsed.mainPayload = path.resolve(values.get("main-payload"));
+  if (mode === "full" || mode === "probe") {
     parsed.mainPort = parseInteger(values.get("main-port"), "main port", 1, 65_535);
     if (parsed.mainPort === parsed.rendererPort) {
       throw cliError("ARGUMENT_INVALID", "main and renderer ports must be distinct");
+    }
+    if (mode === "full") {
+      parsed.mainPayload = path.resolve(values.get("main-payload"));
     }
   }
   return parsed;
@@ -325,6 +332,99 @@ async function runRendererBridge(options, dependencies = {}) {
   }
 }
 
+function probeMainResult(observation) {
+  if (observation?.state === "error" && observation?.code === "ECONNREFUSED") {
+    return { confirmed: true, code: "ECONNREFUSED" };
+  }
+  if (observation?.state === "open") {
+    return { confirmed: false, code: "OPEN" };
+  }
+  if (observation?.state === "timeout") {
+    return { confirmed: false, code: "TIMEOUT" };
+  }
+  throw cliError("MAIN_PORT_OBSERVATION_FAILED", "Main Inspector port observation failed operationally");
+}
+
+function probeRendererResult(value) {
+  if (value === null) {
+    return { proof: false, targetGate: null };
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw cliError("PROBE_RESULT_INVALID", "Renderer probe returned malformed evidence");
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes("proof") || !keys.includes("targetGate") || typeof value.proof !== "boolean") {
+    throw cliError("PROBE_RESULT_INVALID", "Renderer probe returned malformed evidence");
+  }
+  if (value.proof === true) {
+    if (value.targetGate !== "782640499") {
+      throw cliError("PROBE_RESULT_INVALID", "Renderer probe returned contradictory positive evidence");
+    }
+    return { proof: true, targetGate: "782640499" };
+  }
+  if (value.targetGate !== null && value.targetGate !== "782640499") {
+    throw cliError("PROBE_RESULT_INVALID", "Renderer probe returned an unauthorized gate value");
+  }
+  return { proof: false, targetGate: value.targetGate };
+}
+
+async function runProbeBridge(options, dependencies = {}) {
+  const observePort = dependencies.checkPortOnce ?? checkPortOnce;
+  const discoverRendererTargets = dependencies.discoverTargets ?? discoverTargets;
+  const connectRendererTarget = dependencies.connectTarget ?? connectTarget;
+  const evaluateRenderer = dependencies.evaluate ?? evaluate;
+  const deadline = Date.now() + options.timeoutMs;
+  let stage = "probe-main";
+  try {
+    const mainObservation = await observePort(options.mainPort, Math.min(300, remaining(deadline)));
+    const main = { inspectorPortClosed: probeMainResult(mainObservation) };
+    stage = "probe-renderer-discovery";
+    const targets = await discoverRendererTargets(options.rendererPort, remaining(deadline));
+    if (!Array.isArray(targets)) {
+      throw cliError("DISCOVERY_INVALID_SHAPE", "Renderer discovery did not return a target list");
+    }
+    const exactTargets = targets.filter(
+      (candidate) =>
+        candidate != null &&
+        (candidate.type === "page" || candidate.type === "webview") &&
+        candidate.url === "app://-/index.html",
+    );
+    if (exactTargets.length > 1) {
+      throw cliError("TARGET_AMBIGUOUS", "More than one exact Codex renderer target was discovered");
+    }
+    if (exactTargets.length === 0) {
+      return {
+        ok: true,
+        protocolVersion: 1,
+        main,
+        renderer: { targetUrl: null, probe: { proof: false, targetGate: null } },
+      };
+    }
+    stage = "probe-renderer-connect";
+    const target = exactTargets[0];
+    const client = await connectRendererTarget(target, options.rendererPort, remaining(deadline));
+    try {
+      stage = "probe-renderer-evaluate";
+      const raw = await evaluateRenderer(
+        client,
+        "globalThis.__CODEX_STATSIG_GATE_BRIDGE__?.probe?.() ?? null",
+        remaining(deadline),
+      );
+      return {
+        ok: true,
+        protocolVersion: 1,
+        main,
+        renderer: { targetUrl: "app://-/index.html", probe: probeRendererResult(raw) },
+      };
+    } finally {
+      client.close();
+    }
+  } catch (error) {
+    error.stage = error.stage ?? stage;
+    throw error;
+  }
+}
+
 function safeError(error) {
   const code = typeof error?.code === "string" ? error.code : "UNEXPECTED_ERROR";
   const message = typeof error?.message === "string" ? error.message.replace(/[\r\n]+/gu, " ").slice(0, 300) : "Unexpected error";
@@ -338,11 +438,15 @@ async function main(argv = process.argv.slice(2)) {
     if (options.help) {
       process.stdout.write(`${JSON.stringify({
         ok: true,
-        usage: "node orchestrator.js [--mode full|renderer] --renderer-port PORT --timeout-ms MS [--main-port PORT --main-payload FILE]",
+        usage: "node orchestrator.js [--mode full|renderer|probe] --renderer-port PORT --timeout-ms MS [--main-port PORT --main-payload FILE]",
       })}\n`);
       return 0;
     }
-    const result = options.mode === "renderer" ? await runRendererBridge(options) : await runBridge(options);
+    const result = options.mode === "renderer"
+      ? await runRendererBridge(options)
+      : options.mode === "probe"
+        ? await runProbeBridge(options)
+        : await runBridge(options);
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {
@@ -362,6 +466,7 @@ module.exports = {
   chooseTarget,
   injectionExpression,
   parseArguments,
+  runProbeBridge,
   runBridge,
   runRendererBridge,
   waitForTarget,

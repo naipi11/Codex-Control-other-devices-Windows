@@ -14,10 +14,14 @@ function New-CcodEngineSnapshot {
         [AllowNull()][Nullable[int]]$MainPort = $null,
         [bool]$IsTopLevel = $true
     )
+    $commandLine='"C:\Codex\ChatGPT.exe"'
+    if($Mode -ceq 'Special' -and $null -ne $RendererPort -and $null -ne $MainPort){
+        $commandLine+=' --remote-debugging-address=127.0.0.1 --remote-debugging-port={0} --inspect=127.0.0.1:{1}' -f $RendererPort,$MainPort
+    }
     [pscustomobject][ordered]@{
         Pid=$ProcessId; CreationTimeUtc=$CreationTimeUtc; SessionId=1; UserSid='S-1-5-21-test'
         Path='C:\Codex\ChatGPT.exe'; PackageFamilyName='OpenAI.Codex_2p2nqsd0c76g0'
-        CommandLine='"C:\Codex\ChatGPT.exe"'; ParentPid=$ParentPid; IsTopLevel=$IsTopLevel; Mode=$Mode
+        CommandLine=$commandLine; ParentPid=$ParentPid; IsTopLevel=$IsTopLevel; Mode=$Mode
         RendererPort=$RendererPort; MainPort=$MainPort
     }
 }
@@ -25,6 +29,7 @@ function New-CcodEngineSnapshot {
 function New-CcodEngineRequest {
     param(
         [ValidateSet('Inspect','Apply','RepairRenderer','Recover')][string]$Action = 'Inspect',
+        [string]$RuntimeId = 'runtime-1',
         $Source = $null,
         [bool]$ExistingOnly = $true,
         [AllowNull()][Nullable[int]]$RendererPort = $null,
@@ -34,7 +39,7 @@ function New-CcodEngineRequest {
         [string]$TransactionId = '5f496d99-c839-4458-a6a2-d37ea1afdbda'
     )
     [pscustomobject][ordered]@{
-        schemaVersion=1; action=$Action; transactionId=$TransactionId; runtimeId='runtime-1'
+        schemaVersion=1; action=$Action; transactionId=$TransactionId; runtimeId=$RuntimeId
         supervisorIdentity=[pscustomobject][ordered]@{ pid=11; creationTimeUtc='2030-02-03T03:00:00.0000000Z'; sessionId='1' }
         source=$Source; existingOnly=$ExistingOnly; rendererPort=$RendererPort; mainPort=$MainPort
         timeoutMilliseconds=$TimeoutMilliseconds; restartOrdinary=$RestartOrdinary
@@ -57,11 +62,20 @@ function New-CcodEnginePaths([string]$Root) {
 }
 
 function New-CcodEngineState {
-    param($Status = ([pscustomobject]@{ schemaVersion=1; session=$null }), $ActiveTransaction = $null)
+    param(
+        $Status = ([pscustomobject]@{ schemaVersion=1; session=$null }),
+        $ActiveTransaction = $null,
+        $VerifiedPackages = $null
+    )
+    if($null -eq $VerifiedPackages){
+        $VerifiedPackages=if($null -ne $Status.session -and $null -ne $Status.session.codex){
+            New-CcodEngineVerifiedPackages -RuntimeId $Status.session.runtimeId -PackageFullName $Status.session.codex.packageFullName -PackageVersion $Status.session.codex.packageVersion -AppAsarSha256 $Status.session.codex.appAsarSha256
+        }else{[pscustomobject]@{ schemaVersion=1; packages=[pscustomobject]@{} }}
+    }
     [pscustomobject]@{
         Settings=[pscustomobject]@{ automationEnabled=$true; candidateCompatibleOptIn=$true; nodeCandidates=@('C:\Node\node.exe') }
         Status=$Status
-        VerifiedPackages=[pscustomobject]@{ schemaVersion=1; packages=[pscustomobject]@{} }
+        VerifiedPackages=$VerifiedPackages
         Transition=[pscustomobject]@{ schemaVersion=1; activeTransaction=$ActiveTransaction }
         AutomationEnabled=$true; AutomaticCandidateTrialsAllowed=$true; TransitionActionsAllowed=$true
         StatusRebuildRequired=$false; Damage=[pscustomobject]@{}
@@ -80,7 +94,47 @@ function New-CcodEngineProbe {
 }
 
 function New-CcodEngineActiveStatus {
-    [pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=11;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId='runtime-1';sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
+    param([string]$RuntimeId='runtime-1')
+    [pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=11;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId=$RuntimeId;sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
+}
+
+function New-CcodEngineVerifiedPackages {
+    param(
+        [string]$RuntimeId='runtime-1',
+        [string]$PackageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0',
+        [string]$PackageVersion='1.0.0.0',
+        [string]$AppAsarSha256=('a'*64),
+        [string]$StaticClassification='CandidateCompatible',
+        [string]$DynamicOutcome='Succeeded',
+        [string]$ProbeState='Valid'
+    )
+    $key='{0}|{1}|{2}' -f $PackageFullName,$AppAsarSha256,$RuntimeId
+    $packages=[ordered]@{}
+    $packages[$key]=[ordered]@{
+        packageFullName=$PackageFullName;packageVersion=$PackageVersion;appAsarSha256=$AppAsarSha256;runtimeId=$RuntimeId
+        staticClassification=$StaticClassification;dynamicOutcome=$DynamicOutcome;probeState=$ProbeState;confirmedAtUtc='2030-02-03T04:06:00.0000000Z'
+    }
+    [pscustomobject][ordered]@{schemaVersion=1;packages=[pscustomobject]$packages}
+}
+
+function New-CcodInspectionState {
+    param(
+        $Status=(New-CcodEngineActiveStatus),
+        $VerifiedPackages=(New-CcodEngineVerifiedPackages),
+        [string[]]$NodeCandidates=@('C:\Node\node.exe')
+    )
+    [pscustomobject][ordered]@{
+        Settings=[pscustomobject][ordered]@{schemaVersion=1;automationEnabled=$true;candidateCompatibleOptIn=$true;nodeCandidates=@($NodeCandidates);updatedAtUtc='2030-02-03T04:00:00.0000000Z'}
+        Status=$Status
+        VerifiedPackages=$VerifiedPackages
+    }
+}
+
+function New-CcodPackageIdentity {
+    [pscustomobject][ordered]@{
+        Found=$true;Code='PACKAGE_FOUND';FullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';FamilyName='OpenAI.Codex_2p2nqsd0c76g0'
+        Version='1.0.0.0';InstallLocation='C:\Codex';ExecutablePath='C:\Codex\ChatGPT.exe';AppAsarPath='C:\Codex\app.asar';NativeDirectory='C:\Codex\native'
+    }
 }
 
 function New-CcodEngineTransition {
@@ -114,6 +168,46 @@ function New-CcodFullBridgeInvocation {
 function New-CcodRendererBridgeInvocation {
     $proof=[ordered]@{ok=$true;protocolVersion=1;renderer=[ordered]@{targetUrl='app://-/index.html';currentDocument=[ordered]@{installed=$true};newDocumentScriptInstalled=$true;probe=[ordered]@{proof=$true;targetGate='782640499'}}}
     [pscustomobject][ordered]@{ExitCode=0;Stdout=($proof|ConvertTo-Json -Depth 16 -Compress);Stderr=''}
+}
+
+function New-CcodProbeBridgeInvocation {
+    param(
+        [ValidateSet('ECONNREFUSED','OPEN','TIMEOUT')][string]$MainCode='ECONNREFUSED',
+        [AllowNull()]$TargetUrl='app://-/index.html',
+        [bool]$Proof=$true,
+        [AllowNull()]$TargetGate='782640499'
+    )
+    $frame=[ordered]@{
+        ok=$true;protocolVersion=1
+        main=[ordered]@{inspectorPortClosed=[ordered]@{confirmed=($MainCode -ceq 'ECONNREFUSED');code=$MainCode}}
+        renderer=[ordered]@{targetUrl=$TargetUrl;probe=[ordered]@{proof=$Proof;targetGate=$TargetGate}}
+    }
+    [pscustomobject][ordered]@{ExitCode=0;Stdout=($frame|ConvertTo-Json -Depth 16 -Compress);Stderr=''}
+}
+
+function New-CcodInspectionAdapters {
+    param(
+        $InspectionState=(New-CcodInspectionState),
+        $PackageIdentity=(New-CcodPackageIdentity),
+        [object[]]$PreProcesses=@(),
+        [object[]]$PostProcesses=$null,
+        $BridgeInvocation=(New-CcodProbeBridgeInvocation),
+        $Counters=$null
+    )
+    $stateValue=$InspectionState;$packageValue=$PackageIdentity;$preValues=@($PreProcesses)
+    $postValues=if($null -eq $PostProcesses){@($PreProcesses)}else{@($PostProcesses)}
+    $counts=if($null -eq $Counters){[pscustomobject]@{Read=0;Package=0;Node=0;Invoke=0;List=0;Match=0;Persisted=0}}else{$Counters}
+    $listCall=[pscustomobject]@{Value=0}
+    @{
+        ReadInspectionState={param($StateRoot)$counts.Read++;$stateValue}.GetNewClosure()
+        GetPackageIdentity={param($Ignored)$counts.Package++;$packageValue}.GetNewClosure()
+        ResolveNodeCandidate={param($NodeCandidates)$counts.Node++;[pscustomobject][ordered]@{Found=$true;Code='NODE_SUPPORTED';Path='C:\Node\node.exe';Version='v22.0.0';Major=22;Capabilities=[pscustomobject]@{Supported=$true;Version='v22.0.0';Major=22}}}.GetNewClosure()
+        GetPersistedSpecialIdentity={param($Status)$counts.Persisted++;$Status.session.codex}.GetNewClosure()
+        InvokeNode={param($NodePath,$Arguments)$counts.Invoke++;$BridgeInvocation}.GetNewClosure()
+        CurrentIdentity={[pscustomobject][ordered]@{SessionId='1';UserSid='S-1-5-21-test'}}
+        ListProcesses={param($StatusEvidence)$counts.List++;$listCall.Value++;if($listCall.Value -eq 1){@($preValues)}else{@($postValues)}}.GetNewClosure()
+        ProcessMatch={param($Expected,$Actual)$counts.Match++;$null -ne $Actual -and $Expected.Pid -eq $Actual.Pid -and $Expected.CreationTimeUtc -ceq $Actual.CreationTimeUtc}.GetNewClosure()
+    }
 }
 
 function Invoke-CcodParserOnlyBridgeChild {
@@ -163,6 +257,7 @@ function New-CcodEngineAdapters {
     $rendererBridgeFactory=${function:New-CcodRendererBridgeInvocation}
     return @{
         ReadState={ param($StateRoot,$SuppressionKey) $stateValue }.GetNewClosure()
+        GetPackageIdentity={New-CcodPackageIdentity}
         StaticProbe={ param($NodeCandidates,$CheckerPath) $eventsValue.Add('StaticProbe'); $probeValue }.GetNewClosure()
         ListProcesses={ param($StatusEvidence) @($processValues) }.GetNewClosure()
         GetProcess={ param($Pid,$StatusEvidence) @($processValues | Where-Object { $_.Pid -eq $Pid } | Select-Object -First 1) }.GetNewClosure()
@@ -233,10 +328,57 @@ try {
         Assert-CcodThrows {Test-CcodBridgeResult -Mode Full -Invocation $wrongCode} 'BRIDGE_PROOF_INCOMPLETE'
     }
 
+    Invoke-CcodTest 'strictly validates every completed Probe frame and rejects malformed evidence' {
+        $rendererCases=@(
+            [pscustomobject]@{TargetUrl='app://-/index.html';Proof=$true;TargetGate='782640499'},
+            [pscustomobject]@{TargetUrl=$null;Proof=$false;TargetGate=$null},
+            [pscustomobject]@{TargetUrl='app://-/index.html';Proof=$false;TargetGate=$null},
+            [pscustomobject]@{TargetUrl='app://-/index.html';Proof=$false;TargetGate='782640499'}
+        )
+        foreach($mainCode in @('ECONNREFUSED','OPEN','TIMEOUT')){
+            foreach($rendererCase in $rendererCases){
+                $parsed=Test-CcodBridgeResult -Mode Probe -Invocation (New-CcodProbeBridgeInvocation -MainCode $mainCode -TargetUrl $rendererCase.TargetUrl -Proof $rendererCase.Proof -TargetGate $rendererCase.TargetGate)
+                Assert-CcodEqual $mainCode $parsed.main.inspectorPortClosed.code "$mainCode legal Probe frame passes"
+                Assert-CcodEqual $rendererCase.Proof $parsed.renderer.probe.proof 'legal renderer proof Boolean is preserved'
+            }
+        }
+
+        $valid=(New-CcodProbeBridgeInvocation).Stdout|ConvertFrom-Json
+        $malformed=[Collections.Generic.List[object]]::new()
+        foreach($mutator in @(
+            {param($x)$x|Add-Member extra $true},
+            {param($x)$x.PSObject.Properties.Remove('main')},
+            {param($x)$x.ok='true'},
+            {param($x)$x.protocolVersion='1'},
+            {param($x)$x.main|Add-Member extra $true},
+            {param($x)$x.main.inspectorPortClosed.confirmed=$false},
+            {param($x)$x.main.inspectorPortClosed.code='econnrefused'},
+            {param($x)$x.main.inspectorPortClosed.confirmed=$true;$x.main.inspectorPortClosed.code='OPEN'},
+            {param($x)$x.renderer|Add-Member extra $true},
+            {param($x)$x.renderer.targetUrl='APP://-/index.html'},
+            {param($x)$x.renderer.probe.proof='true'},
+            {param($x)$x.renderer.probe.targetGate='different'},
+            {param($x)$x.renderer.probe.proof=$true;$x.renderer.probe.targetGate=$null},
+            {param($x)$x.renderer.targetUrl=$null;$x.renderer.probe.proof=$true},
+            {param($x)$x.renderer.targetUrl=$null;$x.renderer.probe.proof=$false;$x.renderer.probe.targetGate='782640499'},
+            {param($x)$x.renderer.probe|Add-Member extra $true}
+        )){
+            $copy=($valid|ConvertTo-Json -Depth 16 -Compress)|ConvertFrom-Json
+            & $mutator $copy
+            $malformed.Add([pscustomobject][ordered]@{ExitCode=0;Stdout=($copy|ConvertTo-Json -Depth 16 -Compress);Stderr=''})
+        }
+        $malformed.Add([pscustomobject][ordered]@{ExitCode=0;Stdout='[]';Stderr=''})
+        $malformed.Add([pscustomobject][ordered]@{ExitCode=0;Stdout='null';Stderr=''})
+        foreach($invocation in $malformed){Assert-CcodThrows {Test-CcodBridgeResult -Mode Probe -Invocation $invocation} 'CCOD_BRIDGE_JSON_INVALID'}
+        Assert-CcodThrows {Test-CcodBridgeResult -Mode Probe -Invocation ([pscustomobject][ordered]@{ExitCode=1;Stdout='{}';Stderr='safe'})} 'BRIDGE_PROOF_INCOMPLETE'
+        Assert-CcodThrows {Test-CcodBridgeResult -Mode Probe -Invocation ([pscustomobject][ordered]@{ExitCode=0;Stdout='';Stderr=''})} 'BRIDGE_PROOF_INCOMPLETE'
+    }
+
     Invoke-CcodTest 'returns exact correlated results and rejects request or path coercion before adapters' {
         $request = New-CcodEngineRequest
         $before = $request | ConvertTo-Json -Depth 16 -Compress
-        $result = Invoke-CcodInspectSession -Request $request -Paths $paths -Adapters (New-CcodEngineAdapters)
+        $emptyInspection=New-CcodInspectionState -Status ([pscustomobject]@{schemaVersion=1;session=$null}) -VerifiedPackages ([pscustomobject]@{schemaVersion=1;packages=[pscustomobject]@{}})
+        $result = Invoke-CcodInspectSession -Request $request -Paths $paths -Adapters (New-CcodInspectionAdapters -InspectionState $emptyInspection)
         Assert-CcodEngineResultContract $result $request.transactionId 'valid inspect'
         Assert-CcodEqual 'Inspected' $result.outcome 'valid no-process inspect is safe'
         Assert-CcodEqual 'NoCodex' $result.safeState 'no process remains a read-only fact'
@@ -270,10 +412,21 @@ try {
         Assert-CcodEqual 'CCOD_REQUEST_INVALID' $portFailure.error.code 'equal requested ports fail before source or journal adapters'
     }
 
-    Invoke-CcodTest 'publishes fixed errors and writes only allowlisted bounded session diagnostics' {
+    Invoke-CcodTest 'Inspect writes no diagnostics while mutating actions keep bounded allowlisted diagnostics' {
         $secret="C:\secret\device-key.json`n--token hunter2`ncommand.exe --password=swordfish"
+        $inspectWrites=[pscustomobject]@{Count=0}
+        $inspectResult=Invoke-CcodInspectSession -Request (New-CcodEngineRequest) -Paths $paths -Adapters @{
+            ReadInspectionState={throw $secret}.GetNewClosure()
+            WriteLog={param($Path,$Message)$inspectWrites.Count++}.GetNewClosure()
+            ReadState={throw 'aggregate reader must not run'}
+        }
+        Assert-CcodEqual 'CCOD_SESSION_FAILED' $inspectResult.error.code 'unknown Inspect adapter errors use the stable session code'
+        Assert-CcodEqual 0 $inspectWrites.Count 'Inspect errors never write diagnostics'
+        Assert-CcodEqual $null $inspectResult.logFile 'Inspect errors publish no log path'
+
         $messages=[Collections.Generic.List[string]]::new()
-        $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest) -Paths $paths -Adapters @{
+        $source=New-CcodEngineSnapshot
+        $result=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source) -Paths $paths -Adapters @{
             ReadState={throw $secret}.GetNewClosure()
             WriteLog={param($Path,$Message)$messages.Add($Message);'incidental adapter output'}.GetNewClosure()
         }
@@ -289,7 +442,7 @@ try {
 
         [IO.Directory]::CreateDirectory((Split-Path $paths.SessionLogPath -Parent))|Out-Null
         [IO.File]::WriteAllText($paths.SessionLogPath,('x'*(2MB+1)),[Text.UTF8Encoding]::new($false))
-        $default=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId '9c2324b9-07a4-4ad3-9de5-c48dde73c713') -Paths $paths -Adapters @{ReadState={throw $secret}.GetNewClosure()}
+        $default=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source -TransactionId '9c2324b9-07a4-4ad3-9de5-c48dde73c713') -Paths $paths -Adapters @{ReadState={throw $secret}.GetNewClosure()}
         Assert-CcodEqual $paths.SessionLogPath $default.logFile 'default adapter writes the same safe session log reference'
         Assert-CcodTrue ((Get-Item -LiteralPath $paths.SessionLogPath).Length -lt 2MB) 'default rotating log replaces an unsafe oversized current file'
         $lines=@(Get-Content -LiteralPath $paths.SessionLogPath|Where-Object{-not [string]::IsNullOrWhiteSpace($_)})
@@ -308,7 +461,7 @@ try {
         )){
             $messages=[Collections.Generic.List[string]]::new()
             $errorRecord=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('safe internal failure'),$case.Id,[Management.Automation.ErrorCategory]::InvalidData,$null)
-            $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters @{
+            $result=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source (New-CcodEngineSnapshot) -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters @{
                 ReadState={throw $errorRecord}.GetNewClosure()
                 WriteLog={param($Path,$Message)$messages.Add($Message)}.GetNewClosure()
             }
@@ -320,25 +473,133 @@ try {
         }
     }
 
-    Invoke-CcodTest 'inspects ordinary validated special and renderer-broken identity without mutation' {
-        $ordinary = New-CcodEngineSnapshot
-        $ordinaryResult = Invoke-CcodInspectSession -Request (New-CcodEngineRequest) -Paths $paths -Adapters (New-CcodEngineAdapters -Processes @($ordinary))
-        Assert-CcodEqual 'OrdinaryRunning' $ordinaryResult.safeState 'ordinary root remains unchanged'
-        Assert-CcodEqual 100 $ordinaryResult.source.pid 'ordinary identity is reduced safely'
+    Invoke-CcodTest 'probes one exact persisted special read-only with current or older exact provenance' {
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
+        foreach($statusRuntime in @('runtime-1','runtime-old')){
+            $status=New-CcodEngineActiveStatus -RuntimeId $statusRuntime
+            $state=New-CcodInspectionState -Status $status -VerifiedPackages (New-CcodEngineVerifiedPackages -RuntimeId $statusRuntime)
+            $counts=[pscustomobject]@{Read=0;Package=0;Node=0;Invoke=0;List=0;Match=0;Persisted=0;Forbidden=0}
+            $capture=[pscustomobject]@{Node=$null;Arguments=$null}
+            $adapters=New-CcodInspectionAdapters -InspectionState $state -PreProcesses @($special) -Counters $counts
+            $adapters.InvokeNode={param($NodePath,$Arguments)$counts.Invoke++;$capture.Node=$NodePath;$capture.Arguments=@($Arguments);New-CcodProbeBridgeInvocation}.GetNewClosure()
+            foreach($name in @('ReadState','StaticProbe','WriteLog','WriteStatus','WriteVerified','NewTransition','SetTransition','CompleteTransition','StopProcess','StartSpecial','WaitPortClosed')){$adapters[$name]={$counts.Forbidden++;throw 'forbidden Inspect mutation'}.GetNewClosure()}
+            $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest) -Paths $paths -Adapters $adapters
+            Assert-CcodEngineResultContract $result '5f496d99-c839-4458-a6a2-d37ea1afdbda' "$statusRuntime Inspect"
+            Assert-CcodEqual 'Inspected' $result.outcome "$statusRuntime session is observed"
+            Assert-CcodEqual 'SpecialValidated' $result.safeState "$statusRuntime exact positive proof validates special"
+            Assert-CcodEqual 'Inspected' $result.stage "$statusRuntime Inspect reaches terminal stage"
+            Assert-CcodEqual 201 $result.special.pid "$statusRuntime exact special is returned"
+            Assert-CcodEqual $null $result.probes "$statusRuntime periodic probe is never published in controller results"
+            Assert-CcodEqual 'C:\Node\node.exe' $capture.Node "$statusRuntime Node comes from configured candidates"
+            Assert-CcodEqual "$($paths.OrchestratorPath),--mode,probe,--renderer-port,41001,--main-port,41002,--timeout-ms,30000" ($capture.Arguments -join ',') "$statusRuntime executes only the current runtime probe path"
+            Assert-CcodEqual 1 $counts.Read "$statusRuntime state is composed once before probe"
+            Assert-CcodEqual 2 $counts.List "$statusRuntime enumerates before and after probe"
+            Assert-CcodEqual 0 $counts.Forbidden "$statusRuntime Inspect performs no aggregate read or mutation"
+        }
 
-        $status = [pscustomobject]@{ schemaVersion=1; session=[pscustomobject]@{ supervisorPid=11; supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z'; sessionId='1'; runtimeId='runtime-1'; sessionState='Active'; codex=[pscustomobject]@{ pid=201; creationTimeUtc='2030-02-03T04:05:07.0000000Z'; packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0'; packageVersion='1.0.0.0'; appAsarSha256=('a'*64); mainPort=41002; rendererPort=41001; mainProbe='Closed'; rendererProbe='BridgeValid' } } }
-        $special = New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
-        $specialResult = Invoke-CcodInspectSession -Request (New-CcodEngineRequest) -Paths $paths -Adapters (New-CcodEngineAdapters -State (New-CcodEngineState -Status $status) -Processes @($special))
-        Assert-CcodEqual 'SpecialValidated' $specialResult.safeState 'only live validated special maps active'
-        Assert-CcodEqual 201 $specialResult.special.pid 'special identity is reduced safely'
+        foreach($negative in @(
+            (New-CcodProbeBridgeInvocation -TargetUrl $null -Proof $false -TargetGate $null),
+            (New-CcodProbeBridgeInvocation -Proof $false -TargetGate $null),
+            (New-CcodProbeBridgeInvocation -Proof $false -TargetGate '782640499')
+        )){
+            $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -BridgeInvocation $negative)
+            Assert-CcodEqual 'Inspected' $result.outcome 'completed renderer negative remains a completed observation'
+            Assert-CcodEqual 'RendererRepairRequired' $result.safeState 'completed renderer negative requests repair'
+            Assert-CcodEqual $null $result.probes 'renderer negative publishes no raw probe'
+        }
+    }
 
-        $broken = New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
-        $brokenResult = Invoke-CcodInspectSession -Request (New-CcodEngineRequest) -Paths $paths -Adapters (New-CcodEngineAdapters -State (New-CcodEngineState -Status $status) -Processes @($broken))
-        Assert-CcodEqual 'RendererRepairRequired' $brokenResult.safeState 'persisted immutable special identity survives renderer probe damage'
+    Invoke-CcodTest 'fails Inspect provenance closed before Node for every stale or unauthorized tuple' {
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
+        $status=New-CcodEngineActiveStatus -RuntimeId 'runtime-old'
+        $cases=[ordered]@{
+            MissingKey=[pscustomobject]@{schemaVersion=1;packages=[pscustomobject]@{}}
+            WrongKey=(New-CcodEngineVerifiedPackages -RuntimeId 'runtime-other')
+        }
+        foreach($spec in @(
+            [pscustomobject]@{Name='WrongPackage';Field='packageFullName';Value='OpenAI.Codex_DIFFERENT'},
+            [pscustomobject]@{Name='WrongVersion';Field='packageVersion';Value='2.0.0.0'},
+            [pscustomobject]@{Name='WrongHash';Field='appAsarSha256';Value=('b'*64)},
+            [pscustomobject]@{Name='WrongRuntime';Field='runtimeId';Value='runtime-other'},
+            [pscustomobject]@{Name='FailedOutcome';Field='dynamicOutcome';Value='Failed'},
+            [pscustomobject]@{Name='NotRunProbe';Field='probeState';Value='NotRun'},
+            [pscustomobject]@{Name='InvalidProbe';Field='probeState';Value='Invalid'},
+            [pscustomobject]@{Name='NativeStatic';Field='staticClassification';Value='NativeModulePresent'},
+            [pscustomobject]@{Name='UnknownStatic';Field='staticClassification';Value='UnknownOrIncompatible'}
+        )){
+            $store=New-CcodEngineVerifiedPackages -RuntimeId 'runtime-old'
+            $key='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0|'+('a'*64)+'|runtime-old'
+            $store.packages.PSObject.Properties[$key].Value.($spec.Field)=$spec.Value
+            $cases[$spec.Name]=$store
+        }
+        $caseDrift=New-CcodEngineVerifiedPackages -RuntimeId 'runtime-old';$exactKey='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0|'+('a'*64)+'|runtime-old';$record=$caseDrift.packages.PSObject.Properties[$exactKey].Value
+        $caseDrift.packages.PSObject.Properties.Remove($exactKey);$caseDrift.packages|Add-Member -NotePropertyName $exactKey.ToUpperInvariant() -NotePropertyValue $record
+        $cases['CaseDriftKey']=$caseDrift
+        foreach($case in $cases.GetEnumerator()){
+            $counts=[pscustomobject]@{Read=0;Package=0;Node=0;Invoke=0;List=0;Match=0;Persisted=0}
+            $state=New-CcodInspectionState -Status $status -VerifiedPackages $case.Value
+            $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -InspectionState $state -PreProcesses @($special) -Counters $counts)
+            Assert-CcodEqual 'Error' $result.outcome "$($case.Name) provenance fails closed"
+            Assert-CcodTrue (@('CCOD_STATE_BLOCKED','CCOD_VERIFIED_PACKAGES_INVALID') -ccontains $result.error.code) "$($case.Name) uses an existing state classification"
+            Assert-CcodEqual 0 $counts.Invoke "$($case.Name) provenance fails before Node"
+            Assert-CcodEqual 0 $counts.List "$($case.Name) provenance fails before process observation"
+            Assert-CcodEqual $null $result.logFile "$($case.Name) Inspect error performs no diagnostic write"
+        }
+    }
 
-        $otherSession=New-CcodEngineSnapshot;$otherSession.SessionId=2
-        $ignored=Invoke-CcodInspectSession -Request (New-CcodEngineRequest) -Paths $paths -Adapters (New-CcodEngineAdapters -Processes @($otherSession))
-        Assert-CcodEqual 'NoCodex' $ignored.safeState 'another Windows session is ignored even through an injected process adapter'
+    Invoke-CcodTest 'requires exact pre and post probe roots and only reduces a natural exit safely' {
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
+        $ordinary=New-CcodEngineSnapshot
+        $debug=New-CcodEngineSnapshot -Pid 202 -CreationTimeUtc '2030-02-03T04:05:08.0000000Z' -Mode Unrelated -RendererPort 42001 -MainPort 42002
+        $secondSpecial=New-CcodEngineSnapshot -Pid 202 -CreationTimeUtc '2030-02-03T04:05:08.0000000Z' -Mode Special -RendererPort 42001 -MainPort 42002
+        foreach($preCase in @(
+            [pscustomobject]@{Processes=@($special,$ordinary)},
+            [pscustomobject]@{Processes=@($special,$debug)},
+            [pscustomobject]@{Processes=@($special,$secondSpecial)}
+        )){
+            $counts=[pscustomobject]@{Read=0;Package=0;Node=0;Invoke=0;List=0;Match=0;Persisted=0}
+            $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses $preCase.Processes -Counters $counts)
+            Assert-CcodEqual 'Error' $result.outcome 'mixed or multiple pre-probe roots fail closed'
+            Assert-CcodEqual 0 $counts.Invoke 'pre-probe root ambiguity fails before Node'
+        }
+
+        $noCodex=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -PostProcesses @())
+        Assert-CcodEqual 'NoCodex' $noCodex.safeState 'natural post-probe exit with no root reduces to NoCodex'
+        $oneOrdinary=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -PostProcesses @($ordinary))
+        Assert-CcodEqual 'OrdinaryRunning' $oneOrdinary.safeState 'natural post-probe replacement with one ordinary reduces safely'
+        Assert-CcodEqual 100 $oneOrdinary.source.pid 'natural ordinary identity is returned'
+
+        $pidReuse=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:08.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
+        foreach($postCase in @(
+            [pscustomobject]@{Processes=@($pidReuse)},
+            [pscustomobject]@{Processes=@($ordinary,$debug)},
+            [pscustomobject]@{Processes=@($debug)},
+            [pscustomobject]@{Processes=@($special,$ordinary)},
+            [pscustomobject]@{Processes=@($secondSpecial)}
+        )){
+            $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -PostProcesses $postCase.Processes)
+            Assert-CcodEqual 'Error' $result.outcome 'post-probe reuse replacement or ambiguity fails closed'
+            Assert-CcodEqual $null $result.logFile 'post-probe Inspect uncertainty writes no diagnostics'
+        }
+    }
+
+    Invoke-CcodTest 'keeps main and operational probe failures out of renderer repair evidence' {
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
+        foreach($mainCode in @('OPEN','TIMEOUT')){
+            $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -BridgeInvocation (New-CcodProbeBridgeInvocation -MainCode $mainCode))
+            Assert-CcodEqual 'CCOD_MAIN_INSPECTOR_OPEN' $result.error.code "$mainCode main observation is an error"
+            Assert-CcodEqual 'Error' $result.safeState "$mainCode never requests renderer repair"
+        }
+        foreach($invocation in @(
+            [pscustomobject][ordered]@{ExitCode=1;Stdout='{"ok":false,"error":{"code":"DISCOVERY_FAILED"}}';Stderr=''},
+            [pscustomobject][ordered]@{ExitCode=0;Stdout='';Stderr=''},
+            [pscustomobject][ordered]@{ExitCode=0;Stdout='{}';Stderr=''},
+            [pscustomobject][ordered]@{ExitCode=0;Stdout='{"ok":true,"protocolVersion":1,"main":{"inspectorPortClosed":{"confirmed":true,"code":"ECONNREFUSED"}},"renderer":{"targetUrl":"app://-/index.html","probe":{"proof":true,"targetGate":"wrong"}}}';Stderr=''}
+        )){
+            $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -BridgeInvocation $invocation)
+            Assert-CcodEqual 'Error' $result.outcome 'Node transport framing or evaluation failure stays operational'
+            Assert-CcodEqual 'Error' $result.safeState 'operational failure never becomes renderer repair evidence'
+        }
     }
 
     Invoke-CcodTest 'only the exact Stopped receipt authorizes special launch' {
@@ -375,7 +636,7 @@ try {
         $apply=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source -TimeoutMilliseconds $timeout) -Paths $paths -Adapters $applyAdapters
 
         $status=[pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=11;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId='runtime-1';sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
-        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
         $repairAdapters=New-CcodEngineAdapters -State (New-CcodEngineState -Status $status) -Processes @($special)
         $repairArguments=[Collections.Generic.List[string]]::new()
         $repairAdapters.InvokeNode={param($NodePath,$Arguments)$repairArguments.Add(($Arguments -join ','));Invoke-CcodParserOnlyBridgeChild -Arguments @($Arguments)}.GetNewClosure()
@@ -408,7 +669,8 @@ try {
         Assert-CcodEqual 60000 $captured.Start 'special start stays inside the ProcessControl 60000ms API limit'
         Assert-CcodTrue (($captured.Bridge -join ',') -cmatch '--timeout-ms,120000(?:,|$)') 'bridge receives the full 120-second value'
 
-        $tooLarge=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TimeoutMilliseconds 120000) -Paths $paths -Adapters (New-CcodEngineAdapters)
+        $emptyInspection=New-CcodInspectionState -Status ([pscustomobject]@{schemaVersion=1;session=$null}) -VerifiedPackages ([pscustomobject]@{schemaVersion=1;packages=[pscustomobject]@{}})
+        $tooLarge=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TimeoutMilliseconds 120000) -Paths $paths -Adapters (New-CcodInspectionAdapters -InspectionState $emptyInspection)
         Assert-CcodEqual 'Inspected' $tooLarge.outcome '120000 is accepted by the shared request contract'
         $invalid=New-CcodEngineRequest;$invalid.timeoutMilliseconds=120001
         Assert-CcodEqual 'CCOD_REQUEST_INVALID' (Invoke-CcodInspectSession -Request $invalid -Paths $paths -Adapters @{ReadState={throw 'must not run'}}).error.code '120001 is rejected before adapters'
@@ -801,18 +1063,21 @@ try {
     }
 
     Invoke-CcodTest 'repairs only the recorded renderer endpoint and never supplies main Inspector arguments' {
-        $status=[pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=11;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId='runtime-1';sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
-        $broken=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
-        $captured=[pscustomobject]@{Arguments=$null};$repairOrder=[Collections.Generic.List[string]]::new();$adapters=New-CcodEngineAdapters -State (New-CcodEngineState -Status $status) -Processes @($broken)
+        $status=New-CcodEngineActiveStatus -RuntimeId 'runtime-old'
+        $broken=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
+        $captured=[pscustomobject]@{Arguments=$null;StatusRuntime=$null;LiveRuntime=$null};$repairOrder=[Collections.Generic.List[string]]::new();$adapters=New-CcodEngineAdapters -State (New-CcodEngineState -Status $status) -Processes @($broken)
         $rendererProof=[ordered]@{ok=$true;protocolVersion=1;renderer=[ordered]@{targetUrl='app://-/index.html';currentDocument=[ordered]@{installed=$true};newDocumentScriptInstalled=$true;probe=[ordered]@{proof=$true;targetGate='782640499'}}}
         $adapters.WaitPortClosed={param($Port,$TimeoutMilliseconds)$repairOrder.Add("Wait:${Port}:${TimeoutMilliseconds}");$true}.GetNewClosure()
         $adapters.InvokeNode={param($NodePath,$Arguments)$repairOrder.Add('InvokeNode');$captured.Arguments=@($Arguments);[pscustomobject][ordered]@{ExitCode=0;Stdout=($rendererProof|ConvertTo-Json -Depth 16 -Compress);Stderr=''}}.GetNewClosure()
+        $adapters.WriteStatus={param($StateRoot,$Status,$LiveProbe)$captured.StatusRuntime=$Status.session.runtimeId;$captured.LiveRuntime=$LiveProbe.runtimeId}.GetNewClosure()
         $result=Invoke-CcodRepairRenderer -Request (New-CcodEngineRequest -Action RepairRenderer) -Paths $paths -Adapters $adapters
         Assert-CcodEqual 'NoAction' $result.outcome 'successful renderer repair needs no process normalization'
         Assert-CcodEqual 'SpecialValidated' $result.safeState 'renderer-only proof restores validated special state'
         Assert-CcodEqual "$($paths.OrchestratorPath),--mode,renderer,--renderer-port,41001,--timeout-ms,30000" ($captured.Arguments -join ',') 'renderer repair passes renderer mode, its recorded port, and the request timeout'
         Assert-CcodTrue (($captured.Arguments -join ',') -cnotmatch 'main') 'renderer repair never passes a main connector argument'
         Assert-CcodEqual 'Wait:41002:30000,InvokeNode' ($repairOrder -join ',') 'explicit main refusal is proven before renderer-only child invocation'
+        Assert-CcodEqual 'runtime-old' $captured.StatusRuntime 'post-upgrade repair preserves the old status runtime'
+        Assert-CcodEqual 'runtime-old' $captured.LiveRuntime 'post-upgrade repair proves status with the old provenance runtime'
 
         $missing=Invoke-CcodRepairRenderer -Request (New-CcodEngineRequest -Action RepairRenderer -TransactionId '36cafc98-f225-43bd-ae33-b9a608ac68da') -Paths $paths -Adapters (New-CcodEngineAdapters -Processes @())
         Assert-CcodEqual 'Error' $missing.outcome 'renderer repair fails closed without exact persisted special identity'
@@ -820,7 +1085,7 @@ try {
 
     Invoke-CcodTest 'normalizes once without renderer or Active writes when repair main refusal is unproven' {
         $status=[pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=11;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId='runtime-1';sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
-        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002;$alive=@{201=$special}
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002;$alive=@{201=$special}
         $counts=[pscustomobject]@{Wait=0;Node=0;ActiveWrites=0;RecoveryStages=0;SpecialStart=0;OrdinaryStart=0;Recover=0}
         $adapters=New-CcodEngineAdapters -State (New-CcodEngineState -Status $status) -Processes @($special) -Counters $counts
         $adapters.WaitPortClosed={param($Port,$TimeoutMilliseconds)$counts.Wait++;return ($counts.Wait -gt 1)}.GetNewClosure()
@@ -839,7 +1104,7 @@ try {
     Invoke-CcodTest 'rejects every mismatched live repair identity dimension before renderer activity' {
         $status=[pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=11;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId='runtime-1';sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
         foreach($field in @('Pid','CreationTimeUtc','SessionId','UserSid','Path','PackageFamilyName','RendererPort','MainPort')){
-            $candidate=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
+            $candidate=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
             switch($field){'Pid'{$candidate.Pid=202};'CreationTimeUtc'{$candidate.CreationTimeUtc='2030-02-03T04:05:08.0000000Z'};'SessionId'{$candidate.SessionId=2};'UserSid'{$candidate.UserSid='S-1-5-21-other'};'Path'{$candidate.Path='C:\Other\ChatGPT.exe'};'PackageFamilyName'{$candidate.PackageFamilyName='Other.Family'};'RendererPort'{$candidate.RendererPort=42001};'MainPort'{$candidate.MainPort=42002}}
             $counts=[pscustomobject]@{Node=0;Wait=0;SpecialStart=0;OrdinaryStart=0;Recover=0};$adapters=New-CcodEngineAdapters -State (New-CcodEngineState -Status $status) -Processes @($candidate) -Counters $counts
             $adapters.WaitPortClosed={param($Port,$TimeoutMilliseconds)$counts.Wait++;$true}.GetNewClosure();$adapters.InvokeNode={param($NodePath,$Arguments)$counts.Node++;New-CcodFullBridgeInvocation}.GetNewClosure()
@@ -865,22 +1130,56 @@ try {
     }
 
     Invoke-CcodTest 'renderer repair failure normalizes once and suppresses the failed runtime' {
-        $status=[pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=11;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId='runtime-1';sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
-        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002;$alive=@{201=$special}
-        $counters=[pscustomobject]@{SpecialStart=0;OrdinaryStart=0;Recover=0;Node=0};$adapters=New-CcodEngineAdapters -State (New-CcodEngineState -Status $status) -Processes @($special) -Counters $counters
+        $status=New-CcodEngineActiveStatus -RuntimeId 'runtime-old'
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002;$alive=@{201=$special}
+        $existingVerified=New-CcodEngineVerifiedPackages -RuntimeId 'runtime-old'
+        $counters=[pscustomobject]@{SpecialStart=0;OrdinaryStart=0;Recover=0;Node=0};$adapters=New-CcodEngineAdapters -State (New-CcodEngineState -Status $status -VerifiedPackages $existingVerified) -Processes @($special) -Counters $counters
+        $writtenVerified=[pscustomobject]@{Value=$null}
         $adapters.InvokeNode={param($NodePath,$Arguments)[pscustomobject][ordered]@{ExitCode=0;Stdout='{}';Stderr=''}}
         $adapters.ListProcesses={param($StatusEvidence)@($alive.Values)}.GetNewClosure();$adapters.GetProcess={param($ProcessId,$StatusEvidence)if($alive.ContainsKey([int]$ProcessId)){$alive[[int]$ProcessId]}else{$null}}.GetNewClosure();$adapters.GetTree={param($Root,$StatusEvidence)@($Root)}
         $adapters.StopProcess={param($Expected,$StatusEvidence,$TimeoutMilliseconds)$alive.Remove([int]$Expected.Pid);[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
+        $adapters.ReadVerified={param($StateRoot)$existingVerified}.GetNewClosure()
+        $adapters.WriteVerified={param($StateRoot,$Verified)$writtenVerified.Value=$Verified}.GetNewClosure()
         $result=Invoke-CcodRepairRenderer -Request (New-CcodEngineRequest -Action RepairRenderer) -Paths $paths -Adapters $adapters
         Assert-CcodEqual 'Recovered' $result.outcome 'renderer proof failure returns a proven ordinary recovery'
         Assert-CcodEqual 1 $counters.OrdinaryStart 'renderer repair recovery launches ordinary at most once'
         Assert-CcodTrue (-not [string]::IsNullOrWhiteSpace($result.recovery.suppressionKey)) 'renderer repair failure returns suppression evidence'
+        Assert-CcodTrue ($result.recovery.suppressionKey.EndsWith('|runtime-1',[StringComparison]::Ordinal)) 'failed post-upgrade repair suppresses the current request runtime'
+        $oldKey='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0|'+('a'*64)+'|runtime-old';$currentKey='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0|'+('a'*64)+'|runtime-1'
+        Assert-CcodEqual 'Succeeded' $writtenVerified.Value.packages.PSObject.Properties[$oldKey].Value.dynamicOutcome 'old successful provenance remains intact'
+        Assert-CcodEqual 'Failed' $writtenVerified.Value.packages.PSObject.Properties[$currentKey].Value.dynamicOutcome 'failed work is recorded only for the current runtime'
+    }
+
+    Invoke-CcodTest 'rejects renderer repair provenance before current-runtime work or side effects' {
+        $status=New-CcodEngineActiveStatus -RuntimeId 'runtime-old'
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
+        $empty=[pscustomobject]@{schemaVersion=1;packages=[pscustomobject]@{}}
+        $counts=[pscustomobject]@{Static=0;Node=0;Wait=0;Transition=0;Write=0;SpecialStart=0;OrdinaryStart=0;Recover=0}
+        $adapters=New-CcodEngineAdapters -State (New-CcodEngineState -Status $status -VerifiedPackages $empty) -Processes @($special) -Counters $counts
+        $adapters.StaticProbe={param($Candidates,$Checker)$counts.Static++;throw 'must not probe current package before old provenance'}.GetNewClosure()
+        $adapters.InvokeNode={param($Node,$Arguments)$counts.Node++;throw 'must not invoke renderer'}.GetNewClosure()
+        $adapters.WaitPortClosed={param($Port,$Timeout)$counts.Wait++;throw 'must not inspect port'}.GetNewClosure()
+        foreach($name in @('NewTransition','SetTransition','CompleteTransition','WriteStatus','WriteVerified','StopProcess','StartOrdinary')){$adapters[$name]={$counts.Transition++;throw 'must not mutate'}.GetNewClosure()}
+        $result=Invoke-CcodRepairRenderer -Request (New-CcodEngineRequest -Action RepairRenderer) -Paths $paths -Adapters $adapters
+        Assert-CcodEqual 'Error' $result.outcome 'missing exact old provenance blocks repair'
+        Assert-CcodTrue (@('CCOD_STATE_BLOCKED','CCOD_VERIFIED_PACKAGES_INVALID') -ccontains $result.error.code) 'pre-attempt provenance uses an existing stable classification'
+        Assert-CcodEqual 0 ($counts.Static+$counts.Node+$counts.Wait+$counts.Transition) 'pre-attempt provenance failure has no current-runtime or mutating side effect'
     }
 
     Invoke-CcodTest 'production adapter declarations call upstream APIs and contain no empty process placeholder' {
         $moduleText=[IO.File]::ReadAllText((Join-Path $repositoryRoot 'src\persistence\modules\SessionEngine.psm1'))
         foreach($command in @('Invoke-CcodStaticProbe','Get-CcodProcessSnapshot','Test-CcodProcessMatch','Stop-CcodProcessIfMatch','Get-CcodVerifiedProcessTree','Get-CcodTransactionProcessResult','Get-CcodAvailableLoopbackPort','Start-CcodProcess','Wait-CcodPortClosed','Read-CcodState','Write-CcodStatus','Write-CcodVerifiedPackages','New-CcodTransition','Set-CcodTransitionStage','Complete-CcodTransition')){Assert-CcodTrue ($moduleText -cmatch [regex]::Escape($command)) "production adapters wire $command"}
         Assert-CcodTrue ($moduleText -cnotmatch 'ListProcesses=\{\s*param\([^)]*\)\s*@\(\)\s*\}') 'production process enumeration is not an always-empty placeholder'
+        $inspectionStart=$moduleText.IndexOf('function Merge-CcodInspectionAdapters',[StringComparison]::Ordinal)
+        $inspectionEnd=$moduleText.IndexOf('function Assert-CcodInspectionState',[StringComparison]::Ordinal)
+        Assert-CcodTrue ($inspectionStart -ge 0 -and $inspectionEnd -gt $inspectionStart) 'production inspection adapter block is present'
+        $inspectionText=$moduleText.Substring($inspectionStart,$inspectionEnd-$inspectionStart)
+        foreach($name in @('ReadInspectionState','GetPackageIdentity','ResolveNodeCandidate','GetPersistedSpecialIdentity','InvokeNode','CurrentIdentity','ListProcesses','ProcessMatch')){
+            Assert-CcodEqual 1 ([regex]::Matches($inspectionText,"(?m)^\s{8}$name=\{").Count) "inspection declares $name exactly once"
+        }
+        foreach($reader in @('Read-CcodSettings','Read-CcodStatus','Read-CcodVerifiedPackages')){Assert-CcodTrue ($inspectionText -cmatch [regex]::Escape($reader)) "strict inspection composition calls $reader"}
+        Assert-CcodTrue ($inspectionText -cnotmatch '(?m)^\s{8}(?:ReadState|StaticProbe|WriteLog|WriteStatus|WriteVerified|NewTransition|SetTransition|CompleteTransition|StopProcess|StartSpecial|StartOrdinary|WaitPortClosed)=\{') 'inspection receives no aggregate reader or mutating adapter'
+        Assert-CcodTrue ($inspectionText -cnotmatch '\bRead-CcodState\b|\bInvoke-CcodStaticProbe\b|\bWrite-Ccod') 'inspection adapter block never quarantines hashes or writes state'
     }
 } catch {
     Write-Error $_

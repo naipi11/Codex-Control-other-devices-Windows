@@ -22,6 +22,7 @@ const {
   checkPortOnce,
   chooseTarget,
   parseArguments,
+  runProbeBridge,
   runRendererBridge,
   waitForExplicitRefusal,
 } = require("../src/runtime/orchestrator.js");
@@ -489,6 +490,158 @@ async function orchestratorModesTest(root) {
   return { defaultFull: true, exactRendererTarget: true, rendererNeverConnectedMain: true };
 }
 
+async function orchestratorProbeModeTest(root) {
+  const mainPayload = path.join(root, "..", "src", "runtime", "main-payload.js");
+  const probeOptions = parseArguments([
+    "--mode", "probe", "--renderer-port", "41001", "--main-port", "41002", "--timeout-ms", "30000",
+  ]);
+  assert.deepEqual(
+    Object.keys(probeOptions).sort(),
+    ["help", "mainPort", "mode", "rendererPort", "timeoutMs"].sort(),
+  );
+  assert.equal(probeOptions.mode, "probe");
+  assert.equal(probeOptions.rendererPort, 41001);
+  assert.equal(probeOptions.mainPort, 41002);
+  assert.equal(probeOptions.timeoutMs, 30000);
+  for (const argv of [
+    ["--mode", "probe", "--renderer-port", "41001", "--timeout-ms", "30000"],
+    ["--mode", "probe", "--renderer-port", "41001", "--main-port", "41001", "--timeout-ms", "30000"],
+    ["--mode", "probe", "--renderer-port", "41001", "--main-port", "41002", "--timeout-ms", "30000", "--main-payload", mainPayload],
+    ["--mode", "Probe", "--renderer-port", "41001", "--main-port", "41002", "--timeout-ms", "30000"],
+  ]) {
+    assert.throws(() => parseArguments(argv));
+  }
+
+  const exactTarget = { id: "renderer-1", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://ignored-host/devtools/page/1" };
+  function fakeProbeDependencies({
+    main = { code: "ECONNREFUSED", state: "error" },
+    targets = [exactTarget],
+    evaluation = { proof: true, targetGate: "782640499" },
+    failAt = null,
+    calls = [],
+  } = {}) {
+    const client = {
+      async call(method) {
+        calls.push({ method: `client.${method}` });
+        throw new Error(`unexpected direct CDP call: ${method}`);
+      },
+      close() { calls.push({ method: "close" }); },
+    };
+    return {
+      calls,
+      dependencies: {
+        checkPortOnce: async (port, timeoutMs) => {
+          calls.push({ method: "checkPortOnce", port, timeoutMs });
+          assert.equal(port, 41002);
+          assert(timeoutMs >= 1 && timeoutMs <= 300);
+          if (failAt === "main") throw Object.assign(new Error("main failed"), { code: "EOTHER" });
+          return main;
+        },
+        discoverTargets: async (port, timeoutMs) => {
+          calls.push({ method: "discoverTargets", port, timeoutMs });
+          assert.equal(port, 41001);
+          assert(timeoutMs > 0 && timeoutMs <= 30000);
+          if (failAt === "discover") throw new Error("discovery failed");
+          return targets;
+        },
+        connectTarget: async (target, port, timeoutMs) => {
+          calls.push({ method: "connectTarget", port, target, timeoutMs });
+          assert.equal(target, exactTarget);
+          assert.equal(port, 41001);
+          if (failAt === "connect") throw new Error("connect failed");
+          return client;
+        },
+        evaluate: async (connected, expression, timeoutMs) => {
+          calls.push({ expression, method: "evaluate", timeoutMs });
+          assert.equal(connected, client);
+          assert.equal(expression, "globalThis.__CODEX_STATSIG_GATE_BRIDGE__?.probe?.() ?? null");
+          if (failAt === "evaluate") throw new Error("evaluation failed");
+          return evaluation;
+        },
+      },
+    };
+  }
+
+  const positiveFixture = fakeProbeDependencies();
+  const positive = await runProbeBridge(probeOptions, positiveFixture.dependencies);
+  assert.deepEqual(positive, {
+    ok: true,
+    protocolVersion: 1,
+    main: { inspectorPortClosed: { confirmed: true, code: "ECONNREFUSED" } },
+    renderer: { targetUrl: "app://-/index.html", probe: { proof: true, targetGate: "782640499" } },
+  });
+  assert.deepEqual(
+    positiveFixture.calls.map((entry) => entry.method),
+    ["checkPortOnce", "discoverTargets", "connectTarget", "evaluate", "close"],
+  );
+  assert.equal(positiveFixture.calls.some((entry) => /^client\.(?:Runtime|Page|Debugger|Target)\./u.test(entry.method)), false);
+  assert.equal(positiveFixture.calls.some((entry) => entry.expression?.includes("scan") || entry.expression?.includes("install")), false);
+
+  for (const [main, expected] of [
+    [{ state: "open" }, { confirmed: false, code: "OPEN" }],
+    [{ state: "timeout" }, { confirmed: false, code: "TIMEOUT" }],
+  ]) {
+    const fixture = fakeProbeDependencies({ main });
+    const result = await runProbeBridge(probeOptions, fixture.dependencies);
+    assert.deepEqual(result.main.inspectorPortClosed, expected);
+  }
+
+  const noTargetFixture = fakeProbeDependencies({ targets: [{ id: "other", type: "page", url: "app://-/settings.html" }] });
+  const noTarget = await runProbeBridge(probeOptions, noTargetFixture.dependencies);
+  assert.deepEqual(noTarget.renderer, { targetUrl: null, probe: { proof: false, targetGate: null } });
+  assert.deepEqual(noTargetFixture.calls.map((entry) => entry.method), ["checkPortOnce", "discoverTargets"]);
+
+  for (const [evaluation, expectedGate] of [
+    [null, null],
+    [{ proof: false, targetGate: null }, null],
+    [{ proof: false, targetGate: "782640499" }, "782640499"],
+  ]) {
+    const fixture = fakeProbeDependencies({ evaluation });
+    const result = await runProbeBridge(probeOptions, fixture.dependencies);
+    assert.deepEqual(result.renderer, {
+      targetUrl: "app://-/index.html",
+      probe: { proof: false, targetGate: expectedGate },
+    });
+    assert.equal(fixture.calls.at(-1).method, "close");
+  }
+
+  const malformedEvaluations = [
+    false,
+    0,
+    "invalid",
+    [],
+    { proof: false },
+    { proof: "false", targetGate: null },
+    { proof: true, targetGate: null },
+    { proof: true, targetGate: "different" },
+    { proof: false, targetGate: "different" },
+    { proof: false, targetGate: null, extra: true },
+  ];
+  for (const evaluation of malformedEvaluations) {
+    const fixture = fakeProbeDependencies({ evaluation });
+    await assert.rejects(() => runProbeBridge(probeOptions, fixture.dependencies));
+    assert.equal(fixture.calls.at(-1).method, "close");
+  }
+
+  const duplicateFixture = fakeProbeDependencies({ targets: [exactTarget, { ...exactTarget, id: "renderer-2" }] });
+  await assert.rejects(() => runProbeBridge(probeOptions, duplicateFixture.dependencies));
+  assert.deepEqual(duplicateFixture.calls.map((entry) => entry.method), ["checkPortOnce", "discoverTargets"]);
+
+  for (const failAt of ["main", "discover", "connect", "evaluate"]) {
+    const fixture = fakeProbeDependencies({ failAt });
+    await assert.rejects(() => runProbeBridge(probeOptions, fixture.dependencies));
+    if (failAt === "evaluate") assert.equal(fixture.calls.at(-1).method, "close");
+  }
+
+  const help = childProcess.spawnSync(process.execPath, [path.join(root, "..", "src", "runtime", "orchestrator.js"), "--help"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /full\|renderer\|probe/u);
+  return { completedNegativeStrict: true, fakeOnly: true, operationalFailuresRejected: true, probeMode: true };
+}
+
 async function inspectorClosureTest(root, tempDirectory) {
   const port = await reservePort();
   assert(Number.isInteger(port));
@@ -536,6 +689,7 @@ async function main() {
     ["incomplete-crypto-rejection", () => incompleteCryptoRejectionTest(root)],
     ["renderer-existing-and-delayed", () => rendererPayloadTest(root)],
     ["orchestrator-full-renderer-modes", () => orchestratorModesTest(root)],
+    ["orchestrator-read-only-probe-mode", () => orchestratorProbeModeTest(root)],
     ["inspector-explicit-refusal", () => inspectorClosureTest(root, tempDirectory)],
   ];
   const results = [];
