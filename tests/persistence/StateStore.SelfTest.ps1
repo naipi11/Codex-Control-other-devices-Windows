@@ -42,7 +42,7 @@ function Write-CcodStateJson([string]$StateRoot, [string]$Leaf, $Value) {
 
 function New-CcodTransitionFixture {
     return [ordered]@{
-        transactionId = 'transaction-1'
+        transactionId = '5f496d99-c839-4458-a6a2-d37ea1afdbda'
         stage = 'IntentWritten'
         sourcePid = 101
         sourceCreationTimeUtc = '2030-02-03T04:05:06.0000000Z'
@@ -321,6 +321,49 @@ try {
             Assert-CcodEqual $false $loaded.TransitionActionsAllowed "$($case.Name) transition forbids stop/start/recover"
             Assert-CcodTrue ($loaded.Damage.PSObject.Properties['transition.json'] -ne $null) "$($case.Name) transition is recorded as damage"
             Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'transition.json.corrupt.*').Count "$($case.Name) transition is quarantined"
+        }
+    }
+
+    Invoke-CcodTest 'accepts a manual intent before source and debug ports exist' {
+        $state = Join-Path $root 'manual-transition-null-pairs'
+        Initialize-CcodStateFixture -StateRoot $state
+        $transaction = New-CcodTransitionFixture
+        $transaction.sourcePid = $null
+        $transaction.sourceCreationTimeUtc = $null
+        $transaction.mainPort = $null
+        $transaction.rendererPort = $null
+        Write-CcodStateJson -StateRoot $state -Leaf 'transition.json' -Value ([ordered]@{ schemaVersion = 1; activeTransaction = $transaction })
+
+        $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+        Assert-CcodEqual $true $loaded.TransitionActionsAllowed 'manual transition remains actionable before port allocation'
+        Assert-CcodEqual $null $loaded.Transition.activeTransaction.sourcePid 'manual source pair stays null'
+        Assert-CcodEqual $null $loaded.Transition.activeTransaction.mainPort 'unallocated port pair stays null'
+    }
+
+    Invoke-CcodTest 'quarantines semantically inconsistent transition stages and identities' {
+        $cases = @(
+            @{ Name='noncanonical-guid'; Mutate={ param($tx) $tx.transactionId = '5F496D99-C839-4458-A6A2-D37EA1AFDBDA' } },
+            @{ Name='updated-before-created'; Mutate={ param($tx) $tx.updatedAtUtc = '2030-02-03T04:05:05.0000000Z' } },
+            @{ Name='manual-stop-requested'; Mutate={ param($tx) $tx.sourcePid=$null; $tx.sourceCreationTimeUtc=$null; $tx.stage='StopRequested' } },
+            @{ Name='early-special-identity'; Mutate={ param($tx) $tx.specialPid=201; $tx.specialCreationTimeUtc='2030-02-03T04:05:06.0000000Z' } },
+            @{ Name='special-started-without-identity'; Mutate={ param($tx) $tx.stage='SpecialStarted' } },
+            @{ Name='validated-without-identity'; Mutate={ param($tx) $tx.stage='Validated' } },
+            @{ Name='special-launch-without-ports'; Mutate={ param($tx) $tx.stage='SpecialLaunchRequested'; $tx.mainPort=$null; $tx.rendererPort=$null } },
+            @{ Name='recovery-special-without-ports'; Mutate={ param($tx) $tx.stage='RecoveryLaunchRequested'; $tx.mainPort=$null; $tx.rendererPort=$null; $tx.specialPid=201; $tx.specialCreationTimeUtc='2030-02-03T04:05:06.0000000Z' } },
+            @{ Name='source-pid-over-int32'; Mutate={ param($tx) $tx.sourcePid=[long]2147483648 } },
+            @{ Name='early-recovery-identity'; Mutate={ param($tx) $tx.recoveryPid=301; $tx.recoveryCreationTimeUtc='2030-02-03T04:05:06.0000000Z' } },
+            @{ Name='recovered-without-identity'; Mutate={ param($tx) $tx.stage='Recovered' } }
+        )
+        foreach ($case in $cases) {
+            $state = Join-Path $root ('transition-semantic-' + $case.Name)
+            Initialize-CcodStateFixture -StateRoot $state
+            $transaction = New-CcodTransitionFixture
+            & $case.Mutate $transaction
+            Write-CcodStateJson -StateRoot $state -Leaf 'transition.json' -Value ([ordered]@{ schemaVersion=1; activeTransaction=$transaction })
+
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodEqual $false $loaded.TransitionActionsAllowed "$($case.Name) cannot authorize transition actions"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'transition.json.corrupt.*').Count "$($case.Name) is quarantined"
         }
     }
 

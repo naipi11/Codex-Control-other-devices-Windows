@@ -65,6 +65,16 @@ function Assert-CcodUtcTimestamp {
     }
 }
 
+function Assert-CcodCanonicalGuid {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$ErrorId, [Parameter(Mandatory)][string]$Name)
+
+    if ($Value -isnot [string]) { Throw-CcodStateError $ErrorId "$Name must be a canonical lowercase GUID in D form" $Value }
+    $parsed = [guid]::Empty
+    if (-not [guid]::TryParseExact($Value, 'D', [ref]$parsed) -or $parsed.ToString('D') -cne $Value) {
+        Throw-CcodStateError $ErrorId "$Name must be a canonical lowercase GUID in D form" $Value
+    }
+}
+
 function Assert-CcodPositiveInteger {
     param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$ErrorId, [Parameter(Mandatory)][string]$Name)
 
@@ -240,7 +250,20 @@ function Assert-CcodNullableProcessIdentity {
     if ($null -eq $pid -and $null -eq $time) { return }
     if ($null -eq $pid -or $null -eq $time) { Throw-CcodStateError $ErrorId "$PidName and $TimeName must be paired" $Value }
     Assert-CcodPositiveInteger -Value $pid -ErrorId $ErrorId -Name $PidName
+    if ($pid -gt [int]::MaxValue) { Throw-CcodStateError $ErrorId "$PidName exceeds the legal Int32 process range" $Value }
     Assert-CcodUtcTimestamp -Value $time -ErrorId $ErrorId -Name $TimeName
+}
+
+function Assert-CcodNullablePortPair {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$ErrorId)
+
+    $mainPort = $Value.mainPort
+    $rendererPort = $Value.rendererPort
+    if ($null -eq $mainPort -and $null -eq $rendererPort) { return }
+    if ($null -eq $mainPort -or $null -eq $rendererPort) { Throw-CcodStateError $ErrorId 'mainPort and rendererPort must be paired' $Value }
+    Assert-CcodTcpPort -Value $mainPort -ErrorId $ErrorId -Name 'mainPort'
+    Assert-CcodTcpPort -Value $rendererPort -ErrorId $ErrorId -Name 'rendererPort'
+    if ($mainPort -eq $rendererPort) { Throw-CcodStateError $ErrorId 'Transition ports must be distinct' $Value }
 }
 
 function Assert-CcodTransitionShape {
@@ -256,17 +279,45 @@ function Assert-CcodTransitionShape {
     $required = @('transactionId', 'stage', 'sourcePid', 'sourceCreationTimeUtc', 'packageFullName', 'appAsarSha256', 'runtimeId', 'mainPort', 'rendererPort', 'specialPid', 'specialCreationTimeUtc', 'recoveryPid', 'recoveryCreationTimeUtc', 'createdAtUtc', 'updatedAtUtc')
     Assert-CcodExactProperties -Value $transaction -Expected $required -ErrorId 'CCOD_TRANSITION_INVALID' -Kind 'Active transition'
     foreach ($name in @('transactionId', 'packageFullName', 'runtimeId')) { if ($transaction.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($transaction.$name)) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' "$name must be a non-empty string" $transaction } }
+    Assert-CcodCanonicalGuid -Value $transaction.transactionId -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'transactionId'
     if ($transaction.stage -isnot [string] -or @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered') -cnotcontains $transaction.stage) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition stage is invalid' $transaction }
-    Assert-CcodPositiveInteger -Value $transaction.sourcePid -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'sourcePid'
-    Assert-CcodUtcTimestamp -Value $transaction.sourceCreationTimeUtc -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'sourceCreationTimeUtc'
+    Assert-CcodNullableProcessIdentity -Value $transaction -PidName 'sourcePid' -TimeName 'sourceCreationTimeUtc' -ErrorId 'CCOD_TRANSITION_INVALID'
     if ($transaction.appAsarSha256 -isnot [string] -or $transaction.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$') { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'appAsarSha256 must be lowercase SHA-256' $transaction }
-    Assert-CcodTcpPort -Value $transaction.mainPort -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'mainPort'
-    Assert-CcodTcpPort -Value $transaction.rendererPort -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'rendererPort'
-    if ($transaction.mainPort -eq $transaction.rendererPort) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition ports must be distinct' $transaction }
+    Assert-CcodNullablePortPair -Value $transaction -ErrorId 'CCOD_TRANSITION_INVALID'
     Assert-CcodNullableProcessIdentity -Value $transaction -PidName 'specialPid' -TimeName 'specialCreationTimeUtc' -ErrorId 'CCOD_TRANSITION_INVALID'
     Assert-CcodNullableProcessIdentity -Value $transaction -PidName 'recoveryPid' -TimeName 'recoveryCreationTimeUtc' -ErrorId 'CCOD_TRANSITION_INVALID'
     Assert-CcodUtcTimestamp -Value $transaction.createdAtUtc -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'createdAtUtc'
     Assert-CcodUtcTimestamp -Value $transaction.updatedAtUtc -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'updatedAtUtc'
+    if ([DateTime]::ParseExact($transaction.updatedAtUtc, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) -lt
+        [DateTime]::ParseExact($transaction.createdAtUtc, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)) {
+        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'updatedAtUtc cannot precede createdAtUtc' $transaction
+    }
+
+    $hasSource = $null -ne $transaction.sourcePid
+    $hasPorts = $null -ne $transaction.mainPort
+    $hasSpecial = $null -ne $transaction.specialPid
+    $hasRecovery = $null -ne $transaction.recoveryPid
+    if (-not $hasSource -and $transaction.stage -ceq 'StopRequested') {
+        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'A manual transaction cannot request a source stop' $transaction
+    }
+    if (@('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested') -ccontains $transaction.stage -and $hasSpecial) {
+        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'special identity cannot exist before SpecialStarted' $transaction
+    }
+    if (@('SpecialStarted', 'Validated') -ccontains $transaction.stage -and -not $hasSpecial) {
+        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'SpecialStarted and Validated require special identity' $transaction
+    }
+    if (@('SpecialLaunchRequested', 'SpecialStarted', 'Validated') -ccontains $transaction.stage -and -not $hasPorts) {
+        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Special launch stages require allocated distinct ports' $transaction
+    }
+    if ($hasSpecial -and -not $hasPorts) {
+        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'A recorded special identity requires its allocated ports' $transaction
+    }
+    if ($transaction.stage -cne 'Recovered' -and $hasRecovery) {
+        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'recovery identity cannot exist before Recovered' $transaction
+    }
+    if ($transaction.stage -ceq 'Recovered' -and -not $hasRecovery) {
+        Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Recovered requires recovery identity' $transaction
+    }
 }
 
 function Read-CcodTypedState {
