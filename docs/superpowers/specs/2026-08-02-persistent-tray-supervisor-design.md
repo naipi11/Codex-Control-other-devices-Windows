@@ -116,18 +116,20 @@
 
 守护程序使用 Windows PowerShell 5.1 与内置 WinForms/Management API，不引入新的第三方 UI 依赖。它持有当前用户 SID 和 Windows Session ID 派生的命名互斥锁，保证目标 Session 内单实例。对象名格式为 `Local\CodexControlOtherDevices.<Kind>.<SID>.<SessionId>`，`Kind` 至少包括 `Supervisor`、`Transition` 和 `Shutdown`；ACL 仅允许当前用户、SYSTEM 和本机管理员。ready 对象另加 bootstrap 生成的随机 token，禁止复用旧 ready 信号。任务已在另一个同账号 Session 运行时，新 Session 不接管 Codex。
 
-现有 JavaScript 检查器与注入 orchestrator 仍要求 Node 22 或更高版本。安装器解析并保存经过版本/能力验证的 `node.exe` 规范化绝对路径；守护程序不依赖计划任务继承的 `PATH`。该路径失效时，只在受控候选位置重新解析并复核；找不到兼容 Node 时保留普通 Codex并在托盘报告依赖错误。
+现有 JavaScript 检查器与注入 orchestrator 仍要求 Node 22 或更高版本。安装器只把安装当次发现并通过版本/能力验证的 `node.exe` 规范化绝对路径写入 `nodeCandidates`；守护程序不依赖计划任务继承的 `PATH`，也不自行增加候选。全部已验证候选失效时保留普通 Codex并在托盘报告依赖错误，用户需重新运行安装器发现新路径。
 
-进程检测采用两条路径：
+进程检测采用能力降级链，事件只负责降低延迟，reconciliation 才是权威来源：
 
-- 临时 `Win32_ProcessStartTrace` 订阅，用于低延迟发现；
+- 优先尝试临时 `Win32_ProcessStartTrace` 订阅；
+- 当前 token 若被 WMI 拒绝，则降级为临时 `__InstanceCreationEvent WITHIN 1` 进程订阅；
+- 两种事件订阅都不可用时仅记录能力状态，不提权、不修改 WMI ACL；
 - 每 3 秒一次的进程 reconciliation，用于覆盖登录竞争、休眠恢复和漏失事件。
 
 检测结果进入串行队列。重型会话切换由独立的隐藏 PowerShell 子进程执行，托盘 UI 保持响应。跨线程 UI 更新统一回到 WinForms 消息线程。
 
 `settings.json`、`status.json`、`verified-packages.json` 和 `transition.json` 都带 schema 版本，并通过同目录临时文件原子替换。无法解析的状态不得被当成成功证据；守护程序将其隔离、记录错误并从实时进程状态重新 reconciliation。
 
-- `settings.json` schema 1 保存 `automationEnabled`、已验证 Node 绝对路径和更新时间。
+- `settings.json` schema 1 保存 `automationEnabled`、独立的 `candidateCompatibleOptIn`、安装器当次逐一验证过的 `nodeCandidates` 绝对路径数组和更新时间。守护程序不得从计划任务继承的 `PATH` 增加新候选；候选全部失效时必须由用户重新运行安装器。
 - `status.json` schema 1 保存 supervisor PID/创建时间/Session ID、runtime ID、会话状态，以及可选的 Codex PID/创建时间/包身份/端口/探针结果。
 - `verified-packages.json` schema 1 以包全名、`app.asar` 哈希和 runtime ID 的组合键保存静态与动态确认结果；它只是缓存，实时身份和会话探针仍是权威。
 - 遇到未知 schema 版本时失败关闭；不得静默改写为当前 schema。
@@ -346,7 +348,7 @@
 - 各状态文件缺失/损坏后的安全默认值，以及 `-RepairState` 后仍保持自动化关闭；
 - `active.json` 路径逃逸、reparse point 与 manifest 篡改；
 - 计划任务环境没有 Node `PATH`，但保存的绝对 Node 路径有效或失效；
-- WMI 订阅失效后由 3 秒 reconciliation 补获进程；
+- `Win32_ProcessStartTrace` 拒绝后降级到 `__InstanceCreationEvent`，以及所有 WMI 订阅失效后由 3 秒 reconciliation 补获进程；
 - 其他用户/Session 进程忽略、日志轮转和磁盘上限；
 - 暂停、恢复、手动重试，以及卸载默认恢复普通会话/显式保留特殊会话。
 
