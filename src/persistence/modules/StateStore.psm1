@@ -16,6 +16,8 @@ function Get-CcodStateAdapters {
     $result = @{
         UtcNow = { [DateTime]::UtcNow }
         TestVerifiedNodeCandidate = { param($Path) Test-Path -LiteralPath $Path -PathType Leaf }
+        BeforeFailedPackageAttemptRecheck = { param($Path, $SuppressionKey) }
+        WriteAtomicJson = { param($Path, $Value) Write-CcodAtomicJson -Path $Path -Value $Value }
     }
     if ($null -ne $Adapters) {
         foreach ($key in $Adapters.Keys) { $result[$key] = $Adapters[$key] }
@@ -462,6 +464,138 @@ function Write-CcodVerifiedPackages {
     Write-CcodTypedState -StateRoot $StateRoot -Leaf 'verified-packages.json' -Value $VerifiedPackages -Validator ${function:Assert-CcodVerifiedPackagesShape} -Adapters (Get-CcodStateAdapters -Adapters $Adapters)
 }
 
+function New-CcodFailedAttemptClearReceipt {
+    param([Parameter(Mandatory)][string]$Outcome)
+
+    if (@('Cleared', 'NotFound', 'NotFailed', 'Conflict') -cnotcontains $Outcome) {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'Failed-attempt clear receipt outcome is invalid' $Outcome
+    }
+    return [pscustomobject][ordered]@{ Outcome = $Outcome }
+}
+
+function Assert-CcodFailedAttemptClearInputs {
+    param(
+        [AllowNull()]$StateRoot,
+        [AllowNull()]$PackageFullName,
+        [AllowNull()]$AppAsarSha256,
+        [AllowNull()]$RuntimeId,
+        [AllowNull()]$ExpectedConfirmedAtUtc
+    )
+
+    if ($StateRoot -isnot [string] -or [string]::IsNullOrWhiteSpace($StateRoot) -or -not [IO.Path]::IsPathRooted($StateRoot)) {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'StateRoot must be an absolute canonical string' $StateRoot
+    }
+    try { $canonicalRoot = [IO.Path]::GetFullPath($StateRoot) } catch {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'StateRoot must be an absolute canonical string' $StateRoot
+    }
+    if ($canonicalRoot -cne $StateRoot -or -not [IO.Directory]::Exists($canonicalRoot)) {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'StateRoot must name an existing canonical directory' $StateRoot
+    }
+    if ($PackageFullName -isnot [string] -or [string]::IsNullOrWhiteSpace($PackageFullName) -or $PackageFullName.IndexOf('|') -ge 0) {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'PackageFullName must be an exact non-empty package identity without delimiters' $PackageFullName
+    }
+    if ($AppAsarSha256 -isnot [string] -or $AppAsarSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'AppAsarSha256 must be an exact lowercase SHA-256 string' $AppAsarSha256
+    }
+    if ($RuntimeId -isnot [string] -or $RuntimeId -cnotmatch '^[A-Za-z0-9._-]{1,96}$') {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'RuntimeId must be a Task 1-safe runtime ID' $RuntimeId
+    }
+    Assert-CcodUtcTimestamp -Value $ExpectedConfirmedAtUtc -ErrorId 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' -Name 'ExpectedConfirmedAtUtc'
+    return $canonicalRoot
+}
+
+function Get-CcodExactStateEntry {
+    param([Parameter(Mandatory)]$Container, [Parameter(Mandatory)][string]$Name)
+
+    if ($Container -is [Collections.IDictionary]) {
+        foreach ($key in $Container.Keys) {
+            if ([string]$key -ceq $Name) {
+                return [pscustomobject]@{ Exists = $true; Value = $Container[$key] }
+            }
+        }
+    } else {
+        foreach ($property in $Container.PSObject.Properties) {
+            if ($property.Name -ceq $Name) {
+                return [pscustomobject]@{ Exists = $true; Value = $property.Value }
+            }
+        }
+    }
+    return [pscustomobject]@{ Exists = $false; Value = $null }
+}
+
+function Test-CcodFailedAttemptIdentity {
+    param(
+        [Parameter(Mandatory)]$Record,
+        [Parameter(Mandatory)][string]$PackageFullName,
+        [Parameter(Mandatory)][string]$AppAsarSha256,
+        [Parameter(Mandatory)][string]$RuntimeId
+    )
+
+    return $Record.packageFullName -is [string] -and $Record.packageFullName -ceq $PackageFullName -and
+        $Record.appAsarSha256 -is [string] -and $Record.appAsarSha256 -ceq $AppAsarSha256 -and
+        $Record.runtimeId -is [string] -and $Record.runtimeId -ceq $RuntimeId
+}
+
+function New-CcodVerifiedPackagesWithoutKey {
+    param([Parameter(Mandatory)]$VerifiedPackages, [Parameter(Mandatory)][string]$SuppressionKey, [hashtable]$Adapters)
+
+    $packages = [ordered]@{}
+    foreach ($name in Get-CcodStatePropertyNames -Value $VerifiedPackages.packages) {
+        if ($name -cne $SuppressionKey) {
+            $entry = Get-CcodExactStateEntry -Container $VerifiedPackages.packages -Name $name
+            $packages[$name] = $entry.Value
+        }
+    }
+    $result = [pscustomobject][ordered]@{ schemaVersion = 1; packages = $packages }
+    Assert-CcodVerifiedPackagesShape -VerifiedPackages $result -Adapters $Adapters
+    return $result
+}
+
+function Clear-CcodFailedPackageAttempt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$StateRoot,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$PackageFullName,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$AppAsarSha256,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$RuntimeId,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedConfirmedAtUtc,
+        [hashtable]$Adapters
+    )
+
+    $canonicalRoot = Assert-CcodFailedAttemptClearInputs -StateRoot $StateRoot -PackageFullName $PackageFullName -AppAsarSha256 $AppAsarSha256 -RuntimeId $RuntimeId -ExpectedConfirmedAtUtc $ExpectedConfirmedAtUtc
+    $adapters = Get-CcodStateAdapters -Adapters $Adapters
+    $path = Get-CcodStatePath -StateRoot $canonicalRoot -Leaf 'verified-packages.json'
+    $suppressionKey = Get-CcodSuppressionKey -PackageFullName $PackageFullName -AppAsarSha256 $AppAsarSha256 -RuntimeId $RuntimeId
+
+    $initial = Read-CcodVerifiedPackages -StateRoot $canonicalRoot -Adapters $adapters
+    $initialEntry = Get-CcodExactStateEntry -Container $initial.packages -Name $suppressionKey
+    if (-not $initialEntry.Exists) { return New-CcodFailedAttemptClearReceipt -Outcome 'NotFound' }
+    if (-not (Test-CcodFailedAttemptIdentity -Record $initialEntry.Value -PackageFullName $PackageFullName -AppAsarSha256 $AppAsarSha256 -RuntimeId $RuntimeId)) {
+        Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package record identity does not match its exact suppression key' $initialEntry.Value
+    }
+    if ($initialEntry.Value.confirmedAtUtc -cne $ExpectedConfirmedAtUtc) { return New-CcodFailedAttemptClearReceipt -Outcome 'Conflict' }
+    if ($initialEntry.Value.dynamicOutcome -cne 'Failed') { return New-CcodFailedAttemptClearReceipt -Outcome 'NotFailed' }
+
+    $initialSnapshot = $initial | ConvertTo-Json -Depth 16 -Compress
+    $updated = New-CcodVerifiedPackagesWithoutKey -VerifiedPackages $initial -SuppressionKey $suppressionKey -Adapters $adapters
+    [void](& $adapters.BeforeFailedPackageAttemptRecheck $path $suppressionKey)
+
+    $current = Read-CcodVerifiedPackages -StateRoot $canonicalRoot -Adapters $adapters
+    $currentEntry = Get-CcodExactStateEntry -Container $current.packages -Name $suppressionKey
+    if (-not $currentEntry.Exists -or
+        -not (Test-CcodFailedAttemptIdentity -Record $currentEntry.Value -PackageFullName $PackageFullName -AppAsarSha256 $AppAsarSha256 -RuntimeId $RuntimeId) -or
+        $currentEntry.Value.confirmedAtUtc -cne $ExpectedConfirmedAtUtc -or
+        $currentEntry.Value.dynamicOutcome -cne 'Failed') {
+        return New-CcodFailedAttemptClearReceipt -Outcome 'Conflict'
+    }
+    if (($current | ConvertTo-Json -Depth 16 -Compress) -cne $initialSnapshot) {
+        return New-CcodFailedAttemptClearReceipt -Outcome 'Conflict'
+    }
+
+    [void](& $adapters.WriteAtomicJson $path $updated)
+    return New-CcodFailedAttemptClearReceipt -Outcome 'Cleared'
+}
+
 function Read-CcodStatePart {
     param(
         [Parameter(Mandatory)][string]$StateRoot,
@@ -567,4 +701,4 @@ function Resolve-CcodDeviceKeyStorePath {
     return (Join-Path $codexHome 'remote-control-device-keys.windows.json')
 }
 
-Export-ModuleMember -Function Initialize-CcodState, Read-CcodState, Repair-CcodState, Read-CcodSettings, Write-CcodSettings, Read-CcodStatus, Write-CcodStatus, Read-CcodVerifiedPackages, Write-CcodVerifiedPackages, Set-CcodAutomationEnabled, Set-CcodCandidateCompatibleOptIn, Get-CcodAttemptKey, Get-CcodRecoveryIgnoreKey, Get-CcodSuppressionKey, Get-CcodStaticKey, Resolve-CcodDeviceKeyStorePath
+Export-ModuleMember -Function Initialize-CcodState, Read-CcodState, Repair-CcodState, Read-CcodSettings, Write-CcodSettings, Read-CcodStatus, Write-CcodStatus, Read-CcodVerifiedPackages, Write-CcodVerifiedPackages, Clear-CcodFailedPackageAttempt, Set-CcodAutomationEnabled, Set-CcodCandidateCompatibleOptIn, Get-CcodAttemptKey, Get-CcodRecoveryIgnoreKey, Get-CcodSuppressionKey, Get-CcodStaticKey, Resolve-CcodDeviceKeyStorePath

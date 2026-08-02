@@ -115,6 +115,14 @@ function New-CcodVerifiedRecord {
     }
 }
 
+function Assert-CcodFailedAttemptClearReceipt {
+    param($Receipt, [Parameter(Mandatory)][string]$Outcome, [Parameter(Mandatory)][string]$Message)
+
+    Assert-CcodTrue ($null -ne $Receipt) "$Message returns a receipt"
+    Assert-CcodEqual 'Outcome' (($Receipt.PSObject.Properties.Name) -join ',') "$Message receipt has one bounded exact field"
+    Assert-CcodEqual $Outcome $Receipt.Outcome "$Message receipt outcome"
+}
+
 $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-state-selftest-' + [Guid]::NewGuid().ToString('N'))
 try {
     Invoke-CcodTest 'initializes independent automation consent and installer-verified absolute Node paths' {
@@ -450,6 +458,166 @@ try {
         $loaded = Read-CcodState -StateRoot $state -CurrentSuppressionKey $key -Adapters (New-CcodStateTestAdapters)
         Assert-CcodEqual $false $loaded.AutomaticCandidateTrialsAllowed 'any recorded outcome suppresses another automatic trial for the same build'
         Assert-CcodEqual $false (Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)).AutomaticCandidateTrialsAllowed 'no current build key cannot authorize a trial'
+    }
+
+    Invoke-CcodTest 'clears only one exact failed package attempt and preserves unrelated history' {
+        $state = Join-Path $root 'clear-failed-exact'
+        Initialize-CcodStateFixture -StateRoot $state
+        $targetKey = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+        $otherKey = 'other.pkg|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|runtime-2'
+        $other = New-CcodVerifiedRecord
+        $other.packageFullName = 'other.pkg'
+        $other.packageVersion = '2.0.0.0'
+        $other.appAsarSha256 = ('b' * 64)
+        $other.runtimeId = 'runtime-2'
+        $other.confirmedAtUtc = '2030-02-03T04:05:07.0000000Z'
+        Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{
+            schemaVersion = 1
+            packages = [ordered]@{
+                $targetKey = (New-CcodVerifiedRecord)
+                $otherKey = $other
+            }
+        })
+
+        $receipt = Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z'
+        Assert-CcodFailedAttemptClearReceipt -Receipt $receipt -Outcome 'Cleared' -Message 'exact failed clear'
+        $after = Read-CcodVerifiedPackages -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+        Assert-CcodEqual 1 @($after.packages.PSObject.Properties).Count 'one unrelated record remains'
+        Assert-CcodEqual 'other.pkg' $after.packages.$otherKey.packageFullName 'unrelated package is preserved'
+        Assert-CcodEqual '2030-02-03T04:05:07.0000000Z' $after.packages.$otherKey.confirmedAtUtc 'unrelated timestamp is preserved'
+
+        Assert-CcodFailedAttemptClearReceipt -Receipt (Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z') -Outcome 'NotFound' -Message 'already absent clear'
+    }
+
+    Invoke-CcodTest 'distinguishes not found successful and stale failed attempts without mutation' {
+        $state = Join-Path $root 'clear-failed-outcomes'
+        Initialize-CcodStateFixture -StateRoot $state
+        $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+        $succeeded = New-CcodVerifiedRecord
+        $succeeded.dynamicOutcome = 'Succeeded'
+        $succeeded.probeState = 'Valid'
+        Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion = 1; packages = [ordered]@{ $key = $succeeded } })
+        $beforeSuccess = [IO.File]::ReadAllBytes((Join-Path $state 'verified-packages.json'))
+
+        Assert-CcodFailedAttemptClearReceipt -Receipt (Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z') -Outcome 'NotFailed' -Message 'successful record clear'
+        Assert-CcodEqual ([Convert]::ToBase64String($beforeSuccess)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $state 'verified-packages.json')))) 'successful history bytes are unchanged'
+
+        $failed = New-CcodVerifiedRecord
+        Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion = 1; packages = [ordered]@{ $key = $failed } })
+        $beforeConflict = [IO.File]::ReadAllBytes((Join-Path $state 'verified-packages.json'))
+        Assert-CcodFailedAttemptClearReceipt -Receipt (Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:07.0000000Z') -Outcome 'Conflict' -Message 'stale timestamp clear'
+        Assert-CcodEqual ([Convert]::ToBase64String($beforeConflict)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $state 'verified-packages.json')))) 'stale timestamp leaves bytes unchanged'
+
+        Assert-CcodFailedAttemptClearReceipt -Receipt (Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'PKG' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z') -Outcome 'NotFound' -Message 'package case mismatch'
+        Assert-CcodFailedAttemptClearReceipt -Receipt (Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'RUNTIME-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z') -Outcome 'NotFound' -Message 'runtime case mismatch'
+    }
+
+    Invoke-CcodTest 'rejects noncanonical clear inputs without PowerShell coercion' {
+        $state = Join-Path $root 'clear-failed-inputs'
+        Initialize-CcodStateFixture -StateRoot $state
+        $common = @{ StateRoot=$state; PackageFullName='pkg'; AppAsarSha256=('a' * 64); RuntimeId='runtime-1'; ExpectedConfirmedAtUtc='2030-02-03T04:05:06.0000000Z' }
+        $cases = @(
+            @{ Name='state type'; Mutate={ param($x) $x.StateRoot=123 } },
+            @{ Name='state dot path'; Mutate={ param($x) $x.StateRoot=(Join-Path $state '.') } },
+            @{ Name='package type'; Mutate={ param($x) $x.PackageFullName=123 } },
+            @{ Name='package empty'; Mutate={ param($x) $x.PackageFullName='' } },
+            @{ Name='package delimiter'; Mutate={ param($x) $x.PackageFullName='pkg|other' } },
+            @{ Name='hash type'; Mutate={ param($x) $x.AppAsarSha256=123 } },
+            @{ Name='hash uppercase'; Mutate={ param($x) $x.AppAsarSha256=('A' * 64) } },
+            @{ Name='runtime type'; Mutate={ param($x) $x.RuntimeId=123 } },
+            @{ Name='runtime unsafe'; Mutate={ param($x) $x.RuntimeId='../runtime' } },
+            @{ Name='timestamp type'; Mutate={ param($x) $x.ExpectedConfirmedAtUtc=[DateTime]::UtcNow } },
+            @{ Name='timestamp noncanonical'; Mutate={ param($x) $x.ExpectedConfirmedAtUtc='2030-02-03T04:05:06Z' } }
+        )
+        foreach ($case in $cases) {
+            $arguments = @{}
+            foreach ($name in $common.Keys) { $arguments[$name] = $common[$name] }
+            & $case.Mutate $arguments
+            Assert-CcodThrows { Clear-CcodFailedPackageAttempt @arguments } 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID'
+        }
+    }
+
+    Invoke-CcodTest 'refuses missing corrupt or identity-inconsistent verified state without changing evidence' {
+        foreach ($variant in @('missing', 'malformed', 'unknown-schema', 'identity')) {
+            $state = Join-Path $root ('clear-failed-damage-' + $variant)
+            Initialize-CcodStateFixture -StateRoot $state
+            $path = Join-Path $state 'verified-packages.json'
+            if ($variant -eq 'missing') {
+                [IO.File]::Delete($path)
+                $before = $null
+            } elseif ($variant -eq 'malformed') {
+                [IO.File]::WriteAllText($path, '{broken', [Text.UTF8Encoding]::new($false))
+                $before = [IO.File]::ReadAllBytes($path)
+            } elseif ($variant -eq 'unknown-schema') {
+                Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion=2; packages=[ordered]@{} })
+                $before = [IO.File]::ReadAllBytes($path)
+            } else {
+                $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+                $record = New-CcodVerifiedRecord
+                $record.packageFullName = 'other.pkg'
+                Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion=1; packages=[ordered]@{ $key=$record } })
+                $before = [IO.File]::ReadAllBytes($path)
+            }
+
+            $expectedError = if ($variant -eq 'missing') { 'CCOD_STATE_MISSING' } elseif ($variant -eq 'malformed') { 'CCOD_STATE_MALFORMED' } elseif ($variant -eq 'unknown-schema') { 'CCOD_SCHEMA_UNSUPPORTED' } else { 'CCOD_VERIFIED_PACKAGES_INVALID' }
+            Assert-CcodThrows { Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z' } $expectedError
+            Assert-CcodEqual 0 @(Get-ChildItem -LiteralPath $state -File -Filter 'verified-packages.json.corrupt.*').Count "$variant state is not quarantined or replaced"
+            if ($null -eq $before) {
+                Assert-CcodEqual $false ([IO.File]::Exists($path)) 'missing verified state remains missing'
+            } else {
+                Assert-CcodEqual ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) "$variant evidence bytes remain exact"
+            }
+        }
+    }
+
+    Invoke-CcodTest 'rechecks the complete failed identity and timestamp immediately before commit' {
+        foreach ($change in @('timestamp', 'outcome', 'removed', 'unrelated')) {
+            $state = Join-Path $root ('clear-failed-race-' + $change)
+            Initialize-CcodStateFixture -StateRoot $state
+            $path = Join-Path $state 'verified-packages.json'
+            $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+            Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion=1; packages=[ordered]@{ $key=(New-CcodVerifiedRecord) } })
+            $hook = {
+                param($VerifiedPath, $SuppressionKey)
+                $store = Get-Content -LiteralPath $VerifiedPath -Raw | ConvertFrom-Json
+                if ($change -eq 'timestamp') { $store.packages.$SuppressionKey.confirmedAtUtc = '2030-02-03T04:05:07.0000000Z' }
+                elseif ($change -eq 'outcome') { $store.packages.$SuppressionKey.dynamicOutcome = 'Succeeded'; $store.packages.$SuppressionKey.probeState = 'Valid' }
+                elseif ($change -eq 'removed') { $store.packages.PSObject.Properties.Remove($SuppressionKey) }
+                else {
+                    $store.packages | Add-Member -NotePropertyName ('other.pkg|' + ('b' * 64) + '|runtime-2') -NotePropertyValue ([pscustomobject]@{
+                        packageFullName='other.pkg'; packageVersion='2.0.0.0'; appAsarSha256=('b' * 64); runtimeId='runtime-2'
+                        staticClassification='CandidateCompatible'; dynamicOutcome='Failed'; probeState='Invalid'; confirmedAtUtc='2030-02-03T04:05:07.0000000Z'
+                    })
+                }
+                Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value $store
+            }.GetNewClosure()
+            $receipt = Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z' -Adapters @{ BeforeFailedPackageAttemptRecheck=$hook }
+            Assert-CcodFailedAttemptClearReceipt -Receipt $receipt -Outcome 'Conflict' -Message "$change precommit change"
+            $after = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            if ($change -eq 'removed') { Assert-CcodEqual 0 @($after.packages.PSObject.Properties).Count 'concurrent removal remains removed' }
+            elseif ($change -eq 'timestamp') { Assert-CcodEqual '2030-02-03T04:05:07.0000000Z' $after.packages.$key.confirmedAtUtc 'concurrent timestamp remains intact' }
+            elseif ($change -eq 'outcome') { Assert-CcodEqual 'Succeeded' $after.packages.$key.dynamicOutcome 'concurrent success remains intact' }
+            else { Assert-CcodEqual 2 @($after.packages.PSObject.Properties).Count 'concurrent unrelated history remains intact' }
+        }
+    }
+
+    Invoke-CcodTest 'leaves the complete verified file unchanged when atomic commit fails' {
+        $state = Join-Path $root 'clear-failed-atomic-error'
+        Initialize-CcodStateFixture -StateRoot $state
+        $path = Join-Path $state 'verified-packages.json'
+        $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+        Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion=1; packages=[ordered]@{ $key=(New-CcodVerifiedRecord) } })
+        $before = [IO.File]::ReadAllBytes($path)
+        $calls = [pscustomobject]@{ Count=0 }
+        $writer = {
+            param($VerifiedPath, $Value)
+            $calls.Count++
+            throw [Management.Automation.ErrorRecord]::new([IO.IOException]::new('injected atomic write failure'), 'CCOD_TEST_ATOMIC_FAILURE', [Management.Automation.ErrorCategory]::WriteError, $VerifiedPath)
+        }.GetNewClosure()
+        Assert-CcodThrows { Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z' -Adapters @{ WriteAtomicJson=$writer } } 'CCOD_TEST_ATOMIC_FAILURE'
+        Assert-CcodEqual 1 $calls.Count 'atomic writer is attempted exactly once'
+        Assert-CcodEqual ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) 'failed commit leaves exact prior target bytes'
+        Assert-CcodEqual 1 @((Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).packages.PSObject.Properties).Count 'failed commit leaves a complete parseable store'
     }
 
     Invoke-CcodTest 'updates each consent without changing the other consent or verified candidates' {
