@@ -232,7 +232,9 @@ function Assert-CcodJournalProcessSnapshot {
         $Snapshot.Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Snapshot.Path) -or
         $Snapshot.PackageFamilyName -isnot [string] -or [string]::IsNullOrWhiteSpace($Snapshot.PackageFamilyName) -or
         $Snapshot.CommandLine -isnot [string] -or [string]::IsNullOrWhiteSpace($Snapshot.CommandLine) -or
-        $null -ne $Snapshot.ParentPid -or $Snapshot.IsTopLevel -isnot [bool] -or -not $Snapshot.IsTopLevel) {
+        ($null -ne $Snapshot.ParentPid -and
+            -not (Test-CcodJournalInteger -Value $Snapshot.ParentPid -Minimum 0 -Maximum ([int]::MaxValue))) -or
+        $Snapshot.IsTopLevel -isnot [bool] -or -not $Snapshot.IsTopLevel) {
         Throw-CcodTransitionError $ErrorId "$Kind identity is not an exact top-level process snapshot" $Snapshot
     }
     if ($Kind -ceq 'Special') {
@@ -539,10 +541,6 @@ function Get-CcodInitialSpecialReplayDecision {
     if ($Observed.SpecialObservation -ceq 'NoCandidate') {
         return New-CcodReplayDecisionResult -Action 'RecoverOrdinary' -Reason 'SpecialCandidateAbsent' -AdoptedProcess $null -MustSuppress $true
     }
-    if ($facts.Count -eq 1 -and $facts[0].Validation -ceq 'Invalid') {
-        return New-CcodReplayDecisionResult -Action 'TerminateSpecialThenRecover' -Reason 'SpecialCandidateInvalid' `
-            -AdoptedProcess (Copy-CcodJournalProcessSnapshot -Snapshot $facts[0].Process) -MustSuppress $true
-    }
     switch ($Observed.SpecialObservation) {
         'Ambiguous' { return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'SpecialCandidatesAmbiguous' -AdoptedProcess $null -MustSuppress $true }
         'PortConflict' { return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'SpecialPortConflict' -AdoptedProcess $null -MustSuppress $true }
@@ -564,12 +562,18 @@ function Get-CcodJournalSpecialReplayDecision {
     if ($Observed.SpecialObservation -ceq 'Ambiguous') {
         return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'JournalSpecialAmbiguous' -AdoptedProcess $null -MustSuppress $true
     }
+    if ($Observed.SpecialObservation -ceq 'PortConflict') {
+        return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'JournalSpecialPortConflict' -AdoptedProcess $null -MustSuppress $true
+    }
+    if ($Observed.SpecialObservation -ceq 'Incomplete') {
+        return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'JournalSpecialIncomplete' -AdoptedProcess $null -MustSuppress $true
+    }
     if ($Observed.SpecialObservation -ceq 'NoCandidate') {
         return New-CcodReplayDecisionResult -Action 'RecoverOrdinary' -Reason 'JournalSpecialMissing' -AdoptedProcess $null -MustSuppress $true
     }
     if ($facts.Count -eq 1 -and (Test-CcodSpecialFactMatchesJournal -Fact $facts[0] -Transition $Transition)) {
         $process = Copy-CcodJournalProcessSnapshot -Snapshot $facts[0].Process
-        if ($facts[0].Validation -ceq 'Invalid') {
+        if ($Observed.SpecialObservation -ceq 'Confirmed' -and $facts[0].Validation -ceq 'Invalid') {
             return New-CcodReplayDecisionResult -Action 'TerminateSpecialThenRecover' -Reason 'JournalSpecialInvalid' -AdoptedProcess $process -MustSuppress $true
         }
         if ($Observed.SpecialObservation -ceq 'Confirmed' -and $facts[0].Validation -ceq 'Valid') {
@@ -581,9 +585,6 @@ function Get-CcodJournalSpecialReplayDecision {
     }
     if ($Observed.SpecialObservation -ceq 'Confirmed') {
         return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'JournalSpecialMismatch' -AdoptedProcess $null -MustSuppress $true
-    }
-    if ($Observed.SpecialObservation -ceq 'PortConflict') {
-        return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'JournalSpecialPortConflict' -AdoptedProcess $null -MustSuppress $true
     }
     return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'JournalSpecialIncomplete' -AdoptedProcess $null -MustSuppress $true
 }
@@ -616,11 +617,6 @@ function Get-CcodRecoveryLaunchReplayDecision {
         return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'RecoverySpecialMismatch' -AdoptedProcess $null -MustSuppress $true
     }
     if ($Observed.SpecialObservation -cne 'NoCandidate') {
-        if ($null -ne $Transition.specialPid -and $facts.Count -eq 1 -and $facts[0].Validation -ceq 'Invalid' -and
-            (Test-CcodSpecialFactMatchesJournal -Fact $facts[0] -Transition $Transition)) {
-            return New-CcodReplayDecisionResult -Action 'TerminateSpecialThenRecover' -Reason 'RecoverySpecialStillAlive' `
-                -AdoptedProcess (Copy-CcodJournalProcessSnapshot -Snapshot $facts[0].Process) -MustSuppress $true
-        }
         switch ($Observed.SpecialObservation) {
             'Ambiguous' { return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'RecoverySpecialAmbiguous' -AdoptedProcess $null -MustSuppress $true }
             'PortConflict' { return New-CcodReplayDecisionResult -Action 'SuppressAndWaitForUser' -Reason 'RecoverySpecialPortConflict' -AdoptedProcess $null -MustSuppress $true }

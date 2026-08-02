@@ -11,7 +11,8 @@ function New-CcodJournalSnapshot {
         [string]$CreationTimeUtc = '2030-02-03T04:00:00.0000000Z',
         [ValidateSet('Ordinary', 'Special', 'Unrelated')][string]$Mode = 'Ordinary',
         [AllowNull()][Nullable[int]]$RendererPort = $null,
-        [AllowNull()][Nullable[int]]$MainPort = $null
+        [AllowNull()][Nullable[int]]$MainPort = $null,
+        [AllowNull()][Nullable[int]]$ParentPid = $null
     )
 
     return [pscustomobject][ordered]@{
@@ -22,7 +23,7 @@ function New-CcodJournalSnapshot {
         Path = 'C:\Codex\ChatGPT.exe'
         PackageFamilyName = 'OpenAI.Codex_2p2nqsd0c76g0'
         CommandLine = '"C:\Codex\ChatGPT.exe"'
-        ParentPid = $null
+        ParentPid = $ParentPid
         IsTopLevel = $true
         Mode = $Mode
         RendererPort = $RendererPort
@@ -368,6 +369,69 @@ Invoke-CcodTest 'advances every legal stage edge with immutable exact writes and
     }
 }
 
+Invoke-CcodTest 'accepts and preserves Task6 top-level ParentPid snapshots across journal boundaries' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-parent-pid-' + [guid]::NewGuid().ToString('N'))
+    $special = New-CcodJournalSnapshot -ProcessId 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' `
+        -Mode Unrelated -RendererPort 41001 -MainPort 41002 -ParentPid 77
+    $recovery = New-CcodJournalSnapshot -ProcessId 301 -CreationTimeUtc '2030-02-03T04:05:09.0000000Z' `
+        -Mode Ordinary -ParentPid 0
+    $specialDecision = $null
+    $recoveryDecision = $null
+    $specialStage = $null
+    $recoveryStage = $null
+    $failures = [Collections.Generic.List[string]]::new()
+    try {
+        try {
+            $specialDecision = Get-CcodReplayDecision -Transition (New-CcodTransitionForStage -Stage OrdinaryStopped -WithPorts) `
+                -Observed (New-CcodObserved -SpecialObservation Confirmed -SpecialCandidates @(
+                    (New-CcodSpecialFact -Process $special -Validation Valid)
+                ))
+        } catch { $failures.Add("special replay: $($_.FullyQualifiedErrorId)") }
+
+        $recovered = New-CcodTransitionForStage -Stage RecoveryLaunchRequested
+        $recovered.stage = 'Recovered'
+        $recovered.recoveryPid = 301
+        $recovered.recoveryCreationTimeUtc = '2030-02-03T04:05:09.0000000Z'
+        $recovered.updatedAtUtc = '2030-02-03T04:05:09.0000000Z'
+        try {
+            $recoveryDecision = Get-CcodReplayDecision -Transition $recovered `
+                -Observed (New-CcodObserved -SpecialObservation NoCandidate -OrdinaryCandidates @($recovery))
+        } catch { $failures.Add("recovery replay: $($_.FullyQualifiedErrorId)") }
+
+        $specialPath = Join-Path $root 'special.json'
+        Write-CcodJournalJson -Path $specialPath -Value ([ordered]@{
+            schemaVersion=1
+            activeTransaction=(New-CcodTransitionForStage -Stage SpecialLaunchRequested -WithPorts)
+        })
+        try {
+            $specialStage = Set-CcodTransitionStage -Path $specialPath `
+                -TransactionId '5f496d99-c839-4458-a6a2-d37ea1afdbda' -ExpectedStage SpecialLaunchRequested `
+                -NewStage SpecialStarted -SpecialIdentity $special -Adapters $fixedAdapters
+        } catch { $failures.Add("special stage: $($_.FullyQualifiedErrorId)") }
+
+        $recoveryPath = Join-Path $root 'recovery.json'
+        Write-CcodJournalJson -Path $recoveryPath -Value ([ordered]@{
+            schemaVersion=1
+            activeTransaction=(New-CcodTransitionForStage -Stage RecoveryLaunchRequested)
+        })
+        try {
+            $recoveryStage = Set-CcodTransitionStage -Path $recoveryPath `
+                -TransactionId '5f496d99-c839-4458-a6a2-d37ea1afdbda' -ExpectedStage RecoveryLaunchRequested `
+                -NewStage Recovered -RecoveryIdentity $recovery -Adapters $fixedAdapters
+        } catch { $failures.Add("recovery stage: $($_.FullyQualifiedErrorId)") }
+
+        if ($failures.Count -ne 0) { throw ('Task6 ParentPid snapshot was rejected at ' + ($failures -join '; ')) }
+        Assert-CcodEqual 77 $specialDecision.AdoptedProcess.ParentPid 'special replay preserves the real Task6 parent PID'
+        Assert-CcodTrue ($specialDecision.AdoptedProcess.ParentPid -is [int]) 'special replay preserves the Int32 parent type'
+        Assert-CcodEqual 0 $recoveryDecision.AdoptedProcess.ParentPid 'recovery replay preserves the legal PID zero boundary'
+        Assert-CcodTrue ($recoveryDecision.AdoptedProcess.ParentPid -is [int]) 'recovery replay preserves the Int32 parent type'
+        Assert-CcodEqual 201 $specialStage.specialPid 'special SetStage accepts the exact Task6 top-level snapshot'
+        Assert-CcodEqual 301 $recoveryStage.recoveryPid 'recovery SetStage accepts the exact Task6 top-level snapshot'
+    } finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
 Invoke-CcodTest 'rejects conflicts illegal edges and invalid injections before any journal write' {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-invalid-edges-' + [guid]::NewGuid().ToString('N'))
     $special = New-CcodJournalSnapshot -ProcessId 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
@@ -380,6 +444,12 @@ Invoke-CcodTest 'rejects conflicts illegal edges and invalid injections before a
     $extraSpecial | Add-Member -NotePropertyName Proof -NotePropertyValue 'not accepted here'
     $badRecovery = Copy-CcodJournalValue $recovery
     $badRecovery.Mode = 'Unrelated'
+    $negativeParent = Copy-CcodJournalValue $special
+    $negativeParent.ParentPid = -1
+    $overflowParent = Copy-CcodJournalValue $special
+    $overflowParent.ParentPid = [long]2147483648
+    $stringParent = Copy-CcodJournalValue $special
+    $stringParent.ParentPid = '77'
     try {
         $cases = @(
             @{ Name='wrong-id'; Tx=(New-CcodTransitionForStage -Stage IntentWritten); Error='CCOD_TRANSITION_CONFLICT'; Params=@{ TransactionId='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'; ExpectedStage='IntentWritten'; NewStage='StopRequested' } },
@@ -397,6 +467,9 @@ Invoke-CcodTest 'rejects conflicts illegal edges and invalid injections before a
             @{ Name='special-mode'; Tx=(New-CcodTransitionForStage -Stage SpecialLaunchRequested -WithPorts); Error='CCOD_TRANSITION_INVALID'; Params=@{ ExpectedStage='SpecialLaunchRequested'; NewStage='SpecialStarted'; SpecialIdentity=$badSpecialMode } },
             @{ Name='special-port-mismatch'; Tx=(New-CcodTransitionForStage -Stage SpecialLaunchRequested -WithPorts); Error='CCOD_TRANSITION_INVALID'; Params=@{ ExpectedStage='SpecialLaunchRequested'; NewStage='SpecialStarted'; SpecialIdentity=$badSpecialPorts } },
             @{ Name='special-extra-field'; Tx=(New-CcodTransitionForStage -Stage SpecialLaunchRequested -WithPorts); Error='CCOD_TRANSITION_INVALID'; Params=@{ ExpectedStage='SpecialLaunchRequested'; NewStage='SpecialStarted'; SpecialIdentity=$extraSpecial } },
+            @{ Name='special-negative-parent'; Tx=(New-CcodTransitionForStage -Stage SpecialLaunchRequested -WithPorts); Error='CCOD_TRANSITION_INVALID'; Params=@{ ExpectedStage='SpecialLaunchRequested'; NewStage='SpecialStarted'; SpecialIdentity=$negativeParent } },
+            @{ Name='special-overflow-parent'; Tx=(New-CcodTransitionForStage -Stage SpecialLaunchRequested -WithPorts); Error='CCOD_TRANSITION_INVALID'; Params=@{ ExpectedStage='SpecialLaunchRequested'; NewStage='SpecialStarted'; SpecialIdentity=$overflowParent } },
+            @{ Name='special-string-parent'; Tx=(New-CcodTransitionForStage -Stage SpecialLaunchRequested -WithPorts); Error='CCOD_TRANSITION_INVALID'; Params=@{ ExpectedStage='SpecialLaunchRequested'; NewStage='SpecialStarted'; SpecialIdentity=$stringParent } },
             @{ Name='missing-recovery-identity'; Tx=(New-CcodTransitionForStage -Stage RecoveryLaunchRequested); Error='CCOD_TRANSITION_STAGE_INVALID'; Params=@{ ExpectedStage='RecoveryLaunchRequested'; NewStage='Recovered' } },
             @{ Name='recovery-mode'; Tx=(New-CcodTransitionForStage -Stage RecoveryLaunchRequested); Error='CCOD_TRANSITION_INVALID'; Params=@{ ExpectedStage='RecoveryLaunchRequested'; NewStage='Recovered'; RecoveryIdentity=$badRecovery } }
         )
@@ -525,10 +598,11 @@ Invoke-CcodTest 'distinguishes safe absence from incomplete ambiguous and confli
         @{ Name='no-candidate'; Special='NoCandidate'; Facts=@(); Action='RecoverOrdinary'; Reason='SpecialCandidateAbsent'; Suppress=$true; Adopt=$null },
         @{ Name='incomplete-empty'; Special='Incomplete'; Facts=@(); Action='SuppressAndWaitForUser'; Reason='SpecialEnumerationIncomplete'; Suppress=$true; Adopt=$null },
         @{ Name='incomplete-valid'; Special='Incomplete'; Facts=@($valid); Action='SuppressAndWaitForUser'; Reason='SpecialEnumerationIncomplete'; Suppress=$true; Adopt=$null },
-        @{ Name='incomplete-invalid'; Special='Incomplete'; Facts=@($invalid); Action='TerminateSpecialThenRecover'; Reason='SpecialCandidateInvalid'; Suppress=$true; Adopt=201 },
+        @{ Name='incomplete-invalid'; Special='Incomplete'; Facts=@($invalid); Action='SuppressAndWaitForUser'; Reason='SpecialEnumerationIncomplete'; Suppress=$true; Adopt=$null },
         @{ Name='ambiguous'; Special='Ambiguous'; Facts=@($valid,$second); Action='SuppressAndWaitForUser'; Reason='SpecialCandidatesAmbiguous'; Suppress=$true; Adopt=$null },
+        @{ Name='ambiguous-invalid'; Special='Ambiguous'; Facts=@($invalid,$second); Action='SuppressAndWaitForUser'; Reason='SpecialCandidatesAmbiguous'; Suppress=$true; Adopt=$null },
         @{ Name='port-conflict-empty'; Special='PortConflict'; Facts=@(); Action='SuppressAndWaitForUser'; Reason='SpecialPortConflict'; Suppress=$true; Adopt=$null },
-        @{ Name='port-conflict-invalid'; Special='PortConflict'; Facts=@($invalid); Action='TerminateSpecialThenRecover'; Reason='SpecialCandidateInvalid'; Suppress=$true; Adopt=201 }
+        @{ Name='port-conflict-invalid'; Special='PortConflict'; Facts=@($invalid); Action='SuppressAndWaitForUser'; Reason='SpecialPortConflict'; Suppress=$true; Adopt=$null }
     )
     foreach ($stage in @('OrdinaryStopped','SpecialLaunchRequested')) {
         $transition = New-CcodTransitionForStage -Stage $stage -WithPorts
@@ -563,8 +637,10 @@ Invoke-CcodTest 'requires the exact journal special identity at SpecialStarted a
         @{ Name='mismatch'; Special='Confirmed'; Facts=@($mismatchValid); Action='SuppressAndWaitForUser'; Reason='JournalSpecialMismatch'; Suppress=$true; Adopt=$null },
         @{ Name='missing'; Special='NoCandidate'; Facts=@(); Action='RecoverOrdinary'; Reason='JournalSpecialMissing'; Suppress=$true; Adopt=$null },
         @{ Name='incomplete'; Special='Incomplete'; Facts=@(); Action='SuppressAndWaitForUser'; Reason='JournalSpecialIncomplete'; Suppress=$true; Adopt=$null },
+        @{ Name='incomplete-invalid'; Special='Incomplete'; Facts=@($exactInvalid); Action='SuppressAndWaitForUser'; Reason='JournalSpecialIncomplete'; Suppress=$true; Adopt=$null },
         @{ Name='ambiguous'; Special='Ambiguous'; Facts=@($exactValid,$mismatchValid); Action='SuppressAndWaitForUser'; Reason='JournalSpecialAmbiguous'; Suppress=$true; Adopt=$null },
-        @{ Name='port-conflict-invalid'; Special='PortConflict'; Facts=@($exactInvalid); Action='TerminateSpecialThenRecover'; Reason='JournalSpecialInvalid'; Suppress=$true; Adopt=201 }
+        @{ Name='ambiguous-invalid'; Special='Ambiguous'; Facts=@($exactInvalid,$mismatchValid); Action='SuppressAndWaitForUser'; Reason='JournalSpecialAmbiguous'; Suppress=$true; Adopt=$null },
+        @{ Name='port-conflict-invalid'; Special='PortConflict'; Facts=@($exactInvalid); Action='SuppressAndWaitForUser'; Reason='JournalSpecialPortConflict'; Suppress=$true; Adopt=$null }
     )
     foreach ($case in $startedCases) {
         $decision = Get-CcodReplayDecision -Transition $specialStarted -Observed (New-CcodObserved -SpecialObservation $case.Special -SpecialCandidates $case.Facts)
@@ -624,6 +700,22 @@ Invoke-CcodTest 'observes recovery once adopts ordinary roots and never erases i
     Assert-CcodEqual 'TerminateSpecialThenRecover' $exactDecision.Action 'exact journal special is terminated before recovery'
     Assert-CcodEqual 'RecoverySpecialStillAlive' $exactDecision.Reason 'exact live special has a stable recovery reason'
     Assert-CcodEqual 201 $exactDecision.AdoptedProcess.Pid 'termination action carries only the exact journal special snapshot'
+
+    $exactInvalid = New-CcodSpecialFact -Process $exact.Process -Evidence PersistedIdentity -Validation Invalid
+    $mismatch = New-CcodSpecialFact -Process (New-CcodJournalSnapshot -ProcessId 202 -CreationTimeUtc '2030-02-03T04:05:08.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002) -Evidence PersistedIdentity -Validation Valid
+    $specialOutcomeCases = @(
+        @{ Name='confirmed-invalid'; Special='Confirmed'; Facts=@($exactInvalid); Action='TerminateSpecialThenRecover'; Reason='RecoverySpecialStillAlive'; Adopt=201 },
+        @{ Name='incomplete-invalid'; Special='Incomplete'; Facts=@($exactInvalid); Action='SuppressAndWaitForUser'; Reason='RecoverySpecialEvidenceIncomplete'; Adopt=$null },
+        @{ Name='port-conflict-invalid'; Special='PortConflict'; Facts=@($exactInvalid); Action='SuppressAndWaitForUser'; Reason='RecoverySpecialPortConflict'; Adopt=$null },
+        @{ Name='ambiguous-invalid'; Special='Ambiguous'; Facts=@($exactInvalid,$mismatch); Action='SuppressAndWaitForUser'; Reason='RecoverySpecialAmbiguous'; Adopt=$null }
+    )
+    foreach ($case in $specialOutcomeCases) {
+        $decision = Get-CcodReplayDecision -Transition $withSpecial -Observed (New-CcodObserved -RecoveryObservation NotStarted -SpecialObservation $case.Special -SpecialCandidates $case.Facts)
+        Assert-CcodEqual $case.Action $decision.Action "recovery/$($case.Name) action is dominated by the Task6 outcome"
+        Assert-CcodEqual $case.Reason $decision.Reason "recovery/$($case.Name) stable reason"
+        if ($null -eq $case.Adopt) { Assert-CcodEqual $null $decision.AdoptedProcess "recovery/$($case.Name) never selects incomplete evidence" }
+        else { Assert-CcodEqual $case.Adopt $decision.AdoptedProcess.Pid "recovery/$($case.Name) preserves confirmed exact-journal termination" }
+    }
 
     Assert-CcodThrows {
         Get-CcodReplayDecision -Transition $transition -Observed (New-CcodObserved -RecoveryObservation OrdinaryAppearedWithin5s)
