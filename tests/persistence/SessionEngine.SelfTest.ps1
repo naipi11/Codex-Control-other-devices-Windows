@@ -30,6 +30,8 @@ function New-CcodEngineRequest {
     param(
         [ValidateSet('Inspect','Apply','RepairRenderer','Recover')][string]$Action = 'Inspect',
         [string]$RuntimeId = 'runtime-1',
+        [int]$SupervisorPid = 11,
+        [string]$SupervisorCreationTimeUtc = '2030-02-03T03:00:00.0000000Z',
         $Source = $null,
         [bool]$ExistingOnly = $true,
         [AllowNull()][Nullable[int]]$RendererPort = $null,
@@ -40,7 +42,7 @@ function New-CcodEngineRequest {
     )
     [pscustomobject][ordered]@{
         schemaVersion=1; action=$Action; transactionId=$TransactionId; runtimeId=$RuntimeId
-        supervisorIdentity=[pscustomobject][ordered]@{ pid=11; creationTimeUtc='2030-02-03T03:00:00.0000000Z'; sessionId='1' }
+        supervisorIdentity=[pscustomobject][ordered]@{ pid=$SupervisorPid; creationTimeUtc=$SupervisorCreationTimeUtc; sessionId='1' }
         source=$Source; existingOnly=$ExistingOnly; rendererPort=$RendererPort; mainPort=$MainPort
         timeoutMilliseconds=$TimeoutMilliseconds; restartOrdinary=$RestartOrdinary
     }
@@ -94,8 +96,12 @@ function New-CcodEngineProbe {
 }
 
 function New-CcodEngineActiveStatus {
-    param([string]$RuntimeId='runtime-1')
-    [pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=11;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId=$RuntimeId;sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
+    param(
+        [string]$RuntimeId='runtime-1',
+        [int]$SupervisorPid=11,
+        [string]$SupervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z'
+    )
+    [pscustomobject]@{schemaVersion=1;session=[pscustomobject]@{supervisorPid=$SupervisorPid;supervisorCreationTimeUtc=$SupervisorCreationTimeUtc;sessionId='1';runtimeId=$RuntimeId;sessionState='Active';codex=[pscustomobject]@{pid=201;creationTimeUtc='2030-02-03T04:05:07.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=41002;rendererPort=41001;mainProbe='Closed';rendererProbe='BridgeValid'}}}
 }
 
 function New-CcodEngineVerifiedPackages {
@@ -497,6 +503,14 @@ try {
             Assert-CcodEqual 0 $counts.Forbidden "$statusRuntime Inspect performs no aggregate read or mutation"
         }
 
+        $restartStatus=New-CcodEngineActiveStatus -RuntimeId 'runtime-old' -SupervisorPid 11 -SupervisorCreationTimeUtc '2030-02-03T03:00:00.0000000Z'
+        $restartState=New-CcodInspectionState -Status $restartStatus -VerifiedPackages (New-CcodEngineVerifiedPackages -RuntimeId 'runtime-old')
+        $restartRequest=New-CcodEngineRequest -SupervisorPid 22 -SupervisorCreationTimeUtc '2030-02-03T05:00:00.0000000Z' -TransactionId '79258e6a-b928-4322-b865-e79d4cbcbf33'
+        $afterRestart=Invoke-CcodInspectSession -Request $restartRequest -Paths $paths -Adapters (New-CcodInspectionAdapters -InspectionState $restartState -PreProcesses @($special))
+        Assert-CcodEqual 'Inspected' $afterRestart.outcome 'new supervisor can inspect historical special status'
+        Assert-CcodEqual 'SpecialValidated' $afterRestart.safeState 'historical supervisor PID and creation do not replace current SID and Session authority'
+        Assert-CcodEqual $null $afterRestart.probes 'post-restart Inspect keeps probes null'
+
         foreach($negative in @(
             (New-CcodProbeBridgeInvocation -TargetUrl $null -Proof $false -TargetGate $null),
             (New-CcodProbeBridgeInvocation -Proof $false -TargetGate $null),
@@ -568,6 +582,15 @@ try {
         $oneOrdinary=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -PostProcesses @($ordinary))
         Assert-CcodEqual 'OrdinaryRunning' $oneOrdinary.safeState 'natural post-probe replacement with one ordinary reduces safely'
         Assert-CcodEqual 100 $oneOrdinary.source.pid 'natural ordinary identity is returned'
+        foreach($mainCode in @('OPEN','TIMEOUT')){
+            $negativeMain=New-CcodProbeBridgeInvocation -MainCode $mainCode
+            $exited=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -PostProcesses @() -BridgeInvocation $negativeMain)
+            Assert-CcodEqual 'NoCodex' $exited.safeState "$mainCode is stale after the exact special naturally exits"
+            Assert-CcodEqual 'Inspected' $exited.outcome "$mainCode does not override authoritative no-root re-enumeration"
+            $ordinaryAfter=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId ([guid]::NewGuid().ToString('D'))) -Paths $paths -Adapters (New-CcodInspectionAdapters -PreProcesses @($special) -PostProcesses @($ordinary) -BridgeInvocation $negativeMain)
+            Assert-CcodEqual 'OrdinaryRunning' $ordinaryAfter.safeState "$mainCode is stale after one exact ordinary replacement"
+            Assert-CcodEqual 100 $ordinaryAfter.source.pid "$mainCode ordinary reduction returns the exact source"
+        }
 
         $pidReuse=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:08.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
         foreach($postCase in @(
@@ -1070,7 +1093,8 @@ try {
         $adapters.WaitPortClosed={param($Port,$TimeoutMilliseconds)$repairOrder.Add("Wait:${Port}:${TimeoutMilliseconds}");$true}.GetNewClosure()
         $adapters.InvokeNode={param($NodePath,$Arguments)$repairOrder.Add('InvokeNode');$captured.Arguments=@($Arguments);[pscustomobject][ordered]@{ExitCode=0;Stdout=($rendererProof|ConvertTo-Json -Depth 16 -Compress);Stderr=''}}.GetNewClosure()
         $adapters.WriteStatus={param($StateRoot,$Status,$LiveProbe)$captured.StatusRuntime=$Status.session.runtimeId;$captured.LiveRuntime=$LiveProbe.runtimeId}.GetNewClosure()
-        $result=Invoke-CcodRepairRenderer -Request (New-CcodEngineRequest -Action RepairRenderer) -Paths $paths -Adapters $adapters
+        $restartRequest=New-CcodEngineRequest -Action RepairRenderer -SupervisorPid 22 -SupervisorCreationTimeUtc '2030-02-03T05:00:00.0000000Z'
+        $result=Invoke-CcodRepairRenderer -Request $restartRequest -Paths $paths -Adapters $adapters
         Assert-CcodEqual 'NoAction' $result.outcome 'successful renderer repair needs no process normalization'
         Assert-CcodEqual 'SpecialValidated' $result.safeState 'renderer-only proof restores validated special state'
         Assert-CcodEqual "$($paths.OrchestratorPath),--mode,renderer,--renderer-port,41001,--timeout-ms,30000" ($captured.Arguments -join ',') 'renderer repair passes renderer mode, its recorded port, and the request timeout'
@@ -1078,6 +1102,7 @@ try {
         Assert-CcodEqual 'Wait:41002:30000,InvokeNode' ($repairOrder -join ',') 'explicit main refusal is proven before renderer-only child invocation'
         Assert-CcodEqual 'runtime-old' $captured.StatusRuntime 'post-upgrade repair preserves the old status runtime'
         Assert-CcodEqual 'runtime-old' $captured.LiveRuntime 'post-upgrade repair proves status with the old provenance runtime'
+        Assert-CcodEqual 22 $restartRequest.supervisorIdentity.pid 'repair regression uses a genuinely restarted supervisor identity'
 
         $missing=Invoke-CcodRepairRenderer -Request (New-CcodEngineRequest -Action RepairRenderer -TransactionId '36cafc98-f225-43bd-ae33-b9a608ac68da') -Paths $paths -Adapters (New-CcodEngineAdapters -Processes @())
         Assert-CcodEqual 'Error' $missing.outcome 'renderer repair fails closed without exact persisted special identity'

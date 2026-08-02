@@ -512,11 +512,33 @@ async function orchestratorProbeModeTest(root) {
     assert.throws(() => parseArguments(argv));
   }
 
+  const rendererSource = fs.readFileSync(path.join(root, "..", "src", "runtime", "renderer-payload.js"), "utf8");
+  function executeRealRendererProbe(statsig) {
+    const sandbox = {
+      clearInterval() {},
+      console,
+      setInterval() { return { unref() {} }; },
+    };
+    if (statsig !== undefined) sandbox.__STATSIG__ = statsig;
+    const context = vm.createContext(sandbox);
+    context.globalThis = context;
+    vm.runInContext(rendererSource, context, { filename: "renderer-payload.js" });
+    return context.__CODEX_STATSIG_GATE_BRIDGE__.probe();
+  }
+  const actualPositiveProbe = executeRealRendererProbe({ clients: [{ checkGate() { return true; } }] });
+  const actualNegativeProbe = executeRealRendererProbe(undefined);
+  assert.deepEqual(
+    Object.keys(actualPositiveProbe).sort(),
+    ["allFalse", "checkMethods", "installedClients", "installedMethods", "passedMethods", "proof", "scans", "structuredMethods", "targetGate"].sort(),
+  );
+  assert.equal(actualPositiveProbe.proof, true);
+  assert.equal(actualNegativeProbe.proof, false);
+
   const exactTarget = { id: "renderer-1", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://ignored-host/devtools/page/1" };
   function fakeProbeDependencies({
     main = { code: "ECONNREFUSED", state: "error" },
     targets = [exactTarget],
-    evaluation = { proof: true, targetGate: "782640499" },
+    evaluation = actualPositiveProbe,
     failAt = null,
     calls = [],
   } = {}) {
@@ -593,8 +615,7 @@ async function orchestratorProbeModeTest(root) {
 
   for (const [evaluation, expectedGate] of [
     [null, null],
-    [{ proof: false, targetGate: null }, null],
-    [{ proof: false, targetGate: "782640499" }, "782640499"],
+    [actualNegativeProbe, "782640499"],
   ]) {
     const fixture = fakeProbeDependencies({ evaluation });
     const result = await runProbeBridge(probeOptions, fixture.dependencies);
@@ -605,17 +626,33 @@ async function orchestratorProbeModeTest(root) {
     assert.equal(fixture.calls.at(-1).method, "close");
   }
 
+  const mutateRealProbe = (mutator) => {
+    const value = JSON.parse(JSON.stringify(actualPositiveProbe));
+    mutator(value);
+    return value;
+  };
   const malformedEvaluations = [
     false,
     0,
     "invalid",
     [],
     { proof: false },
+    { proof: false, targetGate: null },
+    { proof: false, targetGate: "782640499" },
+    { proof: true, targetGate: "782640499" },
     { proof: "false", targetGate: null },
-    { proof: true, targetGate: null },
-    { proof: true, targetGate: "different" },
-    { proof: false, targetGate: "different" },
-    { proof: false, targetGate: null, extra: true },
+    mutateRealProbe((value) => { delete value.scans; }),
+    mutateRealProbe((value) => { value.extra = true; }),
+    mutateRealProbe((value) => { value.targetGate = "different"; }),
+    mutateRealProbe((value) => { value.proof = false; }),
+    mutateRealProbe((value) => { value.allFalse = false; }),
+    mutateRealProbe((value) => { value.checkMethods = 0; }),
+    mutateRealProbe((value) => { value.passedMethods = 0; }),
+    mutateRealProbe((value) => { value.installedMethods += 1; }),
+    mutateRealProbe((value) => { value.installedClients = value.installedMethods + 1; }),
+    mutateRealProbe((value) => { value.scans = -1; }),
+    mutateRealProbe((value) => { value.structuredMethods = 0.5; }),
+    mutateRealProbe((value) => { value.installedMethods = Number.MAX_SAFE_INTEGER + 1; }),
   ];
   for (const evaluation of malformedEvaluations) {
     const fixture = fakeProbeDependencies({ evaluation });

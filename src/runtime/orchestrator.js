@@ -352,20 +352,42 @@ function probeRendererResult(value) {
   if (typeof value !== "object" || Array.isArray(value)) {
     throw cliError("PROBE_RESULT_INVALID", "Renderer probe returned malformed evidence");
   }
+  const expectedKeys = [
+    "allFalse",
+    "checkMethods",
+    "installedClients",
+    "installedMethods",
+    "passedMethods",
+    "proof",
+    "scans",
+    "structuredMethods",
+    "targetGate",
+  ];
   const keys = Object.keys(value);
-  if (keys.length !== 2 || !keys.includes("proof") || !keys.includes("targetGate") || typeof value.proof !== "boolean") {
+  const countKeys = [
+    "checkMethods",
+    "installedClients",
+    "installedMethods",
+    "passedMethods",
+    "scans",
+    "structuredMethods",
+  ];
+  if (
+    keys.length !== expectedKeys.length
+    || expectedKeys.some((key) => !keys.includes(key))
+    || typeof value.allFalse !== "boolean"
+    || typeof value.proof !== "boolean"
+    || value.targetGate !== "782640499"
+    || countKeys.some((key) => !Number.isSafeInteger(value[key]) || value[key] < 0)
+    || value.installedMethods !== value.checkMethods + value.structuredMethods
+    || value.passedMethods > value.checkMethods
+    || value.installedClients > value.installedMethods
+    || value.allFalse !== (value.checkMethods > 0 && value.passedMethods === value.checkMethods)
+    || value.proof !== value.allFalse
+  ) {
     throw cliError("PROBE_RESULT_INVALID", "Renderer probe returned malformed evidence");
   }
-  if (value.proof === true) {
-    if (value.targetGate !== "782640499") {
-      throw cliError("PROBE_RESULT_INVALID", "Renderer probe returned contradictory positive evidence");
-    }
-    return { proof: true, targetGate: "782640499" };
-  }
-  if (value.targetGate !== null && value.targetGate !== "782640499") {
-    throw cliError("PROBE_RESULT_INVALID", "Renderer probe returned an unauthorized gate value");
-  }
-  return { proof: false, targetGate: value.targetGate };
+  return { proof: value.proof, targetGate: value.targetGate };
 }
 
 async function runProbeBridge(options, dependencies = {}) {

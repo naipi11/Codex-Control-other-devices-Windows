@@ -661,8 +661,7 @@ function Assert-CcodInspectionSpecialSnapshot {
         $Snapshot.UserSid -cne $Identity.UserSid -or -not $Snapshot.Path.Equals($Package.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or
         $Snapshot.PackageFamilyName -cne $Package.FamilyName -or $Snapshot.RendererPort -ne $Codex.rendererPort -or
         $Snapshot.MainPort -ne $Codex.mainPort -or -not (Test-CcodExactSpecialCommandLine $Snapshot $Codex) -or
-        $Session.sessionId -cne $Request.supervisorIdentity.sessionId -or $Session.supervisorPid -ne $Request.supervisorIdentity.pid -or
-        $Session.supervisorCreationTimeUtc -cne $Request.supervisorIdentity.creationTimeUtc){
+        $Session.sessionId -cne $Request.supervisorIdentity.sessionId){
         Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Persisted special identity changed' $Codex
     }
 }
@@ -803,7 +802,6 @@ function Invoke-CcodInspectSession {
         }
         if(-not $nodeAuthorized){Throw-CcodSessionError 'CCOD_NODE_CANDIDATE_INVALID' 'Resolved Node is outside configured candidates' $node}
         $result.stage='InspectProbe';$bridge=Invoke-CcodSessionBridge -Mode Probe -NodePath $node.Path -Paths $Paths -RendererPort $codex.rendererPort -MainPort $codex.mainPort -TimeoutMilliseconds $Request.timeoutMilliseconds -Adapter $adapter
-        if(-not $bridge.main.inspectorPortClosed.confirmed){Throw-CcodSessionError 'CCOD_MAIN_INSPECTOR_OPEN' 'Main Inspector is not explicitly closed' $bridge.main.inspectorPortClosed}
         $postRoots=@(Get-CcodInspectionRoots $state.Status $package $Request $identity $adapter)
         if($postRoots.Count -eq 0){$result.ok=$true;$result.outcome='Inspected';$result.safeState='NoCodex';$result.stage='Inspected';return $result}
         if($postRoots.Count -eq 1 -and $postRoots[0].Mode -ceq 'Ordinary' -and $null -eq $postRoots[0].RendererPort -and $null -eq $postRoots[0].MainPort){
@@ -811,6 +809,7 @@ function Invoke-CcodInspectSession {
         }
         if($postRoots.Count -ne 1 -or -not (& $adapter.ProcessMatch $special $postRoots[0])){Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Eligible root set changed during inspection' $postRoots}
         Assert-CcodInspectionSpecialSnapshot $postRoots[0] $codex $session $package $Request $identity
+        if(-not $bridge.main.inspectorPortClosed.confirmed){Throw-CcodSessionError 'CCOD_MAIN_INSPECTOR_OPEN' 'Main Inspector is not explicitly closed' $bridge.main.inspectorPortClosed}
         $result.special=ConvertTo-CcodSessionSpecial $postRoots[0]
         $result.safeState=if($bridge.renderer.probe.proof){'SpecialValidated'}else{'RendererRepairRequired'}
         $result.ok=$true;$result.outcome='Inspected';$result.stage='Inspected';return $result
@@ -920,8 +919,7 @@ function Invoke-CcodRepairRenderer {
             [string]$current.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or [string]$identity.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or
             $current.UserSid -cne $identity.UserSid -or -not $current.Path.Equals($package.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or
             $current.PackageFamilyName -cne $package.FamilyName -or $current.RendererPort -ne $codex.rendererPort -or $current.MainPort -ne $codex.mainPort -or
-            -not (Test-CcodExactSpecialCommandLine $current $codex) -or $session.sessionId -cne $Request.supervisorIdentity.sessionId -or
-            $session.supervisorPid -ne $Request.supervisorIdentity.pid -or $session.supervisorCreationTimeUtc -cne $Request.supervisorIdentity.creationTimeUtc){
+            -not (Test-CcodExactSpecialCommandLine $current $codex) -or $session.sessionId -cne $Request.supervisorIdentity.sessionId){
             Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Persisted special identity changed before renderer repair' $codex
         }
         $probe=& $adapter.StaticProbe $state.Settings.nodeCandidates $Paths.CheckerPath;$result.package=ConvertTo-CcodSessionPackage $probe
