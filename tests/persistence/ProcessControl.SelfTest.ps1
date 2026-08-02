@@ -139,6 +139,30 @@ function New-CcodSpecialStatus {
     }
 }
 
+function Assert-CcodStopResultContract {
+    param($Result, [string]$Outcome, [bool]$Stopped, $Snapshot, [string]$Message)
+
+    Assert-CcodEqual 'Outcome,StoppedByController,Snapshot' (($Result.PSObject.Properties.Name) -join ',') "$Message exact properties"
+    Assert-CcodEqual $Outcome $Result.Outcome "$Message outcome"
+    Assert-CcodEqual $Stopped $Result.StoppedByController "$Message controller receipt"
+    Assert-CcodEqual $Snapshot $Result.Snapshot "$Message snapshot"
+}
+
+function Assert-CcodTransactionResultContract {
+    param($Result, [string]$Outcome, [string]$Message)
+
+    Assert-CcodEqual 'Outcome,Snapshot,Candidates,ConflictOwners' (($Result.PSObject.Properties.Name) -join ',') "$Message exact properties"
+    Assert-CcodEqual $Outcome $Result.Outcome "$Message outcome"
+    Assert-CcodTrue (@('Confirmed','NoCandidate','Incomplete','Ambiguous','PortConflict') -ccontains $Result.Outcome) "$Message case-exact outcome"
+    Assert-CcodTrue ($null -ne $Result.Candidates) "$Message candidates collection exists"
+    Assert-CcodTrue ($null -ne $Result.ConflictOwners) "$Message conflict collection exists"
+    foreach ($snapshot in @(@($Result.Snapshot) + @($Result.Candidates) + @($Result.ConflictOwners))) {
+        if ($null -eq $snapshot) { continue }
+        Assert-CcodEqual 'Pid,CreationTimeUtc,SessionId,UserSid,Path,PackageFamilyName,CommandLine,ParentPid,IsTopLevel,Mode,RendererPort,MainPort' `
+            (($snapshot.PSObject.Properties.Name) -join ',') "$Message exact exposed snapshot properties"
+    }
+}
+
 try {
     Invoke-CcodTest 'requires every process snapshot field to match exactly' {
         $expected = New-CcodSnapshot
@@ -282,6 +306,30 @@ try {
         }
     }
 
+    Invoke-CcodTest 'accepts StateStore Int64 proof numbers only when losslessly in range' {
+        $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $longProof = New-CcodSpecialStatus
+        $longProof.pid = [long]100
+        $longProof.rendererPort = [long]41001
+        $longProof.mainPort = [long]41002
+        $special = Get-CcodProcessSnapshot -ProcessId 100 -StatusEvidence $longProof -Adapters (New-CcodSnapshotAdapters -CommandLine $command)
+        Assert-CcodEqual 'Special' $special.Mode 'StateStore-valid Int64 numbers normalize to the snapshot contract'
+
+        foreach ($invalid in @(
+            @{ Name='PID overflow'; Field='pid'; Value=([long][int]::MaxValue + 1) },
+            @{ Name='zero PID'; Field='pid'; Value=[long]0 },
+            @{ Name='renderer port overflow'; Field='rendererPort'; Value=[long]65536 },
+            @{ Name='zero main port'; Field='mainPort'; Value=[int]0 },
+            @{ Name='floating PID'; Field='pid'; Value=[double]100 },
+            @{ Name='Boolean port'; Field='mainPort'; Value=$true }
+        )) {
+            $proof = (New-CcodSpecialStatus).PSObject.Copy()
+            $proof.($invalid.Field) = $invalid.Value
+            $snapshot = Get-CcodProcessSnapshot -ProcessId 100 -StatusEvidence $proof -Adapters (New-CcodSnapshotAdapters -CommandLine $command)
+            Assert-CcodEqual 'Unrelated' $snapshot.Mode "$($invalid.Name) fails closed"
+        }
+    }
+
     Invoke-CcodTest 'rejects a snapshot when creation changes across CIM metadata' {
         $calls = [pscustomobject]@{ Package = 0; Native = 0; Cim = 0; Probe = 0 }
         $snapshot = Get-CcodProcessSnapshot -ProcessId 100 -Adapters (New-CcodSnapshotAdapters -SecondCreationTimeUtc '2026-08-02T00:00:02.0000000Z' -Counter $calls)
@@ -299,16 +347,14 @@ try {
             GetProcess = { param($ProcessId) $null }
             StopProcess = { $calls.Stop++; throw 'must not run' }.GetNewClosure()
         }
-        Assert-CcodEqual 'SourceExited' $exited.Outcome 'natural exit cancels transition'
-        Assert-CcodEqual $false $exited.StoppedByController 'natural exit never authorizes launch'
+        Assert-CcodStopResultContract -Result $exited -Outcome SourceExited -Stopped $false -Snapshot $null -Message 'natural exit'
 
         $reused = New-CcodSnapshot -CreationTimeUtc '2026-08-02T00:00:02.0000000Z'
         $changed = Stop-CcodProcessIfMatch -Expected $expected -Adapters @{
             GetProcess = { param($ProcessId) $reused }.GetNewClosure()
             StopProcess = { $calls.Stop++; throw 'must not run' }.GetNewClosure()
         }
-        Assert-CcodEqual 'IdentityChanged' $changed.Outcome 'PID reuse is observed without stopping'
-        Assert-CcodEqual $false $changed.StoppedByController 'identity change never authorizes launch'
+        Assert-CcodStopResultContract -Result $changed -Outcome IdentityChanged -Stopped $false -Snapshot $reused -Message 'PID reuse'
         Assert-CcodEqual 0 $calls.Stop 'dangerous boundary is unreachable without an exact reread'
     }
 
@@ -332,20 +378,17 @@ try {
                 $receipt
             }.GetNewClosure()
         }
-        Assert-CcodEqual 'Stopped' $result.Outcome 'confirmed receipt authorizes the transition'
-        Assert-CcodEqual $true $result.StoppedByController 'confirmation is explicit'
-        Assert-CcodEqual 'Outcome,StoppedByController,Snapshot' (($result.PSObject.Properties.Name) -join ',') 'public stop result shape is exact'
+        Assert-CcodStopResultContract -Result $result -Outcome Stopped -Stopped $true -Snapshot $calls.Snapshot -Message 'confirmed stop receipt'
         Assert-CcodEqual 1 $calls.Stop 'stop boundary is called once'
         Assert-CcodEqual 100 $calls.ProcessId 'exact reread snapshot is passed to the stop boundary'
         Assert-CcodEqual 4321 $calls.Timeout 'timeout is passed without substitution'
         Assert-CcodEqual $true (Test-CcodProcessMatch -Expected $expected -Actual $calls.Snapshot) 'stop receives the exact actual snapshot'
 
         $unconfirmed = Stop-CcodProcessIfMatch -Expected $expected -Adapters @{
-            GetProcess = { param($ProcessId) New-CcodSnapshot }
+            GetProcess = { param($ProcessId) $expected }.GetNewClosure()
             StopProcess = { param($Snapshot, $TimeoutMilliseconds) $null }
         }
-        Assert-CcodEqual 'StopUnconfirmed' $unconfirmed.Outcome 'missing receipt cannot be promoted to success'
-        Assert-CcodEqual $false $unconfirmed.StoppedByController 'unconfirmed stop never authorizes launch'
+        Assert-CcodStopResultContract -Result $unconfirmed -Outcome StopUnconfirmed -Stopped $false -Snapshot $expected -Message 'missing stop receipt'
 
         $coercedReceipt = Stop-CcodProcessIfMatch -Expected $expected -Adapters @{
             GetProcess = { param($ProcessId) New-CcodSnapshot }
@@ -369,10 +412,10 @@ try {
         }
 
         $exitedReceipt = Stop-CcodProcessIfMatch -Expected $expected -Adapters @{
-            GetProcess = { param($ProcessId, $StatusEvidence) New-CcodSnapshot }
+            GetProcess = { param($ProcessId, $StatusEvidence) $expected }.GetNewClosure()
             StopProcess = { param($Snapshot, $TimeoutMilliseconds) [pscustomobject]@{ Outcome='ExitedBeforeStop'; StoppedByController=$false } }
         }
-        Assert-CcodEqual 'SourceExited' $exitedReceipt.Outcome 'internal pre-stop exit maps to the public source-exited outcome'
+        Assert-CcodStopResultContract -Result $exitedReceipt -Outcome SourceExited -Stopped $false -Snapshot $null -Message 'internal pre-stop exit'
     }
 
     Invoke-CcodTest 'distinguishes access denial and delayed exit' {
@@ -501,6 +544,12 @@ try {
         }
         $candidate = Find-CcodTransactionProcess -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $adapters
         Assert-CcodEqual 200 $candidate.Pid 'the sole pre-status crash-window candidate is adopted with startup proof'
+        Assert-CcodTrue ($null -ne (Get-Command Get-CcodTransactionProcessResult -ErrorAction SilentlyContinue)) 'detailed transaction result is exported publicly'
+        $confirmedResult = Get-CcodTransactionProcessResult -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $adapters
+        Assert-CcodTransactionResultContract -Result $confirmedResult -Outcome Confirmed -Message 'confirmed transaction'
+        Assert-CcodEqual 200 $confirmedResult.Snapshot.Pid 'confirmed result exposes the exact adopted snapshot'
+        Assert-CcodEqual '200' (($confirmedResult.Candidates.Pid | Sort-Object) -join ',') 'confirmed result preserves its exact candidate'
+        Assert-CcodEqual 0 @($confirmedResult.ConflictOwners).Count 'confirmed result has no conflict owners'
 
         $second = New-CcodSnapshot -ProcessId 204 -CreationTimeUtc '2026-08-02T00:00:06.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
         $map[204] = $second
@@ -508,12 +557,61 @@ try {
         $ambiguousAdapters.ListProcessIds = { @(200, 204) }
         $ambiguous = Find-CcodTransactionProcess -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $ambiguousAdapters
         Assert-CcodEqual $null $ambiguous 'multiple exact transaction candidates fail closed'
+        $ambiguousResult = Get-CcodTransactionProcessResult -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $ambiguousAdapters
+        Assert-CcodTransactionResultContract -Result $ambiguousResult -Outcome Ambiguous -Message 'ambiguous transaction'
+        Assert-CcodEqual $null $ambiguousResult.Snapshot 'ambiguous result never selects a snapshot'
+        Assert-CcodEqual '200,204' (($ambiguousResult.Candidates.Pid | Sort-Object) -join ',') 'ambiguous result exposes only exact candidates'
+        Assert-CcodEqual 0 @($ambiguousResult.ConflictOwners).Count 'ambiguous result has no conflict owners'
+
+        $noCandidateAdapters = $adapters.Clone()
+        $noCandidateAdapters.ListProcessIds = { @() }
+        $noCandidateAdapters.GetListeningPortOwnerPids = { param($Port, $Address) @() }
+        $noCandidateResult = Get-CcodTransactionProcessResult -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $noCandidateAdapters
+        Assert-CcodTransactionResultContract -Result $noCandidateResult -Outcome NoCandidate -Message 'empty transaction'
+        Assert-CcodEqual $null $noCandidateResult.Snapshot 'no-candidate result has no selected snapshot'
+        Assert-CcodEqual 0 @($noCandidateResult.Candidates).Count 'no-candidate result has no candidates'
+        Assert-CcodEqual 0 @($noCandidateResult.ConflictOwners).Count 'no-candidate result has no listener owners'
+
+        $lagAdapters = $adapters.Clone()
+        $lagAdapters.ListProcessIds = { @() }
+        $lagAdapters.GetListeningPortOwnerPids = { param($Port, $Address) @(200) }
+        $lagResult = Get-CcodTransactionProcessResult -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $lagAdapters
+        Assert-CcodTransactionResultContract -Result $lagResult -Outcome Incomplete -Message 'enumeration lag'
+        Assert-CcodEqual $null $lagResult.Snapshot 'enumeration lag cannot select a snapshot'
+        Assert-CcodEqual 0 @($lagResult.Candidates).Count 'enumeration lag has no enumerated candidate'
+        Assert-CcodEqual 0 @($lagResult.ConflictOwners).Count 'same-transaction owner is not called a conflict'
 
         $invalidProofAdapters = $adapters.Clone()
         $invalidProofAdapters.ListProcessIds = { @(200) }
         $invalidProofAdapters.GetListeningPortOwnerPids = { param($Port, $Address) @(999) }
         $invalid = Find-CcodTransactionProcess -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $invalidProofAdapters
         Assert-CcodEqual $null $invalid 'invalid endpoint ownership proof cannot be adopted'
+        $invalidProofResult = Get-CcodTransactionProcessResult -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $invalidProofAdapters
+        Assert-CcodTransactionResultContract -Result $invalidProofResult -Outcome Incomplete -Message 'unproven listener owner'
+        Assert-CcodEqual 0 @($invalidProofResult.ConflictOwners).Count 'unproven owner data is not exposed'
+
+        $adapterErrorAdapters = $adapters.Clone()
+        $adapterErrorAdapters.ListProcessIds = { throw 'fixture enumeration failure' }
+        $adapterErrorResult = Get-CcodTransactionProcessResult -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $adapterErrorAdapters
+        Assert-CcodTransactionResultContract -Result $adapterErrorResult -Outcome Incomplete -Message 'adapter failure'
+        Assert-CcodEqual 0 @($adapterErrorResult.Candidates).Count 'adapter errors do not leak partial candidates'
+        Assert-CcodEqual 0 @($adapterErrorResult.ConflictOwners).Count 'adapter errors do not leak owner data'
+
+        $foreignOwner = New-CcodSnapshot -ProcessId 999 -CreationTimeUtc '2026-08-02T00:00:03.0000000Z' -Path 'C:\Other\foreign.exe' -PackageFamilyName 'Other.Family' -Mode Unrelated -IsTopLevel $false
+        $foreignOwner | Add-Member -NotePropertyName AdapterPrivateData -NotePropertyValue 'must not escape'
+        $conflictAdapters = $adapters.Clone()
+        $conflictAdapters.ListProcessIds = { @(200) }
+        $conflictAdapters.GetListeningPortOwnerPids = { param($Port, $Address) @(999) }
+        $conflictAdapters.GetProcess = {
+            param($ProcessId, $StatusEvidence)
+            if ([int]$ProcessId -eq 999) { return $foreignOwner }
+            $expected
+        }.GetNewClosure()
+        $conflictResult = Get-CcodTransactionProcessResult -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $conflictAdapters
+        Assert-CcodTransactionResultContract -Result $conflictResult -Outcome PortConflict -Message 'proven foreign listener'
+        Assert-CcodEqual $null $conflictResult.Snapshot 'port conflict never selects a candidate'
+        Assert-CcodEqual '200' (($conflictResult.Candidates.Pid | Sort-Object) -join ',') 'port conflict retains the exact canonical candidate'
+        Assert-CcodEqual '999' (($conflictResult.ConflictOwners.Pid | Sort-Object) -join ',') 'port conflict exposes the exact proven owner'
 
         $ownerReuseState = [pscustomobject]@{ OwnerReads=0 }
         $reusedOwner = New-CcodSnapshot -ProcessId 200 -CreationTimeUtc '2026-08-02T00:00:09.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
@@ -674,12 +772,13 @@ try {
     Invoke-CcodTest 'treats a post-recheck binding race as a failed special launch' {
         $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
         $candidate = New-CcodSnapshot -ProcessId 400 -CreationTimeUtc '2026-08-02T00:00:01.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
+        $foreignOwner = New-CcodSnapshot -ProcessId 999 -CreationTimeUtc '2026-08-02T00:00:01.0000000Z' -Path 'C:\Other\foreign.exe' -PackageFamilyName 'Other.Family' -Mode Unrelated -CommandLine '"C:\Other\foreign.exe"'
         $base = @{
             GetPackageIdentity = { [pscustomobject]@{ Found=$true; FullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0'; FamilyName='OpenAI.Codex_2p2nqsd0c76g0'; Version='1.0.0.0'; ExecutablePath='C:\Codex\ChatGPT.exe' } }
             TestLoopbackPortAvailable = { param($Port, $Address) $true }
             StartProcess = { param($FilePath, $Arguments, $WindowStyle) [pscustomobject]@{ Id=400 } }
             ListProcessIds = { @(400) }
-            GetProcess = { param($ProcessId, $StatusEvidence) $candidate }.GetNewClosure()
+            GetProcess = { param($ProcessId, $StatusEvidence) if ([int]$ProcessId -eq 999) { $foreignOwner } else { $candidate } }.GetNewClosure()
             ParseCommandLine = { param($Value) @('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002') }
             GetCurrentSessionId = { 1 }
             GetCurrentUserSid = { 'S-1-5-21-test' }
@@ -691,7 +790,6 @@ try {
         Assert-CcodEqual 'PortUnavailable' $result.Outcome 'tree-external listener ownership proves a post-recheck bind race'
 
         $missingCandidateClock = [pscustomobject]@{ Tick=0 }
-        $foreignOwner = New-CcodSnapshot -ProcessId 999 -CreationTimeUtc '2026-08-02T00:00:01.0000000Z' -Path 'C:\Other\foreign.exe' -PackageFamilyName 'Other.Family' -Mode Unrelated -CommandLine '"C:\Other\foreign.exe"'
         $missingCandidateAdapters = $base.Clone()
         $missingCandidateAdapters.ListProcessIds = { @() }
         $missingCandidateAdapters.GetProcess = { param($ProcessId, $StatusEvidence) if ([int]$ProcessId -eq 999) { $foreignOwner } else { $candidate } }.GetNewClosure()

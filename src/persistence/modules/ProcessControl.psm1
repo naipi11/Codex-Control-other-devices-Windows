@@ -402,6 +402,19 @@ function Test-CcodExactProperties {
     return $true
 }
 
+function ConvertTo-CcodStateInt32 {
+    param(
+        $Value,
+        [Parameter(Mandatory)][int]$Minimum,
+        [Parameter(Mandatory)][int]$Maximum
+    )
+
+    if ($Value -isnot [int] -and $Value -isnot [long]) { return $null }
+    $numeric = [long]$Value
+    if ($numeric -lt $Minimum -or $numeric -gt $Maximum) { return $null }
+    return [int]$numeric
+}
+
 function Test-CcodSpecialStatusProof {
     param(
         $Status,
@@ -413,17 +426,20 @@ function Test-CcodSpecialStatusProof {
 
     $names = @('pid','creationTimeUtc','packageFullName','packageVersion','appAsarSha256','mainPort','rendererPort','mainProbe','rendererProbe')
     if (-not (Test-CcodExactProperties -Value $Status -Names $names)) { return $false }
-    if ($Status.pid -isnot [int] -or $Status.mainPort -isnot [int] -or $Status.rendererPort -isnot [int]) { return $false }
+    $statusPid = ConvertTo-CcodStateInt32 -Value $Status.pid -Minimum 1 -Maximum ([int]::MaxValue)
+    $statusMainPort = ConvertTo-CcodStateInt32 -Value $Status.mainPort -Minimum 1 -Maximum 65535
+    $statusRendererPort = ConvertTo-CcodStateInt32 -Value $Status.rendererPort -Minimum 1 -Maximum 65535
+    if ($null -eq $statusPid -or $null -eq $statusMainPort -or $null -eq $statusRendererPort) { return $false }
     foreach ($name in @('creationTimeUtc','packageFullName','packageVersion','appAsarSha256','mainProbe','rendererProbe')) {
         if ($Status.$name -isnot [string]) { return $false }
     }
-    return [object]::Equals($Status.pid, [int]$SnapshotIdentity.Pid) -and
+    return [object]::Equals($statusPid, [int]$SnapshotIdentity.Pid) -and
         $Status.creationTimeUtc -ceq $SnapshotIdentity.CreationTimeUtc -and
         $Status.packageFullName -ceq $Package.FullName -and
         $Status.packageVersion -ceq $Package.Version -and
         $Status.appAsarSha256 -cmatch '^[0-9a-f]{64}$' -and
-        [object]::Equals($Status.rendererPort, $RendererPort) -and
-        [object]::Equals($Status.mainPort, $MainPort) -and
+        [object]::Equals($statusRendererPort, $RendererPort) -and
+        [object]::Equals($statusMainPort, $MainPort) -and
         $Status.mainProbe -ceq 'Closed' -and
         $Status.rendererProbe -ceq 'BridgeValid'
 }
@@ -664,7 +680,7 @@ function Stop-CcodProcessIfMatch {
             }
             return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual
         }
-        'ExitedBeforeStop' { return New-CcodStopResult -Outcome 'SourceExited' -Snapshot $actual }
+        'ExitedBeforeStop' { return New-CcodStopResult -Outcome 'SourceExited' -Snapshot $null }
         'IdentityChanged' { return New-CcodStopResult -Outcome 'IdentityChanged' -Snapshot $actual }
         'AccessDenied' { return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual }
         'TimedOut' { return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual }
@@ -775,7 +791,7 @@ function Get-CcodListenerOwnerMapping {
     }
     foreach ($owner in @($rendererOwners + $mainOwners)) {
         if ($owner -isnot [int] -or $owner -lt 1) {
-            return [pscustomobject]@{ Outcome='PortConflict'; RendererOwners=$rendererOwners; MainOwners=$mainOwners }
+            return [pscustomobject]@{ Outcome='Incomplete'; RendererOwners=@(); MainOwners=@() }
         }
     }
     if ($rendererOwners.Count -lt 1 -or $mainOwners.Count -lt 1) {
@@ -792,6 +808,69 @@ function Test-CcodOwnerMappingMatch {
         (($Expected.MainOwners -join ',') -ceq ($Actual.MainOwners -join ','))
 }
 
+function Copy-CcodProcessSnapshot {
+    param($Snapshot)
+
+    if ($null -eq $Snapshot) { return $null }
+    $copy = [ordered]@{}
+    foreach ($field in $script:CcodProcessSnapshotFields) {
+        $property = $Snapshot.PSObject.Properties[$field]
+        if ($null -eq $property) { throw "Process snapshot is missing required field '$field'." }
+        $copy[$field] = $property.Value
+    }
+    return [pscustomobject]$copy
+}
+
+function New-CcodTransactionProcessResult {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Confirmed', 'NoCandidate', 'Incomplete', 'Ambiguous', 'PortConflict')][string]$Outcome,
+        $Snapshot,
+        [AllowEmptyCollection()][object[]]$Candidates = @(),
+        [AllowEmptyCollection()][object[]]$ConflictOwners = @()
+    )
+
+    $publicSnapshot = Copy-CcodProcessSnapshot -Snapshot $Snapshot
+    $publicCandidates = @($Candidates | Sort-Object Pid | ForEach-Object { Copy-CcodProcessSnapshot -Snapshot $_ })
+    $publicConflictOwners = @($ConflictOwners | Sort-Object Pid | ForEach-Object { Copy-CcodProcessSnapshot -Snapshot $_ })
+    return [pscustomobject][ordered]@{
+        Outcome = $Outcome
+        Snapshot = $publicSnapshot
+        Candidates = $publicCandidates
+        ConflictOwners = $publicConflictOwners
+    }
+}
+
+function Get-CcodExactOwnerSnapshots {
+    param(
+        [Parameter(Mandatory)][int[]]$OwnerPids,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    $snapshots = @()
+    foreach ($ownerPid in @($OwnerPids | Sort-Object -Unique)) {
+        $first = & $Adapters.GetProcess $ownerPid $null
+        $second = & $Adapters.GetProcess $ownerPid $null
+        if ($null -eq $first -or $null -eq $second -or
+            $first.Pid -isnot [int] -or -not [object]::Equals($first.Pid, $ownerPid) -or
+            -not (Test-CcodProcessMatch -Expected $first -Actual $second)) {
+            return [pscustomobject]@{ Complete=$false; Snapshots=@() }
+        }
+        $snapshots += $second
+    }
+    return [pscustomobject]@{ Complete=$true; Snapshots=@($snapshots) }
+}
+
+function Test-CcodTransactionOwnerSnapshot {
+    param($Snapshot)
+
+    if ($null -eq $Snapshot -or $Snapshot.Pid -isnot [int] -or $Snapshot.Pid -lt 1 -or
+        $Snapshot.SessionId -isnot [int] -or $Snapshot.UserSid -isnot [string] -or
+        $Snapshot.Path -isnot [string] -or $Snapshot.PackageFamilyName -isnot [string]) {
+        return $false
+    }
+    return $null -ne (ConvertTo-CcodDateTimeOffset -Value $Snapshot.CreationTimeUtc)
+}
+
 function Get-CcodStartupOwnershipReceipt {
     param(
         [Parameter(Mandatory)]$Snapshot,
@@ -800,29 +879,42 @@ function Get-CcodStartupOwnershipReceipt {
         [Parameter(Mandatory)][hashtable]$Adapters
     )
 
+    $candidateList = @($Snapshot)
     $firstMapping = Get-CcodListenerOwnerMapping -RendererPort $RendererPort -MainPort $MainPort -Adapters $Adapters
-    if ($firstMapping.Outcome -cne 'Complete') { return [pscustomobject]@{ Outcome=$firstMapping.Outcome; Snapshot=$Snapshot } }
+    if ($firstMapping.Outcome -cne 'Complete') {
+        return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null -Candidates $candidateList
+    }
     $tree = @(Get-CcodVerifiedProcessTree -Root $Snapshot -Adapters $Adapters)
-    if ($tree.Count -lt 1) { return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$Snapshot } }
+    if ($tree.Count -lt 1) { return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null -Candidates $candidateList }
     $treeByPid = @{}
     foreach ($node in $tree) { $treeByPid[[int]$node.Pid] = $node }
-    if (-not $treeByPid.ContainsKey([int]$Snapshot.Pid)) { return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$Snapshot } }
+    if (-not $treeByPid.ContainsKey([int]$Snapshot.Pid)) {
+        return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null -Candidates $candidateList
+    }
 
     $secondMapping = Get-CcodListenerOwnerMapping -RendererPort $RendererPort -MainPort $MainPort -Adapters $Adapters
-    if ($secondMapping.Outcome -cne 'Complete') { return [pscustomobject]@{ Outcome=$secondMapping.Outcome; Snapshot=$Snapshot } }
-    foreach ($owner in @($secondMapping.RendererOwners + $secondMapping.MainOwners)) {
-        if (-not $treeByPid.ContainsKey([int]$owner)) { return [pscustomobject]@{ Outcome='PortConflict'; Snapshot=$Snapshot } }
+    if ($secondMapping.Outcome -cne 'Complete') {
+        return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null -Candidates $candidateList
     }
     if (-not (Test-CcodOwnerMappingMatch -Expected $firstMapping -Actual $secondMapping)) {
-        return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$Snapshot }
+        return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null -Candidates $candidateList
     }
-    foreach ($owner in @($secondMapping.RendererOwners + $secondMapping.MainOwners | Select-Object -Unique)) {
+    $ownerPids = @($secondMapping.RendererOwners + $secondMapping.MainOwners | Sort-Object -Unique)
+    $externalOwnerPids = @($ownerPids | Where-Object { -not $treeByPid.ContainsKey([int]$_) })
+    if ($externalOwnerPids.Count -gt 0) {
+        $externalOwners = Get-CcodExactOwnerSnapshots -OwnerPids $externalOwnerPids -Adapters $Adapters
+        if (-not $externalOwners.Complete -or @($externalOwners.Snapshots | Where-Object { -not (Test-CcodTransactionOwnerSnapshot $_) }).Count -gt 0) {
+            return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null -Candidates $candidateList
+        }
+        return New-CcodTransactionProcessResult -Outcome PortConflict -Snapshot $null -Candidates $candidateList -ConflictOwners $externalOwners.Snapshots
+    }
+    foreach ($owner in $ownerPids) {
         $currentOwner = & $Adapters.GetProcess ([int]$owner) $null
         if ($null -eq $currentOwner -or -not (Test-CcodProcessMatch -Expected $treeByPid[[int]$owner] -Actual $currentOwner)) {
-            return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$Snapshot }
+            return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null -Candidates $candidateList
         }
     }
-    return [pscustomobject]@{ Outcome='Confirmed'; Snapshot=$Snapshot }
+    return New-CcodTransactionProcessResult -Outcome Confirmed -Snapshot $Snapshot -Candidates $candidateList
 }
 
 function Get-CcodTransactionCandidateResult {
@@ -833,16 +925,16 @@ function Get-CcodTransactionCandidateResult {
         [Parameter(Mandatory)][hashtable]$Adapters
     )
 
-    if ($RendererPort -eq $MainPort) { return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null } }
+    if ($RendererPort -eq $MainPort) { return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null }
     $transactionTime = ConvertTo-CcodDateTimeOffset -Value $TransactionTimeUtc
-    if ($null -eq $transactionTime) { return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null } }
+    if ($null -eq $transactionTime) { return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null }
     $package = & $Adapters.GetPackageIdentity
     if ($null -eq $package -or $null -eq $package.PSObject.Properties['Found'] -or -not $package.Found) {
-        return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null }
+        return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null
     }
     foreach ($name in @('FamilyName', 'ExecutablePath')) {
         if ($null -eq $package.PSObject.Properties[$name] -or [string]::IsNullOrWhiteSpace([string]$package.$name)) {
-            return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null }
+            return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null
         }
     }
     $currentSessionId = & $Adapters.GetCurrentSessionId
@@ -865,34 +957,67 @@ function Get-CcodTransactionCandidateResult {
         if ($null -eq $creation -or $creation -lt $transactionTime) { continue }
         $candidates += $snapshot
     }
-    if ($candidates.Count -gt 1) { return [pscustomobject]@{ Outcome='Ambiguous'; Snapshot=$null } }
+    if ($candidates.Count -gt 1) {
+        $exactCandidates = @()
+        foreach ($candidate in @($candidates | Sort-Object Pid)) {
+            $current = & $Adapters.GetProcess ([int]$candidate.Pid) $null
+            if ($null -eq $current -or -not (Test-CcodProcessMatch -Expected $candidate -Actual $current)) {
+                return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null
+            }
+            $exactCandidates += $current
+        }
+        return New-CcodTransactionProcessResult -Outcome Ambiguous -Snapshot $null -Candidates $exactCandidates
+    }
     if ($candidates.Count -ne 1) {
         try {
-            $owners = @(
-                @(& $Adapters.GetListeningPortOwnerPids $RendererPort '127.0.0.1') +
-                @(& $Adapters.GetListeningPortOwnerPids $MainPort '127.0.0.1')
-            )
+            $rendererOwners = @(& $Adapters.GetListeningPortOwnerPids $RendererPort '127.0.0.1')
+            $mainOwners = @(& $Adapters.GetListeningPortOwnerPids $MainPort '127.0.0.1')
         } catch {
-            return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null }
+            return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null
         }
+        $owners = @($rendererOwners + $mainOwners | Sort-Object -Unique)
+        if ($owners.Count -eq 0) { return New-CcodTransactionProcessResult -Outcome NoCandidate -Snapshot $null }
         foreach ($owner in $owners) {
-            if ($owner -isnot [int] -or $owner -lt 1) { return [pscustomobject]@{ Outcome='PortConflict'; Snapshot=$null } }
+            if ($owner -isnot [int] -or $owner -lt 1) { return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null }
         }
-        foreach ($owner in @($owners | Select-Object -Unique)) {
-            $ownerSnapshot = & $Adapters.GetProcess ([int]$owner) $null
-            if ($null -eq $ownerSnapshot -or $ownerSnapshot.Pid -isnot [int] -or
-                -not [object]::Equals($ownerSnapshot.Pid, [int]$owner)) { continue }
+        $ownerReceipt = Get-CcodExactOwnerSnapshots -OwnerPids $owners -Adapters $Adapters
+        if (-not $ownerReceipt.Complete) { return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null }
+        $foreignOwners = @()
+        foreach ($ownerSnapshot in $ownerReceipt.Snapshots) {
+            if (-not (Test-CcodTransactionOwnerSnapshot -Snapshot $ownerSnapshot)) {
+                return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null
+            }
             $ownerCreation = ConvertTo-CcodDateTimeOffset -Value $ownerSnapshot.CreationTimeUtc
             $provenForeign = -not [object]::Equals($ownerSnapshot.SessionId, $currentSessionId) -or
                 $ownerSnapshot.UserSid -cne $currentUserSid -or
                 -not (Test-CcodOrdinalIgnoreCase $ownerSnapshot.Path $package.ExecutablePath) -or
                 $ownerSnapshot.PackageFamilyName -cne $package.FamilyName -or
-                $null -eq $ownerCreation -or $ownerCreation -lt $transactionTime
-            if ($provenForeign) { return [pscustomobject]@{ Outcome='PortConflict'; Snapshot=$ownerSnapshot } }
+                $ownerCreation -lt $transactionTime
+            if ($provenForeign) { $foreignOwners += $ownerSnapshot }
         }
-        return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null }
+        if ($foreignOwners.Count -gt 0) {
+            return New-CcodTransactionProcessResult -Outcome PortConflict -Snapshot $null -ConflictOwners $foreignOwners
+        }
+        return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null
     }
     return Get-CcodStartupOwnershipReceipt -Snapshot $candidates[0] -RendererPort $RendererPort -MainPort $MainPort -Adapters $Adapters
+}
+
+function Get-CcodTransactionProcessResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$RendererPort,
+        [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$MainPort,
+        [Parameter(Mandatory)][string]$TransactionTimeUtc,
+        [hashtable]$Adapters
+    )
+
+    try {
+        $adapter = Get-CcodProcessAdapters -Adapters $Adapters
+        return Get-CcodTransactionCandidateResult -RendererPort $RendererPort -MainPort $MainPort -TransactionTimeUtc $TransactionTimeUtc -Adapters $adapter
+    } catch {
+        return New-CcodTransactionProcessResult -Outcome Incomplete -Snapshot $null
+    }
 }
 
 function Find-CcodTransactionProcess {
@@ -904,8 +1029,7 @@ function Find-CcodTransactionProcess {
         [hashtable]$Adapters
     )
 
-    $adapter = Get-CcodProcessAdapters -Adapters $Adapters
-    $result = Get-CcodTransactionCandidateResult -RendererPort $RendererPort -MainPort $MainPort -TransactionTimeUtc $TransactionTimeUtc -Adapters $adapter
+    $result = Get-CcodTransactionProcessResult -RendererPort $RendererPort -MainPort $MainPort -TransactionTimeUtc $TransactionTimeUtc -Adapters $Adapters
     if ($result.Outcome -cne 'Confirmed') { return $null }
     return $result.Snapshot
 }
@@ -1038,7 +1162,7 @@ function Start-CcodProcess {
     if ($null -eq $process) { return New-CcodStartResult -Outcome 'Failed' -Snapshot $null -Process $null }
     if ($Mode -ceq 'Special') {
         while ($true) {
-            $candidate = Get-CcodTransactionCandidateResult -RendererPort ([int]$RendererPort) -MainPort ([int]$MainPort) `
+            $candidate = Get-CcodTransactionProcessResult -RendererPort ([int]$RendererPort) -MainPort ([int]$MainPort) `
                 -TransactionTimeUtc $transactionTimeUtc -Adapters $adapter
             switch -CaseSensitive ($candidate.Outcome) {
                 'Confirmed' { return New-CcodStartResult -Outcome 'Started' -Snapshot $candidate.Snapshot -Process $process }
@@ -1055,4 +1179,4 @@ function Start-CcodProcess {
     return New-CcodStartResult -Outcome 'Started' -Snapshot $null -Process $process
 }
 
-Export-ModuleMember -Function Get-CcodProcessSnapshot, Test-CcodProcessMatch, Get-CcodVerifiedProcessTree, Find-CcodTransactionProcess, Stop-CcodProcessIfMatch, Start-CcodProcess, Get-CcodAvailableLoopbackPort, Wait-CcodPortClosed
+Export-ModuleMember -Function Get-CcodProcessSnapshot, Test-CcodProcessMatch, Get-CcodVerifiedProcessTree, Get-CcodTransactionProcessResult, Find-CcodTransactionProcess, Stop-CcodProcessIfMatch, Start-CcodProcess, Get-CcodAvailableLoopbackPort, Wait-CcodPortClosed
