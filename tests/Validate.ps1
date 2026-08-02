@@ -7,6 +7,8 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $failures = [System.Collections.Generic.List[string]]::new()
 $cleanRoomSelfTest = Join-Path $PSScriptRoot 'CleanroomSelfTest.js'
+$packageCheckerSelfTest = Join-Path $PSScriptRoot 'PackageCheckerSelfTest.mjs'
+$persistenceSelfTest = Join-Path $PSScriptRoot 'PersistenceSelfTest.ps1'
 
 foreach ($script in Get-ChildItem -Recurse -File -LiteralPath $projectRoot -Filter '*.ps1') {
     $tokens = $null
@@ -42,6 +44,21 @@ if (-not $node) {
             $failures.Add("Clean-room runtime self-test failed: $($selfTestOutput -join ' ')")
         }
     }
+
+    if ($failures.Count -eq 0) {
+        $packageCheckerOutput = & $node.Source $packageCheckerSelfTest 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $failures.Add("Package checker self-test failed: $($packageCheckerOutput -join ' ')")
+        }
+    }
+}
+
+if ($failures.Count -eq 0) {
+    $powershellExecutable = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $persistenceOutput = & $powershellExecutable -NoProfile -ExecutionPolicy Bypass -File $persistenceSelfTest 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $failures.Add("Persistence self-test failed: $($persistenceOutput -join ' ')")
+    }
 }
 
 foreach ($required in @('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'SECURITY.md', 'package.json', 'docs\CLEANROOM.md')) {
@@ -64,4 +81,4 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 
-Write-Host 'Validation passed: PowerShell, JavaScript, clean-room runtime tests, repository files, and package preflight.' -ForegroundColor Green
+Write-Host 'Validation passed: PowerShell, JavaScript, clean-room runtime, package checker, persistence tests, repository files, and package preflight.' -ForegroundColor Green
