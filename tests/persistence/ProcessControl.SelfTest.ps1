@@ -38,7 +38,11 @@ function New-CcodSnapshot {
 
 function New-CcodSnapshotAdapters {
     param(
-        [string]$CommandLine = '"C:\Codex\ChatGPT.exe"',
+        [AllowNull()][string]$CommandLine = '"C:\Codex\ChatGPT.exe"',
+        [AllowNull()]$ParsedArguments,
+        [AllowNull()]$CimProcessId,
+        [AllowNull()]$CimParentProcessId,
+        [int]$NativeProcessId = 0,
         [int]$SessionId = 1,
         [string]$UserSid = 'S-1-5-21-test',
         [string]$Path = 'C:\Codex\ChatGPT.exe',
@@ -47,6 +51,7 @@ function New-CcodSnapshotAdapters {
         [string]$SecondCreationTimeUtc = '2026-08-02T00:00:00.0000000Z',
         [bool]$ProbeValid = $true,
         [string]$RendererUrl = 'app://-/index.html',
+        $ProbeResult,
         $Counter = $null
     )
 
@@ -59,6 +64,20 @@ function New-CcodSnapshotAdapters {
     $creationAfter = $SecondCreationTimeUtc
     $probeIsValid = $ProbeValid
     $url = $RendererUrl
+    $probeReceipt = $ProbeResult
+    $hasExplicitArguments = $PSBoundParameters.ContainsKey('ParsedArguments')
+    if ($hasExplicitArguments) {
+        $arguments = $ParsedArguments
+    } elseif ([string]::IsNullOrWhiteSpace($command)) {
+        $arguments = $null
+    } else {
+        $arguments = @($command.Split(' ') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim('"') })
+    }
+    $hasCimPid = $PSBoundParameters.ContainsKey('CimProcessId')
+    $cimPid = $CimProcessId
+    $hasCimParentPid = $PSBoundParameters.ContainsKey('CimParentProcessId')
+    $cimParentPid = $CimParentProcessId
+    $nativePid = $NativeProcessId
     $calls = $Counter
     $state = [pscustomobject]@{ NativeReads = 0 }
     return @{
@@ -79,7 +98,7 @@ function New-CcodSnapshotAdapters {
             $state.NativeReads++
             if ($null -ne $calls) { $calls.Native++ }
             [pscustomobject]@{
-                Pid = $ProcessId
+                Pid = if ($nativePid -eq 0) { $ProcessId } else { $nativePid }
                 CreationTimeUtc = if ($state.NativeReads -eq 1) { '2026-08-02T00:00:00.0000000Z' } else { $creationAfter }
                 SessionId = $session
                 UserSid = $sid
@@ -90,11 +109,17 @@ function New-CcodSnapshotAdapters {
         GetCimProcess = {
             param($ProcessId)
             if ($null -ne $calls) { $calls.Cim++ }
-            [pscustomobject]@{ ProcessId = $ProcessId; CommandLine = $command; ParentProcessId = $parent }
+            [pscustomobject]@{
+                ProcessId = if ($hasCimPid) { $cimPid } else { [uint32]$ProcessId }
+                CommandLine = $command
+                ParentProcessId = if ($hasCimParentPid) { $cimParentPid } else { [uint32]$parent }
+            }
         }.GetNewClosure()
+        ParseCommandLine = { param($Value) $arguments }.GetNewClosure()
         ProbeSpecial = {
             param($ProcessId, $RendererPort, $MainPort)
             if ($null -ne $calls) { $calls.Probe++ }
+            if ($null -ne $probeReceipt) { return $probeReceipt }
             [pscustomobject]@{ Valid = $probeIsValid; RendererUrl = $url }
         }.GetNewClosure()
     }
@@ -106,8 +131,11 @@ function New-CcodSpecialStatus {
         creationTimeUtc = '2026-08-02T00:00:00.0000000Z'
         packageFullName = 'OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0'
         packageVersion = '1.0.0.0'
-        rendererPort = 41001
+        appAsarSha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         mainPort = 41002
+        rendererPort = 41001
+        mainProbe = 'Closed'
+        rendererProbe = 'BridgeValid'
     }
 }
 
@@ -157,6 +185,37 @@ try {
         }
     }
 
+    Invoke-CcodTest 'uses parsed Windows argv tokens and rejects malformed process metadata' {
+        $quotedChild = Get-CcodProcessSnapshot -ProcessId 100 -Adapters (New-CcodSnapshotAdapters `
+            -CommandLine '"C:\Codex\ChatGPT.exe" "--type=renderer"' `
+            -ParsedArguments @('C:\Codex\ChatGPT.exe', '--type=renderer') -ParentPid 100)
+        Assert-CcodEqual 'Unrelated' $quotedChild.Mode 'quoted child token is still a child after quote removal'
+        Assert-CcodEqual $false $quotedChild.IsTopLevel 'quoted child token is never top-level'
+
+        foreach ($case in @(
+            @{ Name='empty command line'; Adapters=(New-CcodSnapshotAdapters -CommandLine '') },
+            @{ Name='null command line'; Adapters=(New-CcodSnapshotAdapters -CommandLine $null) },
+            @{ Name='argv parse failure'; Adapters=(New-CcodSnapshotAdapters -CommandLine 'malformed' -ParsedArguments $null) },
+            @{ Name='CIM PID mismatch'; Adapters=(New-CcodSnapshotAdapters -CimProcessId 101) },
+            @{ Name='coercive CIM PID'; Adapters=(New-CcodSnapshotAdapters -CimProcessId '100') },
+            @{ Name='coercive parent PID'; Adapters=(New-CcodSnapshotAdapters -CimParentProcessId '0') },
+            @{ Name='native PID mismatch'; Adapters=(New-CcodSnapshotAdapters -NativeProcessId 101) },
+            @{ Name='argv zero mismatch'; Adapters=(New-CcodSnapshotAdapters -ParsedArguments @('C:\Other\ChatGPT.exe')) },
+            @{ Name='alternate inspector switch'; Adapters=(New-CcodSnapshotAdapters -CommandLine '"C:\Codex\ChatGPT.exe" --inspect-brk=127.0.0.1:41002' -ParsedArguments @('C:\Codex\ChatGPT.exe','--inspect-brk=127.0.0.1:41002')) },
+            @{ Name='bare remote debugging switch'; Adapters=(New-CcodSnapshotAdapters -CommandLine '"C:\Codex\ChatGPT.exe" --remote-debugging' -ParsedArguments @('C:\Codex\ChatGPT.exe','--remote-debugging')) },
+            @{ Name='single-dash debug prefix'; Adapters=(New-CcodSnapshotAdapters -CommandLine '"C:\Codex\ChatGPT.exe" -remote-debugging-port=41001' -ParsedArguments @('C:\Codex\ChatGPT.exe','-remote-debugging-port=41001')) },
+            @{ Name='slash inspect prefix'; Adapters=(New-CcodSnapshotAdapters -CommandLine '"C:\Codex\ChatGPT.exe" /inspect=127.0.0.1:41002' -ParsedArguments @('C:\Codex\ChatGPT.exe','/inspect=127.0.0.1:41002')) },
+            @{ Name='slash child prefix'; Adapters=(New-CcodSnapshotAdapters -CommandLine '"C:\Codex\ChatGPT.exe" /type=renderer' -ParsedArguments @('C:\Codex\ChatGPT.exe','/type=renderer')) }
+        )) {
+            $snapshot = Get-CcodProcessSnapshot -ProcessId 100 -Adapters $case.Adapters
+            if ($case.Name -in @('CIM PID mismatch','coercive CIM PID','coercive parent PID','native PID mismatch')) {
+                Assert-CcodEqual $null $snapshot "$($case.Name) rejects the snapshot"
+            } else {
+                Assert-CcodEqual 'Unrelated' $snapshot.Mode "$($case.Name) is never ordinary"
+            }
+        }
+    }
+
     Invoke-CcodTest 'classifies special mode only with exact ports status URL and live probe' {
         $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
         $status = New-CcodSpecialStatus
@@ -177,6 +236,52 @@ try {
         }
     }
 
+    Invoke-CcodTest 'requires exact whole debug tokens with no duplicate or conflicting switches' {
+        $status = New-CcodSpecialStatus
+        $validArguments = @(
+            'C:\Codex\ChatGPT.exe',
+            '--remote-debugging-address=127.0.0.1',
+            '--remote-debugging-port=41001',
+            '--inspect=127.0.0.1:41002'
+        )
+        $quotedCommand = '"C:\Codex\ChatGPT.exe" "--remote-debugging-address=127.0.0.1" "--remote-debugging-port=41001" "--inspect=127.0.0.1:41002"'
+        $quoted = Get-CcodProcessSnapshot -ProcessId 100 -StatusEvidence $status -Adapters (New-CcodSnapshotAdapters -CommandLine $quotedCommand -ParsedArguments $validArguments)
+        Assert-CcodEqual 'Special' $quoted.Mode 'quoted whole debug tokens retain their argv meaning'
+
+        foreach ($case in @(
+            @{ Name='duplicate address'; Args=$validArguments + '--remote-debugging-address=127.0.0.1' },
+            @{ Name='conflicting address'; Args=$validArguments + '--remote-debugging-address=0.0.0.0' },
+            @{ Name='duplicate renderer port'; Args=$validArguments + '--remote-debugging-port=41001' },
+            @{ Name='malformed renderer port'; Args=$validArguments + '--remote-debugging-port=abc' },
+            @{ Name='alternate inspector'; Args=$validArguments + '--inspect-brk=127.0.0.1:41002' }
+        )) {
+            $command = '"C:\Codex\ChatGPT.exe" ' + ($case.Args[1..($case.Args.Count - 1)] -join ' ')
+            $snapshot = Get-CcodProcessSnapshot -ProcessId 100 -StatusEvidence $status -Adapters (New-CcodSnapshotAdapters -CommandLine $command -ParsedArguments $case.Args)
+            Assert-CcodEqual 'Unrelated' $snapshot.Mode "$($case.Name) cannot prove special mode"
+        }
+    }
+
+    Invoke-CcodTest 'requires exact status and probe proof schemas and types' {
+        $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $base = New-CcodSpecialStatus
+        $coercivePid = $base.PSObject.Copy(); $coercivePid.pid = '100'
+        $coercivePort = $base.PSObject.Copy(); $coercivePort.rendererPort = '41001'
+        $extraStatus = $base.PSObject.Copy(); $extraStatus | Add-Member -NotePropertyName extra -NotePropertyValue 'unsafe'
+        $missingStatus = $base | Select-Object * -ExcludeProperty appAsarSha256
+        foreach ($statusCase in @($coercivePid, $coercivePort, $extraStatus, $missingStatus)) {
+            $snapshot = Get-CcodProcessSnapshot -ProcessId 100 -StatusEvidence $statusCase -Adapters (New-CcodSnapshotAdapters -CommandLine $command)
+            Assert-CcodEqual 'Unrelated' $snapshot.Mode 'coercive missing or extra status proof fails closed'
+        }
+
+        foreach ($probe in @(
+            [pscustomobject]@{ Valid='True'; RendererUrl='app://-/index.html' },
+            [pscustomobject]@{ Valid=$true; RendererUrl='app://-/index.html'; Extra='unsafe' }
+        )) {
+            $snapshot = Get-CcodProcessSnapshot -ProcessId 100 -StatusEvidence $base -Adapters (New-CcodSnapshotAdapters -CommandLine $command -ProbeResult $probe)
+            Assert-CcodEqual 'Unrelated' $snapshot.Mode 'probe proof shape and bool type are exact'
+        }
+    }
+
     Invoke-CcodTest 'rejects a snapshot when creation changes across CIM metadata' {
         $calls = [pscustomobject]@{ Package = 0; Native = 0; Cim = 0; Probe = 0 }
         $snapshot = Get-CcodProcessSnapshot -ProcessId 100 -Adapters (New-CcodSnapshotAdapters -SecondCreationTimeUtc '2026-08-02T00:00:02.0000000Z' -Counter $calls)
@@ -194,7 +299,7 @@ try {
             GetProcess = { param($ProcessId) $null }
             StopProcess = { $calls.Stop++; throw 'must not run' }.GetNewClosure()
         }
-        Assert-CcodEqual 'ExitedBeforeStop' $exited.Outcome 'natural exit cancels transition'
+        Assert-CcodEqual 'SourceExited' $exited.Outcome 'natural exit cancels transition'
         Assert-CcodEqual $false $exited.StoppedByController 'natural exit never authorizes launch'
 
         $reused = New-CcodSnapshot -CreationTimeUtc '2026-08-02T00:00:02.0000000Z'
@@ -227,8 +332,9 @@ try {
                 $receipt
             }.GetNewClosure()
         }
-        Assert-CcodEqual 'StoppedByController' $result.Outcome 'confirmed receipt authorizes the transition'
+        Assert-CcodEqual 'Stopped' $result.Outcome 'confirmed receipt authorizes the transition'
         Assert-CcodEqual $true $result.StoppedByController 'confirmation is explicit'
+        Assert-CcodEqual 'Outcome,StoppedByController,Snapshot' (($result.PSObject.Properties.Name) -join ',') 'public stop result shape is exact'
         Assert-CcodEqual 1 $calls.Stop 'stop boundary is called once'
         Assert-CcodEqual 100 $calls.ProcessId 'exact reread snapshot is passed to the stop boundary'
         Assert-CcodEqual 4321 $calls.Timeout 'timeout is passed without substitution'
@@ -238,7 +344,7 @@ try {
             GetProcess = { param($ProcessId) New-CcodSnapshot }
             StopProcess = { param($Snapshot, $TimeoutMilliseconds) $null }
         }
-        Assert-CcodEqual 'TimedOut' $unconfirmed.Outcome 'missing receipt cannot be promoted to success'
+        Assert-CcodEqual 'StopUnconfirmed' $unconfirmed.Outcome 'missing receipt cannot be promoted to success'
         Assert-CcodEqual $false $unconfirmed.StoppedByController 'unconfirmed stop never authorizes launch'
 
         $coercedReceipt = Stop-CcodProcessIfMatch -Expected $expected -Adapters @{
@@ -248,7 +354,7 @@ try {
                 [pscustomobject]@{ Outcome='StoppedByController'; StoppedByController=$true; Pid='100'; CreationTimeUtc='2026-08-02T00:00:00.0000000Z' }
             }
         }
-        Assert-CcodEqual 'TimedOut' $coercedReceipt.Outcome 'coercive receipt identity is never confirmation'
+        Assert-CcodEqual 'StopUnconfirmed' $coercedReceipt.Outcome 'coercive receipt identity is never confirmation'
 
         foreach ($badReceipt in @(
             [pscustomobject]@{ Outcome='StoppedByController'; StoppedByController='True'; Pid=100; CreationTimeUtc='2026-08-02T00:00:00.0000000Z' },
@@ -259,8 +365,14 @@ try {
                 GetProcess = { param($ProcessId) New-CcodSnapshot }
                 StopProcess = { param($Snapshot, $TimeoutMilliseconds) $unsafeReceipt }.GetNewClosure()
             }
-            Assert-CcodEqual 'TimedOut' $resultFromUnsafeReceipt.Outcome 'receipt confirmation fields are type exact'
+            Assert-CcodEqual 'StopUnconfirmed' $resultFromUnsafeReceipt.Outcome 'receipt confirmation fields are type exact'
         }
+
+        $exitedReceipt = Stop-CcodProcessIfMatch -Expected $expected -Adapters @{
+            GetProcess = { param($ProcessId, $StatusEvidence) New-CcodSnapshot }
+            StopProcess = { param($Snapshot, $TimeoutMilliseconds) [pscustomobject]@{ Outcome='ExitedBeforeStop'; StoppedByController=$false } }
+        }
+        Assert-CcodEqual 'SourceExited' $exitedReceipt.Outcome 'internal pre-stop exit maps to the public source-exited outcome'
     }
 
     Invoke-CcodTest 'distinguishes access denial and delayed exit' {
@@ -269,15 +381,31 @@ try {
             GetProcess = { param($ProcessId) New-CcodSnapshot }
             StopProcess = { param($Snapshot, $TimeoutMilliseconds) [pscustomobject]@{ Outcome = 'AccessDenied'; StoppedByController = $false } }
         }
-        Assert-CcodEqual 'AccessDenied' $denied.Outcome 'access failure remains distinct'
+        Assert-CcodEqual 'StopUnconfirmed' $denied.Outcome 'access failure maps to the public unconfirmed outcome'
         Assert-CcodEqual $false $denied.StoppedByController 'denial never authorizes launch'
 
         $delayed = Stop-CcodProcessIfMatch -Expected $expected -Adapters @{
             GetProcess = { param($ProcessId) New-CcodSnapshot }
             StopProcess = { param($Snapshot, $TimeoutMilliseconds) [pscustomobject]@{ Outcome = 'TimedOut'; StoppedByController = $false } }
         }
-        Assert-CcodEqual 'TimedOut' $delayed.Outcome 'still-running exact handle is a timeout'
+        Assert-CcodEqual 'StopUnconfirmed' $delayed.Outcome 'still-running exact handle is publicly unconfirmed'
         Assert-CcodEqual $false $delayed.StoppedByController 'delayed exit never authorizes launch'
+    }
+
+    Invoke-CcodTest 'passes explicit evidence when exactly rereading and stopping a validated Special root' {
+        $status = New-CcodSpecialStatus
+        $expected = New-CcodSnapshot -Mode Special -RendererPort 41001 -MainPort 41002 `
+            -CommandLine '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $observed = [pscustomobject]@{ Status = $null }
+        $result = Stop-CcodProcessIfMatch -Expected $expected -StatusEvidence $status -Adapters @{
+            GetProcess = { param($ProcessId, $StatusEvidence) $observed.Status = $StatusEvidence; $expected }.GetNewClosure()
+            StopProcess = {
+                param($Snapshot, $TimeoutMilliseconds)
+                [pscustomobject]@{ Outcome='StoppedByController'; StoppedByController=$true; Pid=100; CreationTimeUtc='2026-08-02T00:00:00.0000000Z' }
+            }
+        }
+        Assert-CcodEqual 'Stopped' $result.Outcome 'validated Special identity can be exactly reproduced and stopped'
+        Assert-CcodEqual $status $observed.Status 'Special status proof reaches the reread adapter'
     }
 
     Invoke-CcodTest 'collects only identity-verified descendants whose parent chain reaches the root' {
@@ -299,31 +427,110 @@ try {
         })
         Assert-CcodEqual 3 $tree.Count 'only root and two verified descendants remain'
         Assert-CcodEqual '100,101,102' (($tree.Pid | Sort-Object) -join ',') 'untrusted parent links never enter the tree'
-        Assert-CcodTrue ($reads.Count -ge 7) 'tree identities are read through the process adapter'
+        Assert-CcodTrue ($reads.Count -ge 10) 'included tree identities are reread before return'
+    }
+
+    Invoke-CcodTest 'rejects a child older than its exact current parent and drops mutated rereads' {
+        $root = New-CcodSnapshot
+        $reusedParent = New-CcodSnapshot -ProcessId 101 -CreationTimeUtc '2026-08-02T00:00:10.0000000Z' -ParentPid 100 -IsTopLevel $false -Mode Unrelated
+        $staleChild = New-CcodSnapshot -ProcessId 102 -CreationTimeUtc '2026-08-02T00:00:05.0000000Z' -ParentPid 101 -IsTopLevel $false -Mode Unrelated
+        $map = @{ 100=$root; 101=$reusedParent; 102=$staleChild }
+        $tree = @(Get-CcodVerifiedProcessTree -Root $root -Adapters @{
+            ListProcessIds = { @(100,101,102) }
+            GetProcess = { param($ProcessId, $StatusEvidence) $map[[int]$ProcessId] }.GetNewClosure()
+        })
+        Assert-CcodEqual '100,101' (($tree.Pid | Sort-Object) -join ',') 'child creation must not predate its exact parent creation'
+
+        $stableChild = New-CcodSnapshot -ProcessId 103 -CreationTimeUtc '2026-08-02T00:00:01.0000000Z' -ParentPid 100 -IsTopLevel $false -Mode Unrelated
+        $mutatedChild = New-CcodSnapshot -ProcessId 103 -CreationTimeUtc '2026-08-02T00:00:02.0000000Z' -ParentPid 100 -IsTopLevel $false -Mode Unrelated
+        $counts = @{ 100=0; 103=0 }
+        $mutationTree = @(Get-CcodVerifiedProcessTree -Root $root -Adapters @{
+            ListProcessIds = { @(100,103) }
+            GetProcess = {
+                param($ProcessId, $StatusEvidence)
+                $counts[[int]$ProcessId]++
+                if ([int]$ProcessId -eq 103 -and $counts[103] -gt 1) { return $mutatedChild }
+                if ([int]$ProcessId -eq 103) { return $stableChild }
+                $root
+            }.GetNewClosure()
+        })
+        Assert-CcodEqual '100' (($mutationTree.Pid | Sort-Object) -join ',') 'identity mutation on final reread removes the node'
+        Assert-CcodTrue ($counts[103] -ge 2) 'included child is actually reread'
+    }
+
+    Invoke-CcodTest 'passes status evidence while rereading a Special tree root' {
+        $status = New-CcodSpecialStatus
+        $root = New-CcodSnapshot -Mode Special -RendererPort 41001 -MainPort 41002 -CommandLine 'special'
+        $child = New-CcodSnapshot -ProcessId 101 -CreationTimeUtc '2026-08-02T00:00:01.0000000Z' -ParentPid 100 -IsTopLevel $false -Mode Unrelated
+        $seen = [pscustomobject]@{ RootEvidenceCount = 0 }
+        $tree = @(Get-CcodVerifiedProcessTree -Root $root -StatusEvidence $status -Adapters @{
+            ListProcessIds = { @(100,101) }
+            GetProcess = {
+                param($ProcessId, $StatusEvidence)
+                if ([int]$ProcessId -eq 100 -and $StatusEvidence -eq $status) { $seen.RootEvidenceCount++ }
+                if ([int]$ProcessId -eq 100) { return $root }
+                $child
+            }.GetNewClosure()
+        })
+        Assert-CcodEqual '100,101' (($tree.Pid | Sort-Object) -join ',') 'validated Special root retains its exact child tree'
+        Assert-CcodTrue ($seen.RootEvidenceCount -ge 2) 'Special root proof is supplied on initial and final rereads'
     }
 
     Invoke-CcodTest 'adopts exactly one special transaction candidate' {
-        $expected = New-CcodSnapshot -ProcessId 200 -CreationTimeUtc '2026-08-02T00:00:05.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002 -CommandLine 'special'
-        $wrongPorts = New-CcodSnapshot -ProcessId 201 -CreationTimeUtc '2026-08-02T00:00:05.0000000Z' -Mode Special -RendererPort 41003 -MainPort 41002 -CommandLine 'special'
-        $tooOld = New-CcodSnapshot -ProcessId 202 -CreationTimeUtc '2026-08-01T23:59:59.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002 -CommandLine 'special'
-        $otherSession = New-CcodSnapshot -ProcessId 203 -CreationTimeUtc '2026-08-02T00:00:05.0000000Z' -SessionId 2 -Mode Special -RendererPort 41001 -MainPort 41002 -CommandLine 'special'
-        $map = @{ 200 = $expected; 201 = $wrongPorts; 202 = $tooOld; 203 = $otherSession }
+        $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $validArgv = @('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002')
+        $expected = New-CcodSnapshot -ProcessId 200 -CreationTimeUtc '2026-08-02T00:00:05.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
+        $wrongPorts = New-CcodSnapshot -ProcessId 201 -CreationTimeUtc '2026-08-02T00:00:05.0000000Z' -Mode Unrelated -RendererPort 41003 -MainPort 41002 -CommandLine $command.Replace('41001','41003')
+        $tooOld = New-CcodSnapshot -ProcessId 202 -CreationTimeUtc '2026-08-01T23:59:59.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
+        $otherSession = New-CcodSnapshot -ProcessId 203 -CreationTimeUtc '2026-08-02T00:00:05.0000000Z' -SessionId 2 -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
+        $wrongArgv = New-CcodSnapshot -ProcessId 205 -CreationTimeUtc '2026-08-02T00:00:05.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine ($command + ' --remote-debugging-address=0.0.0.0')
+        $map = @{ 200 = $expected; 201 = $wrongPorts; 202 = $tooOld; 203 = $otherSession; 205 = $wrongArgv }
         $adapters = @{
             GetPackageIdentity = { [pscustomobject]@{ Found=$true; FullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0'; FamilyName='OpenAI.Codex_2p2nqsd0c76g0'; Version='1.0.0.0'; ExecutablePath='C:\Codex\ChatGPT.exe' } }
             GetCurrentSessionId = { 1 }
             GetCurrentUserSid = { 'S-1-5-21-test' }
-            ListProcessIds = { @(200, 201, 202, 203) }
+            ListProcessIds = { @(200, 201, 202, 203, 205) }
             GetProcess = { param($ProcessId, $StatusEvidence) $map[[int]$ProcessId] }.GetNewClosure()
+            ParseCommandLine = {
+                param($Value)
+                if ($Value -match '0\.0\.0\.0') { return $validArgv + '--remote-debugging-address=0.0.0.0' }
+                if ($Value -match '41003') { return @('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41003','--inspect=127.0.0.1:41002') }
+                $validArgv
+            }.GetNewClosure()
+            GetListeningPortOwnerPids = { param($Port, $Address) @(200) }
         }
         $candidate = Find-CcodTransactionProcess -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $adapters
-        Assert-CcodEqual 200 $candidate.Pid 'the sole exact candidate is adopted'
+        Assert-CcodEqual 200 $candidate.Pid 'the sole pre-status crash-window candidate is adopted with startup proof'
 
-        $second = New-CcodSnapshot -ProcessId 204 -CreationTimeUtc '2026-08-02T00:00:06.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002 -CommandLine 'special'
+        $second = New-CcodSnapshot -ProcessId 204 -CreationTimeUtc '2026-08-02T00:00:06.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
         $map[204] = $second
         $ambiguousAdapters = $adapters.Clone()
         $ambiguousAdapters.ListProcessIds = { @(200, 204) }
         $ambiguous = Find-CcodTransactionProcess -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $ambiguousAdapters
         Assert-CcodEqual $null $ambiguous 'multiple exact transaction candidates fail closed'
+
+        $invalidProofAdapters = $adapters.Clone()
+        $invalidProofAdapters.ListProcessIds = { @(200) }
+        $invalidProofAdapters.GetListeningPortOwnerPids = { param($Port, $Address) @(999) }
+        $invalid = Find-CcodTransactionProcess -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $invalidProofAdapters
+        Assert-CcodEqual $null $invalid 'invalid endpoint ownership proof cannot be adopted'
+
+        $ownerReuseState = [pscustomobject]@{ OwnerReads=0 }
+        $reusedOwner = New-CcodSnapshot -ProcessId 200 -CreationTimeUtc '2026-08-02T00:00:09.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
+        $ownerReuseAdapters = $adapters.Clone()
+        $ownerReuseAdapters.ListProcessIds = { @(200) }
+        $ownerReuseAdapters.GetListeningPortOwnerPids = {
+            param($Port, $Address)
+            $ownerReuseState.OwnerReads++
+            @(200)
+        }.GetNewClosure()
+        $ownerReuseAdapters.GetProcess = {
+            param($ProcessId, $StatusEvidence)
+            if ($ownerReuseState.OwnerReads -ge 4) { return $reusedOwner }
+            $expected
+        }.GetNewClosure()
+        $reused = Find-CcodTransactionProcess -RendererPort 41001 -MainPort 41002 -TransactionTimeUtc '2026-08-02T00:00:00.0000000Z' -Adapters $ownerReuseAdapters
+        Assert-CcodEqual $null $reused 'owner PID reuse after the final listener mapping prevents confirmation'
     }
 
     Invoke-CcodTest 'reserves a nonexcluded IPv4 loopback port' {
@@ -340,6 +547,35 @@ try {
         }
         Assert-CcodEqual 41002 $port 'excluded reservation is retried'
         Assert-CcodEqual '127.0.0.1' $state.Address 'reservation binds exact IPv4 loopback'
+    }
+
+    Invoke-CcodTest 'native argv adapter follows Windows quote removal semantics' {
+        $module = Get-Module ProcessControl
+        $arguments = @(& $module {
+            $adapter = Get-CcodProcessAdapters
+            & $adapter.ParseCommandLine '"C:\Program Files\Codex\ChatGPT.exe" "--type=renderer"'
+        })
+        Assert-CcodEqual 2 $arguments.Count 'native parser returns two whole argv tokens'
+        Assert-CcodEqual 'C:\Program Files\Codex\ChatGPT.exe' $arguments[0] 'quoted executable is one token'
+        Assert-CcodEqual '--type=renderer' $arguments[1] 'quoted child flag is returned without quote characters'
+    }
+
+    Invoke-CcodTest 'native TCP table adapter observes a safe local listener owner' {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        try {
+            $listener.Start()
+            $port = [int]$listener.LocalEndpoint.Port
+            $expectedOwner = [int]$PID
+            $module = Get-Module ProcessControl
+            $owners = @(& $module {
+                param($FixturePort)
+                $adapter = Get-CcodProcessAdapters
+                & $adapter.GetListeningPortOwnerPids $FixturePort '127.0.0.1'
+            } $port)
+            Assert-CcodTrue ($owners -contains $expectedOwner) 'AF_INET listener table reports this fixture process PID'
+        } finally {
+            $listener.Stop()
+        }
     }
 
     Invoke-CcodTest 'accepts port closure only after explicit connection refusal' {
@@ -386,16 +622,26 @@ try {
 
     Invoke-CcodTest 'rechecks special ports and launches Codex visibly' {
         $calls = [pscustomobject]@{ Start = 0; Availability = @(); Path = $null; Arguments = @(); WindowStyle = 'unset' }
+        $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $candidate = New-CcodSnapshot -ProcessId 400 -CreationTimeUtc '2026-08-02T00:00:01.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
         $common = @{
             GetPackageIdentity = { [pscustomobject]@{ Found=$true; FullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0'; FamilyName='OpenAI.Codex_2p2nqsd0c76g0'; Version='1.0.0.0'; ExecutablePath='C:\Codex\ChatGPT.exe' } }
             TestLoopbackPortAvailable = { param($Port, $Address) $calls.Availability += "$Address`:$Port"; $true }.GetNewClosure()
+            GetUtcNow = { [DateTimeOffset]::Parse('2026-08-02T00:00:00.0000000Z') }
+            Delay = { param($Milliseconds) throw 'immediate evidence must not delay' }
+            ListProcessIds = { @(400) }
+            GetProcess = { param($ProcessId, $StatusEvidence) $candidate }.GetNewClosure()
+            ParseCommandLine = { param($Value) @('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002') }
+            GetCurrentSessionId = { 1 }
+            GetCurrentUserSid = { 'S-1-5-21-test' }
+            GetListeningPortOwnerPids = { param($Port, $Address) @(400) }
             StartProcess = {
                 param($FilePath, $Arguments, $WindowStyle)
                 $calls.Start++
                 $calls.Path = $FilePath
                 $calls.Arguments = @($Arguments)
                 $calls.WindowStyle = $WindowStyle
-                [pscustomobject]@{ Pid = 400 }
+                [pscustomobject]@{ Id = 400 }
             }.GetNewClosure()
         }
         $started = Start-CcodProcess -Mode Special -RendererPort 41001 -MainPort 41002 -Adapters $common
@@ -426,12 +672,66 @@ try {
     }
 
     Invoke-CcodTest 'treats a post-recheck binding race as a failed special launch' {
-        $result = Start-CcodProcess -Mode Special -RendererPort 41001 -MainPort 41002 -Adapters @{
+        $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $candidate = New-CcodSnapshot -ProcessId 400 -CreationTimeUtc '2026-08-02T00:00:01.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine $command
+        $base = @{
             GetPackageIdentity = { [pscustomobject]@{ Found=$true; FullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0'; FamilyName='OpenAI.Codex_2p2nqsd0c76g0'; Version='1.0.0.0'; ExecutablePath='C:\Codex\ChatGPT.exe' } }
             TestLoopbackPortAvailable = { param($Port, $Address) $true }
-            StartProcess = { param($FilePath, $Arguments, $WindowStyle) throw [Net.Sockets.SocketException]::new(10048) }
+            StartProcess = { param($FilePath, $Arguments, $WindowStyle) [pscustomobject]@{ Id=400 } }
+            ListProcessIds = { @(400) }
+            GetProcess = { param($ProcessId, $StatusEvidence) $candidate }.GetNewClosure()
+            ParseCommandLine = { param($Value) @('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002') }
+            GetCurrentSessionId = { 1 }
+            GetCurrentUserSid = { 'S-1-5-21-test' }
+            GetUtcNow = { [DateTimeOffset]::Parse('2026-08-02T00:00:00.0000000Z') }
+            Delay = { param($Milliseconds) throw 'external owner is an immediate conflict' }
+            GetListeningPortOwnerPids = { param($Port, $Address) @(999) }
         }
-        Assert-CcodEqual 'PortUnavailable' $result.Outcome 'address-in-use after recheck fails closed'
+        $result = Start-CcodProcess -Mode Special -RendererPort 41001 -MainPort 41002 -Adapters $base
+        Assert-CcodEqual 'PortUnavailable' $result.Outcome 'tree-external listener ownership proves a post-recheck bind race'
+
+        $missingCandidateClock = [pscustomobject]@{ Tick=0 }
+        $foreignOwner = New-CcodSnapshot -ProcessId 999 -CreationTimeUtc '2026-08-02T00:00:01.0000000Z' -Path 'C:\Other\foreign.exe' -PackageFamilyName 'Other.Family' -Mode Unrelated -CommandLine '"C:\Other\foreign.exe"'
+        $missingCandidateAdapters = $base.Clone()
+        $missingCandidateAdapters.ListProcessIds = { @() }
+        $missingCandidateAdapters.GetProcess = { param($ProcessId, $StatusEvidence) if ([int]$ProcessId -eq 999) { $foreignOwner } else { $candidate } }.GetNewClosure()
+        $missingCandidateAdapters.GetUtcNow = {
+            $value = [DateTimeOffset]::Parse('2026-08-02T00:00:00.0000000Z').AddMilliseconds($missingCandidateClock.Tick * 10)
+            $missingCandidateClock.Tick++
+            $value
+        }.GetNewClosure()
+        $missingCandidate = Start-CcodProcess -Mode Special -RendererPort 41001 -MainPort 41002 -StartupTimeoutMilliseconds 1 -Adapters $missingCandidateAdapters
+        Assert-CcodEqual 'PortUnavailable' $missingCandidate.Outcome 'occupied endpoints conflict even when the launched candidate never materializes'
+
+        $lag = [pscustomobject]@{ Lists=0; Tick=0; Delays=0 }
+        $laggedAdapters = $base.Clone()
+        $laggedAdapters.ListProcessIds = {
+            $lag.Lists++
+            if ($lag.Lists -eq 1) { return @() }
+            @(400)
+        }.GetNewClosure()
+        $laggedAdapters.GetListeningPortOwnerPids = { param($Port, $Address) @(400) }
+        $laggedAdapters.GetUtcNow = {
+            $value = [DateTimeOffset]::Parse('2026-08-02T00:00:00.0000000Z').AddMilliseconds($lag.Tick)
+            $lag.Tick++
+            $value
+        }.GetNewClosure()
+        $laggedAdapters.Delay = { param($Milliseconds) $lag.Delays++ }.GetNewClosure()
+        $lagged = Start-CcodProcess -Mode Special -RendererPort 41001 -MainPort 41002 -StartupTimeoutMilliseconds 100 -StartupPollMilliseconds 1 -Adapters $laggedAdapters
+        Assert-CcodEqual 'Started' $lagged.Outcome 'same-package owner may become a canonical candidate on the next poll'
+        Assert-CcodTrue ($lag.Delays -ge 1) 'enumeration lag is condition-polled'
+
+        $clock = [pscustomobject]@{ Tick=0; Delays=0 }
+        $unconfirmedAdapters = $base.Clone()
+        $unconfirmedAdapters.GetListeningPortOwnerPids = { param($Port, $Address) @() }
+        $unconfirmedAdapters.GetUtcNow = {
+            $value = [DateTimeOffset]::Parse('2026-08-02T00:00:00.0000000Z').AddMilliseconds($clock.Tick * 10)
+            $clock.Tick++
+            $value
+        }.GetNewClosure()
+        $unconfirmedAdapters.Delay = { param($Milliseconds) $clock.Delays++ }.GetNewClosure()
+        $unconfirmed = Start-CcodProcess -Mode Special -RendererPort 41001 -MainPort 41002 -StartupTimeoutMilliseconds 10 -StartupPollMilliseconds 5 -Adapters $unconfirmedAdapters
+        Assert-CcodEqual 'StartUnconfirmed' $unconfirmed.Outcome 'deadline without endpoint ownership is not reported as Started'
     }
 } catch {
     Write-Error $_

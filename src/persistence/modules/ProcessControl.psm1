@@ -21,7 +21,9 @@ function Initialize-CcodProcessNativeApi {
 
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
@@ -131,6 +133,78 @@ namespace Ccod.Persistence.Native {
         public string CreationTimeUtc { get; set; }
     }
 
+    public static class CommandLineV1 {
+        [DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr CommandLineToArgvW(string commandLine, out int argumentCount);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        public static string[] Parse(string commandLine) {
+            if (String.IsNullOrWhiteSpace(commandLine)) return null;
+            int count;
+            IntPtr arguments = CommandLineToArgvW(commandLine, out count);
+            if (arguments == IntPtr.Zero || count < 1) return null;
+            try {
+                string[] result = new string[count];
+                for (int index = 0; index < count; index++) {
+                    IntPtr value = Marshal.ReadIntPtr(arguments, index * IntPtr.Size);
+                    result[index] = Marshal.PtrToStringUni(value);
+                }
+                return result;
+            } finally { LocalFree(arguments); }
+        }
+    }
+
+    public static class TcpListenerTableV1 {
+        private const int AF_INET = 2;
+        private const int TCP_TABLE_OWNER_PID_LISTENER = 3;
+        private const int ERROR_INSUFFICIENT_BUFFER = 122;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MIB_TCPROW_OWNER_PID {
+            public uint State;
+            public uint LocalAddress;
+            public uint LocalPort;
+            public uint RemoteAddress;
+            public uint RemotePort;
+            public uint OwningPid;
+        }
+
+        [DllImport("iphlpapi.dll", SetLastError = true)]
+        private static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool sort, int addressFamily, int tableClass, uint reserved);
+
+        public static int[] GetListenerOwners(string address, int port) {
+            IPAddress parsedAddress;
+            if (!IPAddress.TryParse(address, out parsedAddress) || parsedAddress.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) {
+                throw new ArgumentException("An IPv4 address is required.");
+            }
+            int size = 0;
+            uint result = GetExtendedTcpTable(IntPtr.Zero, ref size, true, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+            if (result != ERROR_INSUFFICIENT_BUFFER) throw new Win32Exception((int)result);
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try {
+                result = GetExtendedTcpTable(buffer, ref size, true, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+                if (result != 0) throw new Win32Exception((int)result);
+                uint requestedAddress = BitConverter.ToUInt32(parsedAddress.GetAddressBytes(), 0);
+                int count = Marshal.ReadInt32(buffer);
+                int rowSize = Marshal.SizeOf(typeof(MIB_TCPROW_OWNER_PID));
+                IntPtr rowPointer = IntPtr.Add(buffer, sizeof(uint));
+                HashSet<int> owners = new HashSet<int>();
+                for (int index = 0; index < count; index++) {
+                    MIB_TCPROW_OWNER_PID row = (MIB_TCPROW_OWNER_PID)Marshal.PtrToStructure(rowPointer, typeof(MIB_TCPROW_OWNER_PID));
+                    int localPort = (int)(((row.LocalPort & 0xFF) << 8) | ((row.LocalPort & 0xFF00) >> 8));
+                    if (row.LocalAddress == requestedAddress && localPort == port) owners.Add((int)row.OwningPid);
+                    rowPointer = IntPtr.Add(rowPointer, rowSize);
+                }
+                int[] values = new int[owners.Count];
+                owners.CopyTo(values);
+                Array.Sort(values);
+                return values;
+            } finally { Marshal.FreeHGlobal(buffer); }
+        }
+    }
+
     public static class ProcessStopV1 {
         private const uint PROCESS_TERMINATE = 0x0001;
         private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
@@ -226,6 +300,16 @@ function Get-CcodProcessAdapters {
             param($ProcessId)
             Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $([int]$ProcessId)" -ErrorAction Stop
         }
+        ParseCommandLine = {
+            param($CommandLine)
+            Initialize-CcodProcessNativeApi
+            [Ccod.Persistence.Native.CommandLineV1]::Parse([string]$CommandLine)
+        }
+        GetListeningPortOwnerPids = {
+            param($Port, $Address)
+            Initialize-CcodProcessNativeApi
+            @([Ccod.Persistence.Native.TcpListenerTableV1]::GetListenerOwners([string]$Address, [int]$Port))
+        }
         ProbeSpecial = { param($ProcessId, $RendererPort, $MainPort) [pscustomobject]@{ Valid = $false; RendererUrl = $null } }
         GetProcess = { param($ProcessId, $StatusEvidence) Get-CcodProcessSnapshot -ProcessId $ProcessId -StatusEvidence $StatusEvidence }
         ListProcessIds = { @((Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue).Id) }
@@ -303,14 +387,144 @@ function Get-CcodStatusEvidence {
     return $StatusEvidence
 }
 
-function Get-CcodCommandPort {
-    param([string]$CommandLine, [string]$Pattern)
+function Test-CcodExactProperties {
+    param(
+        $Value,
+        [Parameter(Mandatory)][string[]]$Names
+    )
 
-    $matches = [regex]::Matches($CommandLine, $Pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
-    if ($matches.Count -ne 1) { return $null }
-    $port = 0
-    if (-not [int]::TryParse($matches[0].Groups['port'].Value, [ref]$port) -or $port -lt 1 -or $port -gt 65535) { return $null }
-    return $port
+    if ($null -eq $Value) { return $false }
+    $actual = @($Value.PSObject.Properties.Name)
+    if ($actual.Count -ne $Names.Count) { return $false }
+    foreach ($name in $Names) {
+        if ($actual -cnotcontains $name) { return $false }
+    }
+    return $true
+}
+
+function Test-CcodSpecialStatusProof {
+    param(
+        $Status,
+        $Package,
+        $SnapshotIdentity,
+        [int]$RendererPort,
+        [int]$MainPort
+    )
+
+    $names = @('pid','creationTimeUtc','packageFullName','packageVersion','appAsarSha256','mainPort','rendererPort','mainProbe','rendererProbe')
+    if (-not (Test-CcodExactProperties -Value $Status -Names $names)) { return $false }
+    if ($Status.pid -isnot [int] -or $Status.mainPort -isnot [int] -or $Status.rendererPort -isnot [int]) { return $false }
+    foreach ($name in @('creationTimeUtc','packageFullName','packageVersion','appAsarSha256','mainProbe','rendererProbe')) {
+        if ($Status.$name -isnot [string]) { return $false }
+    }
+    return [object]::Equals($Status.pid, [int]$SnapshotIdentity.Pid) -and
+        $Status.creationTimeUtc -ceq $SnapshotIdentity.CreationTimeUtc -and
+        $Status.packageFullName -ceq $Package.FullName -and
+        $Status.packageVersion -ceq $Package.Version -and
+        $Status.appAsarSha256 -cmatch '^[0-9a-f]{64}$' -and
+        [object]::Equals($Status.rendererPort, $RendererPort) -and
+        [object]::Equals($Status.mainPort, $MainPort) -and
+        $Status.mainProbe -ceq 'Closed' -and
+        $Status.rendererProbe -ceq 'BridgeValid'
+}
+
+function Test-CcodSpecialProbeProof {
+    param($Probe)
+
+    if (-not (Test-CcodExactProperties -Value $Probe -Names @('Valid','RendererUrl'))) { return $false }
+    return $Probe.Valid -is [bool] -and $Probe.Valid -eq $true -and
+        $Probe.RendererUrl -is [string] -and $Probe.RendererUrl -ceq 'app://-/index.html'
+}
+
+function Get-CcodParsedLaunchArguments {
+    param(
+        [AllowNull()]$CommandLine,
+        [Parameter(Mandatory)][string]$ExecutablePath,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    $invalid = [pscustomobject]@{
+        Valid = $false
+        IsTopLevel = $false
+        HasDebugSwitch = $false
+        SpecialArgumentsValid = $false
+        RendererPort = $null
+        MainPort = $null
+    }
+    if ($CommandLine -isnot [string] -or [string]::IsNullOrWhiteSpace($CommandLine)) { return $invalid }
+    try { $arguments = @(& $Adapters.ParseCommandLine $CommandLine) } catch { return $invalid }
+    if ($arguments.Count -lt 1 -or $arguments[0] -isnot [string] -or
+        -not (Test-CcodOrdinalIgnoreCase $arguments[0] $ExecutablePath)) { return $invalid }
+    foreach ($argument in $arguments) {
+        if ($argument -isnot [string] -or $null -eq $argument) { return $invalid }
+    }
+
+    $hasType = $false
+    $debugCount = 0
+    $addressCount = 0
+    $rendererCount = 0
+    $mainCount = 0
+    $rendererPort = $null
+    $mainPort = $null
+    $unrecognizedDebug = $false
+    foreach ($argument in @($arguments | Select-Object -Skip 1)) {
+        if ($argument -imatch '^(?:--|-|/)type(?:=|$)') { $hasType = $true }
+        $isDebug = $argument -imatch '^(?:--|-|/)(?:remote-debugging|inspect)'
+        if (-not $isDebug) { continue }
+        $debugCount++
+        if ($argument -ceq '--remote-debugging-address=127.0.0.1') {
+            $addressCount++
+            continue
+        }
+        if ($argument -cmatch '^--remote-debugging-port=(?<port>[0-9]{1,5})$') {
+            $parsedPort = 0
+            if ([int]::TryParse($Matches.port, [ref]$parsedPort) -and $parsedPort -ge 1 -and $parsedPort -le 65535) {
+                $rendererCount++
+                $rendererPort = $parsedPort
+                continue
+            }
+        }
+        if ($argument -cmatch '^--inspect=127\.0\.0\.1:(?<port>[0-9]{1,5})$') {
+            $parsedPort = 0
+            if ([int]::TryParse($Matches.port, [ref]$parsedPort) -and $parsedPort -ge 1 -and $parsedPort -le 65535) {
+                $mainCount++
+                $mainPort = $parsedPort
+                continue
+            }
+        }
+        $unrecognizedDebug = $true
+    }
+
+    $specialValid = -not $hasType -and -not $unrecognizedDebug -and $debugCount -eq 3 -and
+        $addressCount -eq 1 -and $rendererCount -eq 1 -and $mainCount -eq 1 -and
+        $rendererPort -ne $mainPort
+    return [pscustomobject]@{
+        Valid = $true
+        IsTopLevel = -not $hasType
+        HasDebugSwitch = $debugCount -gt 0
+        SpecialArgumentsValid = $specialValid
+        RendererPort = if ($null -eq $rendererPort) { $null } else { [int]$rendererPort }
+        MainPort = if ($null -eq $mainPort) { $null } else { [int]$mainPort }
+    }
+}
+
+function ConvertTo-CcodProcessIdValue {
+    param(
+        [AllowNull()]$Value,
+        [int]$Minimum = 1
+    )
+
+    $allowedTypes = @(
+        [byte], [sbyte], [int16], [uint16], [int], [uint32], [long], [uint64]
+    )
+    if ($null -eq $Value -or $allowedTypes -notcontains $Value.GetType()) {
+        return [pscustomobject]@{ Valid=$false; Value=$null }
+    }
+    try { $numeric = [decimal]$Value } catch { return [pscustomobject]@{ Valid=$false; Value=$null } }
+    if ($numeric -lt $Minimum -or $numeric -gt [int]::MaxValue) {
+        return [pscustomobject]@{ Valid=$false; Value=$null }
+    }
+    return [pscustomobject]@{ Valid=$true; Value=[int]$numeric }
 }
 
 function Get-CcodProcessSnapshot {
@@ -329,15 +543,24 @@ function Get-CcodProcessSnapshot {
     }
 
     $before = & $adapter.GetNativeProcess $ProcessId
-    if ($null -eq $before) { return $null }
+    if ($null -eq $before -or $before.Pid -isnot [int] -or -not [object]::Equals($before.Pid, [int]$ProcessId)) { return $null }
     $cim = & $adapter.GetCimProcess $ProcessId
-    if ($null -eq $cim) { return $null }
+    if ($null -eq $cim -or $null -eq $cim.PSObject.Properties['ProcessId']) { return $null }
+    $cimProcessId = ConvertTo-CcodProcessIdValue -Value $cim.ProcessId
+    if (-not $cimProcessId.Valid -or -not [object]::Equals($cimProcessId.Value, [int]$ProcessId)) { return $null }
+    $parentProcessId = $null
+    if ($null -ne $cim.PSObject.Properties['ParentProcessId'] -and $null -ne $cim.ParentProcessId) {
+        $convertedParent = ConvertTo-CcodProcessIdValue -Value $cim.ParentProcessId -Minimum 0
+        if (-not $convertedParent.Valid) { return $null }
+        $parentProcessId = $convertedParent.Value
+    }
     $after = & $adapter.GetNativeProcess $ProcessId
-    if ($null -eq $after -or $before.Pid -ne $after.Pid -or $before.CreationTimeUtc -cne $after.CreationTimeUtc) { return $null }
+    if ($null -eq $after -or $after.Pid -isnot [int] -or -not [object]::Equals($after.Pid, [int]$ProcessId) -or
+        -not [object]::Equals($before.CreationTimeUtc, $after.CreationTimeUtc)) { return $null }
 
-    $commandLine = [string]$cim.CommandLine
-    $hasTypeArgument = $commandLine -match '(?:^|\s)--type(?:=|\s|$)'
-    $isTopLevel = -not $hasTypeArgument
+    $commandLine = if ($null -eq $cim.PSObject.Properties['CommandLine']) { $null } else { $cim.CommandLine }
+    $launchArguments = Get-CcodParsedLaunchArguments -CommandLine $commandLine -ExecutablePath $package.ExecutablePath -Adapters $adapter
+    $isTopLevel = $launchArguments.Valid -and $launchArguments.IsTopLevel
     $currentSessionId = & $adapter.GetCurrentSessionId
     $currentUserSid = & $adapter.GetCurrentUserSid
     $eligibleRoot = $isTopLevel -and
@@ -347,33 +570,16 @@ function Get-CcodProcessSnapshot {
         (Test-CcodOrdinalIgnoreCase $before.Path $package.ExecutablePath) -and
         $before.PackageFamilyName -ceq $package.FamilyName
 
-    $rendererPort = Get-CcodCommandPort -CommandLine $commandLine -Pattern '(?:^|\s)--remote-debugging-port=(?<port>\d{1,5})(?=\s|$)'
-    $mainPort = Get-CcodCommandPort -CommandLine $commandLine -Pattern '(?:^|\s)--inspect=127\.0\.0\.1:(?<port>\d{1,5})(?=\s|$)'
-    $hasLoopbackAddress = [regex]::Matches($commandLine, '(?:^|\s)--remote-debugging-address=127\.0\.0\.1(?=\s|$)').Count -eq 1
-    $hasAnyDebugArgument = $commandLine -match '(?:^|\s)--(?:remote-debugging-address|remote-debugging-port|inspect)(?:=|\s|$)'
+    $rendererPort = $launchArguments.RendererPort
+    $mainPort = $launchArguments.MainPort
     $mode = 'Unrelated'
-    if ($eligibleRoot -and -not $hasAnyDebugArgument) {
+    if ($eligibleRoot -and -not $launchArguments.HasDebugSwitch) {
         $mode = 'Ordinary'
-    } elseif ($eligibleRoot -and $hasLoopbackAddress -and $null -ne $rendererPort -and $null -ne $mainPort -and $rendererPort -ne $mainPort) {
+    } elseif ($eligibleRoot -and $launchArguments.SpecialArgumentsValid) {
         $status = Get-CcodStatusEvidence -StatusEvidence $StatusEvidence
-        if ($null -ne $status) {
-            $requiredStatus = @('pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'rendererPort', 'mainPort')
-            $statusComplete = $true
-            foreach ($name in $requiredStatus) {
-                if ($null -eq $status.PSObject.Properties[$name]) { $statusComplete = $false; break }
-            }
-            if ($statusComplete -and
-                $status.pid -eq $ProcessId -and
-                $status.creationTimeUtc -ceq $before.CreationTimeUtc -and
-                $status.packageFullName -ceq $package.FullName -and
-                $status.packageVersion -ceq $package.Version -and
-                $status.rendererPort -eq $rendererPort -and
-                $status.mainPort -eq $mainPort) {
-                $probe = & $adapter.ProbeSpecial $ProcessId $rendererPort $mainPort
-                if ($null -ne $probe -and $probe.Valid -eq $true -and $probe.RendererUrl -ceq 'app://-/index.html') {
-                    $mode = 'Special'
-                }
-            }
+        if (Test-CcodSpecialStatusProof -Status $status -Package $package -SnapshotIdentity $before -RendererPort $rendererPort -MainPort $mainPort) {
+            $probe = & $adapter.ProbeSpecial $ProcessId $rendererPort $mainPort
+            if (Test-CcodSpecialProbeProof -Probe $probe) { $mode = 'Special' }
         }
     }
 
@@ -385,7 +591,7 @@ function Get-CcodProcessSnapshot {
         Path = [string]$before.Path
         PackageFamilyName = [string]$before.PackageFamilyName
         CommandLine = $commandLine
-        ParentPid = if ($null -eq $cim.ParentProcessId) { $null } else { [int]$cim.ParentProcessId }
+        ParentPid = $parentProcessId
         IsTopLevel = [bool]$isTopLevel
         Mode = $mode
         RendererPort = if ($null -eq $rendererPort) { $null } else { [int]$rendererPort }
@@ -411,13 +617,13 @@ function Test-CcodProcessMatch {
 
 function New-CcodStopResult {
     param(
-        [Parameter(Mandatory)][ValidateSet('StoppedByController', 'ExitedBeforeStop', 'IdentityChanged', 'AccessDenied', 'TimedOut')][string]$Outcome,
+        [Parameter(Mandatory)][ValidateSet('Stopped', 'SourceExited', 'IdentityChanged', 'StopUnconfirmed')][string]$Outcome,
         $Snapshot
     )
 
     return [pscustomobject][ordered]@{
         Outcome = $Outcome
-        StoppedByController = $Outcome -ceq 'StoppedByController'
+        StoppedByController = $Outcome -ceq 'Stopped'
         Snapshot = $Snapshot
     }
 }
@@ -426,13 +632,14 @@ function Stop-CcodProcessIfMatch {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Expected,
+        $StatusEvidence,
         [ValidateRange(1, 60000)][int]$TimeoutMilliseconds = 5000,
         [hashtable]$Adapters
     )
 
     $adapter = Get-CcodProcessAdapters -Adapters $Adapters
-    $actual = & $adapter.GetProcess ([int]$Expected.Pid)
-    if ($null -eq $actual) { return New-CcodStopResult -Outcome 'ExitedBeforeStop' -Snapshot $null }
+    $actual = & $adapter.GetProcess ([int]$Expected.Pid) $StatusEvidence
+    if ($null -eq $actual) { return New-CcodStopResult -Outcome 'SourceExited' -Snapshot $null }
     if (-not (Test-CcodProcessMatch -Expected $Expected -Actual $actual)) {
         return New-CcodStopResult -Outcome 'IdentityChanged' -Snapshot $actual
     }
@@ -440,29 +647,28 @@ function Stop-CcodProcessIfMatch {
     try {
         $receipt = & $adapter.StopProcess $actual $TimeoutMilliseconds
     } catch [UnauthorizedAccessException] {
-        return New-CcodStopResult -Outcome 'AccessDenied' -Snapshot $actual
+        return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual
     } catch [ComponentModel.Win32Exception] {
-        if ($_.Exception.NativeErrorCode -eq 5) { return New-CcodStopResult -Outcome 'AccessDenied' -Snapshot $actual }
-        return New-CcodStopResult -Outcome 'TimedOut' -Snapshot $actual
+        return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual
     }
 
     if ($null -eq $receipt -or $null -eq $receipt.PSObject.Properties['Outcome']) {
-        return New-CcodStopResult -Outcome 'TimedOut' -Snapshot $actual
+        return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual
     }
     switch -CaseSensitive ([string]$receipt.Outcome) {
         'StoppedByController' {
             if ($null -ne $receipt.PSObject.Properties['StoppedByController'] -and [object]::Equals($receipt.StoppedByController, $true) -and
                 $null -ne $receipt.PSObject.Properties['Pid'] -and [object]::Equals($receipt.Pid, $actual.Pid) -and
                 $null -ne $receipt.PSObject.Properties['CreationTimeUtc'] -and [object]::Equals($receipt.CreationTimeUtc, $actual.CreationTimeUtc)) {
-                return New-CcodStopResult -Outcome 'StoppedByController' -Snapshot $actual
+                return New-CcodStopResult -Outcome 'Stopped' -Snapshot $actual
             }
-            return New-CcodStopResult -Outcome 'TimedOut' -Snapshot $actual
+            return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual
         }
-        'ExitedBeforeStop' { return New-CcodStopResult -Outcome 'ExitedBeforeStop' -Snapshot $actual }
+        'ExitedBeforeStop' { return New-CcodStopResult -Outcome 'SourceExited' -Snapshot $actual }
         'IdentityChanged' { return New-CcodStopResult -Outcome 'IdentityChanged' -Snapshot $actual }
-        'AccessDenied' { return New-CcodStopResult -Outcome 'AccessDenied' -Snapshot $actual }
-        'TimedOut' { return New-CcodStopResult -Outcome 'TimedOut' -Snapshot $actual }
-        default { return New-CcodStopResult -Outcome 'TimedOut' -Snapshot $actual }
+        'AccessDenied' { return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual }
+        'TimedOut' { return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual }
+        default { return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual }
     }
 }
 
@@ -486,15 +692,43 @@ function Test-CcodSameProcessOwnerAndPackage {
         $Candidate.PackageFamilyName -ceq $Root.PackageFamilyName
 }
 
+function Get-CcodReachableProcessIds {
+    param(
+        [Parameter(Mandatory)]$Root,
+        [Parameter(Mandatory)][hashtable]$SnapshotsByPid
+    )
+
+    $included = @([int]$Root.Pid)
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($entry in $SnapshotsByPid.GetEnumerator()) {
+            $processId = [int]$entry.Key
+            if ($included -contains $processId) { continue }
+            $candidate = $entry.Value
+            if ($null -eq $candidate.ParentPid -or $included -notcontains [int]$candidate.ParentPid) { continue }
+            $parent = $SnapshotsByPid[[int]$candidate.ParentPid]
+            if ($null -eq $parent) { continue }
+            $childTime = ConvertTo-CcodDateTimeOffset -Value $candidate.CreationTimeUtc
+            $parentTime = ConvertTo-CcodDateTimeOffset -Value $parent.CreationTimeUtc
+            if ($null -eq $childTime -or $null -eq $parentTime -or $childTime -lt $parentTime) { continue }
+            $included += $processId
+            $changed = $true
+        }
+    }
+    return @($included)
+}
+
 function Get-CcodVerifiedProcessTree {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Root,
+        $StatusEvidence,
         [hashtable]$Adapters
     )
 
     $adapter = Get-CcodProcessAdapters -Adapters $Adapters
-    $actualRoot = & $adapter.GetProcess ([int]$Root.Pid) $null
+    $actualRoot = & $adapter.GetProcess ([int]$Root.Pid) $StatusEvidence
     if ($null -eq $actualRoot -or -not (Test-CcodProcessMatch -Expected $Root -Actual $actualRoot)) { return @() }
     $rootTime = ConvertTo-CcodDateTimeOffset -Value $actualRoot.CreationTimeUtc
     if ($null -eq $rootTime) { return @() }
@@ -510,23 +744,155 @@ function Get-CcodVerifiedProcessTree {
         $verifiedByPid[[int]$candidate.Pid] = $candidate
     }
 
-    $included = @([int]$actualRoot.Pid)
-    $changed = $true
-    while ($changed) {
-        $changed = $false
-        foreach ($entry in $verifiedByPid.GetEnumerator()) {
-            $pidValue = [int]$entry.Key
-            if ($included -contains $pidValue) { continue }
-            $parentProperty = $entry.Value.PSObject.Properties['ParentPid']
-            if ($null -eq $parentProperty -or $null -eq $parentProperty.Value) { continue }
-            if ($included -contains [int]$parentProperty.Value) {
-                $included += $pidValue
-                $changed = $true
-            }
+    $preliminary = @(Get-CcodReachableProcessIds -Root $actualRoot -SnapshotsByPid $verifiedByPid)
+    $rereadByPid = @{}
+    foreach ($processId in $preliminary) {
+        $evidence = if ([int]$processId -eq [int]$actualRoot.Pid) { $StatusEvidence } else { $null }
+        $current = & $adapter.GetProcess ([int]$processId) $evidence
+        $previous = $verifiedByPid[[int]$processId]
+        if ($null -eq $current -or -not (Test-CcodProcessMatch -Expected $previous -Actual $current)) { continue }
+        if (-not (Test-CcodSameProcessOwnerAndPackage -Root $actualRoot -Candidate $current)) { continue }
+        $rereadByPid[[int]$processId] = $current
+    }
+    if (-not $rereadByPid.ContainsKey([int]$actualRoot.Pid)) { return @() }
+    $finalRoot = $rereadByPid[[int]$actualRoot.Pid]
+    $included = @(Get-CcodReachableProcessIds -Root $finalRoot -SnapshotsByPid $rereadByPid)
+    return @($included | Sort-Object | ForEach-Object { $rereadByPid[[int]$_] })
+}
+
+function Get-CcodListenerOwnerMapping {
+    param(
+        [Parameter(Mandatory)][int]$RendererPort,
+        [Parameter(Mandatory)][int]$MainPort,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    try {
+        $rendererOwners = @(& $Adapters.GetListeningPortOwnerPids $RendererPort '127.0.0.1' | Sort-Object -Unique)
+        $mainOwners = @(& $Adapters.GetListeningPortOwnerPids $MainPort '127.0.0.1' | Sort-Object -Unique)
+    } catch {
+        return [pscustomobject]@{ Outcome='Incomplete'; RendererOwners=@(); MainOwners=@() }
+    }
+    foreach ($owner in @($rendererOwners + $mainOwners)) {
+        if ($owner -isnot [int] -or $owner -lt 1) {
+            return [pscustomobject]@{ Outcome='PortConflict'; RendererOwners=$rendererOwners; MainOwners=$mainOwners }
         }
     }
+    if ($rendererOwners.Count -lt 1 -or $mainOwners.Count -lt 1) {
+        return [pscustomobject]@{ Outcome='Incomplete'; RendererOwners=$rendererOwners; MainOwners=$mainOwners }
+    }
+    return [pscustomobject]@{ Outcome='Complete'; RendererOwners=$rendererOwners; MainOwners=$mainOwners }
+}
 
-    return @($included | Sort-Object | ForEach-Object { $verifiedByPid[[int]$_] })
+function Test-CcodOwnerMappingMatch {
+    param($Expected, $Actual)
+
+    return $Expected.Outcome -ceq 'Complete' -and $Actual.Outcome -ceq 'Complete' -and
+        (($Expected.RendererOwners -join ',') -ceq ($Actual.RendererOwners -join ',')) -and
+        (($Expected.MainOwners -join ',') -ceq ($Actual.MainOwners -join ','))
+}
+
+function Get-CcodStartupOwnershipReceipt {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][int]$RendererPort,
+        [Parameter(Mandatory)][int]$MainPort,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    $firstMapping = Get-CcodListenerOwnerMapping -RendererPort $RendererPort -MainPort $MainPort -Adapters $Adapters
+    if ($firstMapping.Outcome -cne 'Complete') { return [pscustomobject]@{ Outcome=$firstMapping.Outcome; Snapshot=$Snapshot } }
+    $tree = @(Get-CcodVerifiedProcessTree -Root $Snapshot -Adapters $Adapters)
+    if ($tree.Count -lt 1) { return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$Snapshot } }
+    $treeByPid = @{}
+    foreach ($node in $tree) { $treeByPid[[int]$node.Pid] = $node }
+    if (-not $treeByPid.ContainsKey([int]$Snapshot.Pid)) { return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$Snapshot } }
+
+    $secondMapping = Get-CcodListenerOwnerMapping -RendererPort $RendererPort -MainPort $MainPort -Adapters $Adapters
+    if ($secondMapping.Outcome -cne 'Complete') { return [pscustomobject]@{ Outcome=$secondMapping.Outcome; Snapshot=$Snapshot } }
+    foreach ($owner in @($secondMapping.RendererOwners + $secondMapping.MainOwners)) {
+        if (-not $treeByPid.ContainsKey([int]$owner)) { return [pscustomobject]@{ Outcome='PortConflict'; Snapshot=$Snapshot } }
+    }
+    if (-not (Test-CcodOwnerMappingMatch -Expected $firstMapping -Actual $secondMapping)) {
+        return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$Snapshot }
+    }
+    foreach ($owner in @($secondMapping.RendererOwners + $secondMapping.MainOwners | Select-Object -Unique)) {
+        $currentOwner = & $Adapters.GetProcess ([int]$owner) $null
+        if ($null -eq $currentOwner -or -not (Test-CcodProcessMatch -Expected $treeByPid[[int]$owner] -Actual $currentOwner)) {
+            return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$Snapshot }
+        }
+    }
+    return [pscustomobject]@{ Outcome='Confirmed'; Snapshot=$Snapshot }
+}
+
+function Get-CcodTransactionCandidateResult {
+    param(
+        [Parameter(Mandatory)][int]$RendererPort,
+        [Parameter(Mandatory)][int]$MainPort,
+        [Parameter(Mandatory)][string]$TransactionTimeUtc,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    if ($RendererPort -eq $MainPort) { return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null } }
+    $transactionTime = ConvertTo-CcodDateTimeOffset -Value $TransactionTimeUtc
+    if ($null -eq $transactionTime) { return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null } }
+    $package = & $Adapters.GetPackageIdentity
+    if ($null -eq $package -or $null -eq $package.PSObject.Properties['Found'] -or -not $package.Found) {
+        return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null }
+    }
+    foreach ($name in @('FamilyName', 'ExecutablePath')) {
+        if ($null -eq $package.PSObject.Properties[$name] -or [string]::IsNullOrWhiteSpace([string]$package.$name)) {
+            return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null }
+        }
+    }
+    $currentSessionId = & $Adapters.GetCurrentSessionId
+    $currentUserSid = & $Adapters.GetCurrentUserSid
+    $candidates = @()
+    foreach ($processId in @(& $Adapters.ListProcessIds | Select-Object -Unique)) {
+        if ($processId -isnot [int] -or $processId -lt 1) { continue }
+        $snapshot = & $Adapters.GetProcess ([int]$processId) $null
+        if ($null -eq $snapshot -or -not $snapshot.IsTopLevel) { continue }
+        if (-not [object]::Equals($snapshot.SessionId, $currentSessionId) -or $snapshot.UserSid -cne $currentUserSid) { continue }
+        if (-not (Test-CcodOrdinalIgnoreCase $snapshot.Path $package.ExecutablePath) -or $snapshot.PackageFamilyName -cne $package.FamilyName) { continue }
+        $parsed = Get-CcodParsedLaunchArguments -CommandLine $snapshot.CommandLine -ExecutablePath $package.ExecutablePath -Adapters $Adapters
+        if (-not $parsed.Valid -or -not $parsed.IsTopLevel -or -not $parsed.SpecialArgumentsValid) { continue }
+        if ($snapshot.RendererPort -isnot [int] -or $snapshot.MainPort -isnot [int] -or
+            -not [object]::Equals($snapshot.RendererPort, $RendererPort) -or
+            -not [object]::Equals($snapshot.MainPort, $MainPort) -or
+            -not [object]::Equals($parsed.RendererPort, $RendererPort) -or
+            -not [object]::Equals($parsed.MainPort, $MainPort)) { continue }
+        $creation = ConvertTo-CcodDateTimeOffset -Value $snapshot.CreationTimeUtc
+        if ($null -eq $creation -or $creation -lt $transactionTime) { continue }
+        $candidates += $snapshot
+    }
+    if ($candidates.Count -gt 1) { return [pscustomobject]@{ Outcome='Ambiguous'; Snapshot=$null } }
+    if ($candidates.Count -ne 1) {
+        try {
+            $owners = @(
+                @(& $Adapters.GetListeningPortOwnerPids $RendererPort '127.0.0.1') +
+                @(& $Adapters.GetListeningPortOwnerPids $MainPort '127.0.0.1')
+            )
+        } catch {
+            return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null }
+        }
+        foreach ($owner in $owners) {
+            if ($owner -isnot [int] -or $owner -lt 1) { return [pscustomobject]@{ Outcome='PortConflict'; Snapshot=$null } }
+        }
+        foreach ($owner in @($owners | Select-Object -Unique)) {
+            $ownerSnapshot = & $Adapters.GetProcess ([int]$owner) $null
+            if ($null -eq $ownerSnapshot -or $ownerSnapshot.Pid -isnot [int] -or
+                -not [object]::Equals($ownerSnapshot.Pid, [int]$owner)) { continue }
+            $ownerCreation = ConvertTo-CcodDateTimeOffset -Value $ownerSnapshot.CreationTimeUtc
+            $provenForeign = -not [object]::Equals($ownerSnapshot.SessionId, $currentSessionId) -or
+                $ownerSnapshot.UserSid -cne $currentUserSid -or
+                -not (Test-CcodOrdinalIgnoreCase $ownerSnapshot.Path $package.ExecutablePath) -or
+                $ownerSnapshot.PackageFamilyName -cne $package.FamilyName -or
+                $null -eq $ownerCreation -or $ownerCreation -lt $transactionTime
+            if ($provenForeign) { return [pscustomobject]@{ Outcome='PortConflict'; Snapshot=$ownerSnapshot } }
+        }
+        return [pscustomobject]@{ Outcome='Incomplete'; Snapshot=$null }
+    }
+    return Get-CcodStartupOwnershipReceipt -Snapshot $candidates[0] -RendererPort $RendererPort -MainPort $MainPort -Adapters $Adapters
 }
 
 function Find-CcodTransactionProcess {
@@ -535,35 +901,13 @@ function Find-CcodTransactionProcess {
         [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$RendererPort,
         [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$MainPort,
         [Parameter(Mandatory)][string]$TransactionTimeUtc,
-        $StatusEvidence,
         [hashtable]$Adapters
     )
 
-    if ($RendererPort -eq $MainPort) { return $null }
-    $transactionTime = ConvertTo-CcodDateTimeOffset -Value $TransactionTimeUtc
-    if ($null -eq $transactionTime) { return $null }
     $adapter = Get-CcodProcessAdapters -Adapters $Adapters
-    $package = & $adapter.GetPackageIdentity
-    if ($null -eq $package -or $null -eq $package.PSObject.Properties['Found'] -or -not $package.Found) { return $null }
-    foreach ($name in @('FamilyName', 'ExecutablePath')) {
-        if ($null -eq $package.PSObject.Properties[$name] -or [string]::IsNullOrWhiteSpace([string]$package.$name)) { return $null }
-    }
-    $currentSessionId = & $adapter.GetCurrentSessionId
-    $currentUserSid = & $adapter.GetCurrentUserSid
-    $candidates = @()
-    foreach ($processId in @(& $adapter.ListProcessIds | Select-Object -Unique)) {
-        if ($null -eq $processId) { continue }
-        $snapshot = & $adapter.GetProcess ([int]$processId) $StatusEvidence
-        if ($null -eq $snapshot -or $snapshot.Mode -cne 'Special' -or -not $snapshot.IsTopLevel) { continue }
-        if ($snapshot.SessionId -ne $currentSessionId -or $snapshot.UserSid -cne $currentUserSid) { continue }
-        if (-not (Test-CcodOrdinalIgnoreCase $snapshot.Path $package.ExecutablePath) -or $snapshot.PackageFamilyName -cne $package.FamilyName) { continue }
-        if ($snapshot.RendererPort -ne $RendererPort -or $snapshot.MainPort -ne $MainPort) { continue }
-        $creation = ConvertTo-CcodDateTimeOffset -Value $snapshot.CreationTimeUtc
-        if ($null -eq $creation -or $creation -lt $transactionTime) { continue }
-        $candidates += $snapshot
-    }
-    if ($candidates.Count -ne 1) { return $null }
-    return $candidates[0]
+    $result = Get-CcodTransactionCandidateResult -RendererPort $RendererPort -MainPort $MainPort -TransactionTimeUtc $TransactionTimeUtc -Adapters $adapter
+    if ($result.Outcome -cne 'Confirmed') { return $null }
+    return $result.Snapshot
 }
 
 function Get-CcodAvailableLoopbackPort {
@@ -606,7 +950,7 @@ function Wait-CcodPortClosed {
 
 function New-CcodStartResult {
     param(
-        [Parameter(Mandatory)][ValidateSet('Started', 'Adopted', 'PortUnavailable', 'Failed')][string]$Outcome,
+        [Parameter(Mandatory)][ValidateSet('Started', 'Adopted', 'PortUnavailable', 'StartUnconfirmed', 'Failed')][string]$Outcome,
         $Snapshot,
         $Process
     )
@@ -624,6 +968,8 @@ function Start-CcodProcess {
         [Parameter(ParameterSetName = 'Codex')][ValidateSet('Ordinary', 'Special')][string]$Mode = 'Ordinary',
         [Parameter(ParameterSetName = 'Codex')][ValidateRange(1, 65535)][Nullable[int]]$RendererPort,
         [Parameter(ParameterSetName = 'Codex')][ValidateRange(1, 65535)][Nullable[int]]$MainPort,
+        [Parameter(ParameterSetName = 'Codex')][ValidateRange(1, 60000)][int]$StartupTimeoutMilliseconds = 5000,
+        [Parameter(ParameterSetName = 'Codex')][ValidateRange(1, 1000)][int]$StartupPollMilliseconds = 50,
         [Parameter(Mandatory, ParameterSetName = 'Helper')][switch]$BackgroundHelper,
         [Parameter(Mandatory, ParameterSetName = 'Helper')][string]$HelperPath,
         [Parameter(ParameterSetName = 'Helper')][AllowEmptyCollection()][string[]]$HelperArguments = @(),
@@ -662,6 +1008,8 @@ function Start-CcodProcess {
             return New-CcodStartResult -Outcome 'Adopted' -Snapshot $adopted -Process $null
         }
         $arguments = @()
+        $transactionTimeUtc = $null
+        $deadline = $null
     } else {
         if (-not $PSBoundParameters.ContainsKey('RendererPort') -or -not $PSBoundParameters.ContainsKey('MainPort') -or
             [int]$RendererPort -eq [int]$MainPort) {
@@ -677,17 +1025,33 @@ function Start-CcodProcess {
             "--remote-debugging-port=$([int]$RendererPort)",
             "--inspect=127.0.0.1:$([int]$MainPort)"
         )
+        $transactionTime = & $adapter.GetUtcNow
+        if ($transactionTime -isnot [DateTimeOffset]) {
+            return New-CcodStartResult -Outcome 'Failed' -Snapshot $null -Process $null
+        }
+        $transactionTime = $transactionTime.ToUniversalTime()
+        $transactionTimeUtc = $transactionTime.ToString('o')
+        $deadline = $transactionTime.AddMilliseconds($StartupTimeoutMilliseconds)
     }
 
-    try {
-        $process = & $adapter.StartProcess ([string]$package.ExecutablePath) $arguments $null
-    } catch [Net.Sockets.SocketException] {
-        if ($Mode -ceq 'Special' -and $_.Exception.SocketErrorCode -eq [Net.Sockets.SocketError]::AddressAlreadyInUse) {
-            return New-CcodStartResult -Outcome 'PortUnavailable' -Snapshot $null -Process $null
-        }
-        throw
-    }
+    $process = & $adapter.StartProcess ([string]$package.ExecutablePath) $arguments $null
     if ($null -eq $process) { return New-CcodStartResult -Outcome 'Failed' -Snapshot $null -Process $null }
+    if ($Mode -ceq 'Special') {
+        while ($true) {
+            $candidate = Get-CcodTransactionCandidateResult -RendererPort ([int]$RendererPort) -MainPort ([int]$MainPort) `
+                -TransactionTimeUtc $transactionTimeUtc -Adapters $adapter
+            switch -CaseSensitive ($candidate.Outcome) {
+                'Confirmed' { return New-CcodStartResult -Outcome 'Started' -Snapshot $candidate.Snapshot -Process $process }
+                'PortConflict' { return New-CcodStartResult -Outcome 'PortUnavailable' -Snapshot $candidate.Snapshot -Process $process }
+                'Ambiguous' { return New-CcodStartResult -Outcome 'Failed' -Snapshot $null -Process $process }
+            }
+            $now = & $adapter.GetUtcNow
+            if ($now -isnot [DateTimeOffset] -or $now.ToUniversalTime() -ge $deadline) {
+                return New-CcodStartResult -Outcome 'StartUnconfirmed' -Snapshot $null -Process $process
+            }
+            & $adapter.Delay $StartupPollMilliseconds
+        }
+    }
     return New-CcodStartResult -Outcome 'Started' -Snapshot $null -Process $process
 }
 
