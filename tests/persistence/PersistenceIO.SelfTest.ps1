@@ -84,11 +84,11 @@ try {
             }
         }
 
-        Assert-CcodThrows { Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'after' }) -Adapters $adapters } 'CCOD_ATOMIC_REPLACE_FAILED'
+        Assert-CcodThrows { Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'after' }) -Adapters $adapters } 'CCOD_ATOMIC_RECOVERY_FAILED'
         Assert-CcodEqual 'before' (Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings').value 'failed replacement must retain the old target bytes'
         Assert-CcodEqual 'do not delete' ([IO.File]::ReadAllText($collision, [Text.UTF8Encoding]::new($false))) 'a colliding non-owned backup must remain untouched'
         Assert-CcodTrue (-not [IO.File]::Exists((Join-Path $directory 'controlled-temporary.json'))) 'failed replacement must remove only its temporary file'
-        Assert-CcodTrue (-not [IO.File]::Exists((Join-Path $directory 'owned-backup.json'))) 'failed replacement must not leave an unused owned backup name'
+        Assert-CcodTrue ([IO.File]::Exists((Join-Path $directory 'owned-backup.json'))) 'an unverified owned backup must remain for fail-closed inspection'
     }
 
     Invoke-CcodTest 'restores the old target when a replacement failure leaves only its backup' {
@@ -104,7 +104,8 @@ try {
             }
             ReplaceFile = {
                 param([string]$Source, [string]$Destination, [string]$Backup)
-                [IO.File]::Move($Destination, $Backup)
+                [IO.File]::Copy($Destination, $Backup, $true)
+                [IO.File]::Delete($Destination)
                 throw [InvalidOperationException]::new('controlled replacement failure after backup')
             }
         }
@@ -128,7 +129,7 @@ try {
             }
             ReplaceFile = {
                 param([string]$Source, [string]$Destination, [string]$Backup)
-                [IO.File]::Move($Destination, $Backup)
+                [IO.File]::Copy($Destination, $Backup, $true)
                 [IO.File]::Copy($Source, $Destination)
                 throw [InvalidOperationException]::new('controlled replacement failure after target write')
             }
@@ -138,6 +139,78 @@ try {
         Assert-CcodEqual 'before' (Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings').value 'failed replacement must restore the old target after a partial target write'
         Assert-CcodTrue (-not [IO.File]::Exists((Join-Path $directory 'partial-temporary.json'))) 'partial failure must remove its temporary file'
         Assert-CcodTrue (-not [IO.File]::Exists((Join-Path $directory 'partial-backup.json'))) 'partial failure must consume its restored backup'
+    }
+
+    Invoke-CcodTest 'fails closed when a backup path is raced after the absence check' {
+        $path = Join-Path $root 'replace-race\settings.json'
+        $directory = Split-Path $path -Parent
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
+        Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'before' })
+        $racedBackup = Join-Path $directory 'raced-backup.json'
+        $backupNames = [System.Collections.Generic.Queue[string]]::new()
+        $backupNames.Enqueue('raced-backup.json')
+        $backupNames.Enqueue('owned-backup.json')
+        $adapters = @{
+            GetRandomFileName = {
+                param([string]$Purpose)
+                if ($Purpose -eq 'temporary') { return 'race-temporary.json' }
+                return $backupNames.Dequeue()
+            }
+            FileExists = {
+                param([string]$Candidate)
+                if ($Candidate -eq $racedBackup -and -not [IO.File]::Exists($Candidate)) {
+                    [IO.File]::WriteAllText($Candidate, 'foreign backup bytes', [Text.UTF8Encoding]::new($false))
+                    return $false
+                }
+                return [IO.File]::Exists($Candidate)
+            }
+            CreateNewFile = {
+                param([string]$Candidate)
+                if ($Candidate -eq $racedBackup -and -not [IO.File]::Exists($Candidate)) {
+                    [IO.File]::WriteAllText($Candidate, 'foreign backup bytes', [Text.UTF8Encoding]::new($false))
+                    throw [IO.IOException]::new('controlled backup claim collision')
+                }
+                return [IO.FileStream]::new($Candidate, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            }
+            ReplaceFile = {
+                param([string]$Source, [string]$Destination, [string]$Backup)
+                throw [InvalidOperationException]::new('controlled replacement failure')
+            }
+        }
+
+        Assert-CcodThrows { Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'after' }) -Adapters $adapters } 'CCOD_ATOMIC_RECOVERY_FAILED'
+        Assert-CcodEqual 'before' (Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings').value 'raced backup must not overwrite the old target'
+        Assert-CcodEqual 'foreign backup bytes' ([IO.File]::ReadAllText($racedBackup, [Text.UTF8Encoding]::new($false))) 'raced non-owned backup must not be deleted or moved'
+        Assert-CcodTrue (-not [IO.File]::Exists((Join-Path $directory 'race-temporary.json'))) 'raced failure must remove only the owned temporary file'
+    }
+
+    Invoke-CcodTest 'does not call replacement after an owned backup placeholder is replaced' {
+        $path = Join-Path $root 'replace-placeholder-race\settings.json'
+        $directory = Split-Path $path -Parent
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
+        Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'before' })
+        $replaceState = [pscustomobject]@{ Called = $false }
+        $adapters = @{
+            GetRandomFileName = {
+                param([string]$Purpose)
+                if ($Purpose -eq 'temporary') { return 'placeholder-temporary.json' }
+                return 'placeholder-backup.json'
+            }
+            BeforeReplace = {
+                param([string]$Backup)
+                [IO.File]::WriteAllText($Backup, 'foreign replacement', [Text.UTF8Encoding]::new($false))
+            }
+            ReplaceFile = {
+                param([string]$Source, [string]$Destination, [string]$Backup)
+                $replaceState.Called = $true
+                throw [InvalidOperationException]::new('replacement must not be called after placeholder ownership loss')
+            }
+        }
+
+        Assert-CcodThrows { Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'after' }) -Adapters $adapters } 'CCOD_ATOMIC_RECOVERY_FAILED'
+        Assert-CcodEqual $false $replaceState.Called 'placeholder ownership loss must stop before replacement'
+        Assert-CcodEqual 'before' (Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings').value 'placeholder ownership loss must retain the old target'
+        Assert-CcodEqual 'foreign replacement' ([IO.File]::ReadAllText((Join-Path $directory 'placeholder-backup.json'), [Text.UTF8Encoding]::new($false))) 'untrusted replacement of the placeholder must remain untouched'
     }
 
     Invoke-CcodTest 'rejects malformed state and quarantines it beside the source' {
