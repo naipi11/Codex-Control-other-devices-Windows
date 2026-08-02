@@ -108,6 +108,16 @@ try {
         })
         Assert-CcodThrows { Read-CcodActiveRuntime -InstallRoot $installRoot } 'CCOD_RUNTIME_ID_INVALID'
     }
+
+    Invoke-CcodTest 'writes an exact injected UTC timestamp when activating a verified runtime' {
+        $installRoot = Join-Path $root 'fixed-clock'
+        New-Item -ItemType Directory -Path $installRoot | Out-Null
+        $runtime = New-CcodRuntimeFixture -InstallRoot $installRoot -ProjectVersion '2.1.0' -AContent 'clock alpha' -BContent 'clock beta'
+        $fixedUtc = [DateTime]::Parse('2030-02-03T04:05:06.0000000Z').ToUniversalTime()
+
+        Set-CcodActiveRuntime -InstallRoot $installRoot -NewRuntimeId $runtime.Manifest.runtimeId -Adapters @{ UtcNow = { $fixedUtc } } | Out-Null
+        Assert-CcodEqual '2030-02-03T04:05:06.0000000Z' (Read-CcodActiveRuntime -InstallRoot $installRoot).updatedAtUtc 'active pointer must use the injected UTC clock exactly'
+    }
 } finally {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
     if (Test-Path -LiteralPath $outside) { Remove-Item -LiteralPath $outside -Recurse -Force }

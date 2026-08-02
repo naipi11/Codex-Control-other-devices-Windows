@@ -32,6 +32,18 @@ function Assert-CcodRuntimeId {
     return $RuntimeId
 }
 
+function Get-CcodRuntimeAdapters {
+    param([hashtable]$Adapters)
+
+    $resolved = @{ UtcNow = { [DateTime]::UtcNow } }
+    if ($null -ne $Adapters) {
+        foreach ($name in $Adapters.Keys) {
+            $resolved[$name] = $Adapters[$name]
+        }
+    }
+    return $resolved
+}
+
 function Get-CcodRuntimeRoot {
     param([Parameter(Mandatory)][string]$RuntimeDirectory)
 
@@ -289,9 +301,11 @@ function Set-CcodActiveRuntime {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$InstallRoot,
-        [Parameter(Mandatory)][string]$NewRuntimeId
+        [Parameter(Mandatory)][string]$NewRuntimeId,
+        [hashtable]$Adapters
     )
 
+    $Adapters = Get-CcodRuntimeAdapters -Adapters $Adapters
     Assert-CcodRuntimeId -RuntimeId $NewRuntimeId | Out-Null
     $runtimeDirectory = Get-CcodRuntimeDirectoryForId -InstallRoot $InstallRoot -RuntimeId $NewRuntimeId
     $validation = Test-CcodRuntimeManifest -RuntimeDirectory $runtimeDirectory -ExpectedRuntimeId $NewRuntimeId
@@ -308,7 +322,7 @@ function Set-CcodActiveRuntime {
         schemaVersion = 1
         activeRuntime = $NewRuntimeId
         previousRuntime = $previousRuntime
-        updatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        updatedAtUtc = (& $Adapters.UtcNow).ToUniversalTime().ToString('o')
     }
     Write-CcodAtomicJson -Path $activePath -Value $pointer
     return [pscustomobject]$pointer

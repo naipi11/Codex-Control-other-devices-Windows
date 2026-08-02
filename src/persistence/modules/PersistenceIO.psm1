@@ -94,21 +94,66 @@ function Resolve-CcodContainedPath {
     return $candidate
 }
 
+function Get-CcodAtomicWriteAdapters {
+    param([hashtable]$Adapters)
+
+    $resolved = @{
+        GetRandomFileName = { param([string]$Purpose) [IO.Path]::GetRandomFileName() }
+        FileExists = { param([string]$Path) [IO.File]::Exists($Path) }
+        DeleteFile = { param([string]$Path) [IO.File]::Delete($Path) }
+        MoveFile = { param([string]$Source, [string]$Destination) [IO.File]::Move($Source, $Destination) }
+        CopyFile = { param([string]$Source, [string]$Destination) [IO.File]::Copy($Source, $Destination, $true) }
+        ReplaceFile = { param([string]$Source, [string]$Destination, [string]$Backup) [IO.File]::Replace($Source, $Destination, $Backup, $true) }
+    }
+    if ($null -ne $Adapters) {
+        foreach ($name in $Adapters.Keys) {
+            $resolved[$name] = $Adapters[$name]
+        }
+    }
+    return $resolved
+}
+
+function Get-CcodAtomicUnusedSiblingPath {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string]$Purpose,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    for ($attempt = 0; $attempt -lt 32; $attempt++) {
+        $leaf = [string](& $Adapters.GetRandomFileName $Purpose)
+        if ([string]::IsNullOrWhiteSpace($leaf) -or [IO.Path]::IsPathRooted($leaf) -or $leaf -ne [IO.Path]::GetFileName($leaf)) {
+            Throw-CcodError 'CCOD_ATOMIC_NAME_INVALID' 'Atomic JSON helper supplied an unsafe sibling name' $leaf
+        }
+        $candidate = Join-Path $Directory $leaf
+        if (-not (& $Adapters.FileExists $candidate)) {
+            return $candidate
+        }
+    }
+    Throw-CcodError 'CCOD_ATOMIC_NAME_EXHAUSTED' 'Could not allocate a unique atomic JSON sibling name' $Directory
+}
+
 function Write-CcodAtomicJson {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)]$Value
+        [Parameter(Mandatory)]$Value,
+        [hashtable]$Adapters
     )
 
+    $Adapters = Get-CcodAtomicWriteAdapters -Adapters $Adapters
     $directory = Split-Path -Path $Path -Parent
     [IO.Directory]::CreateDirectory($directory) | Out-Null
-    $temporary = Join-Path $directory ([IO.Path]::GetRandomFileName())
-    $backup = Join-Path $directory ([IO.Path]::GetRandomFileName())
+    $temporary = Get-CcodAtomicUnusedSiblingPath -Directory $directory -Purpose 'temporary' -Adapters $Adapters
+    $backup = $null
+    $temporaryOwned = $false
+    $backupWasAbsent = $false
+    $replaceCompleted = $false
     try {
         $json = ($Value | ConvertTo-Json -Depth 16) + "`n"
         $encoding = [Text.UTF8Encoding]::new($false)
         $stream = [IO.FileStream]::new($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $temporaryOwned = $true
         try {
             $writer = [IO.StreamWriter]::new($stream, $encoding)
             try {
@@ -123,13 +168,34 @@ function Write-CcodAtomicJson {
         }
 
         if ([IO.File]::Exists($Path)) {
-            [IO.File]::Replace($temporary, $Path, $backup, $true)
+            $backup = Get-CcodAtomicUnusedSiblingPath -Directory $directory -Purpose 'backup' -Adapters $Adapters
+            $backupWasAbsent = $true
+            try {
+                & $Adapters.ReplaceFile $temporary $Path $backup
+                $replaceCompleted = $true
+                $temporaryOwned = $false
+            } catch {
+                if ($backupWasAbsent -and (& $Adapters.FileExists $backup)) {
+                    try {
+                        if (& $Adapters.FileExists $Path) {
+                            & $Adapters.CopyFile $backup $Path
+                            & $Adapters.DeleteFile $backup
+                        } else {
+                            & $Adapters.MoveFile $backup $Path
+                        }
+                    } catch {
+                        Throw-CcodError 'CCOD_ATOMIC_RECOVERY_FAILED' 'Atomic JSON replacement failed and the old target could not be restored' $Path
+                    }
+                }
+                Throw-CcodError 'CCOD_ATOMIC_REPLACE_FAILED' 'Atomic JSON replacement failed; the old target was preserved or restored' $Path
+            }
         } else {
             [IO.File]::Move($temporary, $Path)
+            $temporaryOwned = $false
         }
     } finally {
-        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
-        if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
+        if ($temporaryOwned -and (& $Adapters.FileExists $temporary)) { & $Adapters.DeleteFile $temporary }
+        if ($replaceCompleted -and $backupWasAbsent -and (& $Adapters.FileExists $backup)) { & $Adapters.DeleteFile $backup }
     }
 }
 
