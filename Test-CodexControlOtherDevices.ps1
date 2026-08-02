@@ -18,6 +18,7 @@ $result = [ordered]@{
     PackageInstalled = $false
     PackageFullName = $null
     PackageFamilyName = $null
+    PackageInstallLocation = $null
     PackageVersion = $null
     ExecutablePath = $null
     AppAsarPath = $null
@@ -31,6 +32,8 @@ $result = [ordered]@{
     AppAsarSha256 = $null
     PackageSignatures = $null
     AffectedBuildDetected = $false
+    Code = $null
+    Message = $null
     Reasons = $reasons
     Warnings = $warnings
 }
@@ -52,26 +55,12 @@ try {
         }
     }
     $probe = Invoke-CcodStaticProbe -NodeCandidates $nodeCandidates -CheckerPath $checker
-    foreach ($name in @('PackageInstalled', 'PackageFullName', 'PackageFamilyName', 'PackageVersion', 'ExecutablePath', 'AppAsarPath', 'NodePath', 'NodeVersion', 'NodeMajor', 'NodeSupported', 'NodeCapabilities', 'SchemaVersion', 'StaticClassification', 'AppAsarSha256', 'PackageSignatures', 'AffectedBuildDetected')) {
+    foreach ($name in @('PackageInstalled', 'PackageFullName', 'PackageFamilyName', 'PackageInstallLocation', 'PackageVersion', 'ExecutablePath', 'AppAsarPath', 'NodePath', 'NodeVersion', 'NodeMajor', 'NodeSupported', 'NodeCapabilities', 'SchemaVersion', 'StaticClassification', 'AppAsarSha256', 'PackageSignatures', 'AffectedBuildDetected', 'Code', 'Message')) {
         $result[$name] = $probe.$name
     }
 
-    switch ($probe.Code) {
-        'PACKAGE_NOT_FOUND' { $reasons.Add('The Microsoft Store/MSIX OpenAI.Codex package is not installed.') }
-        'PACKAGE_AMBIGUOUS' { $reasons.Add('Expected exactly one current-user OpenAI.Codex package.') }
-        'PACKAGE_FAMILY_MISMATCH' { $reasons.Add('The installed package family is not the expected OpenAI.Codex package.') }
-        'PACKAGE_LOCATION_INVALID' { $reasons.Add('The installed OpenAI.Codex package has an invalid install location.') }
-        'NODE_NOT_FOUND' { $reasons.Add('Node.js 22 or newer is required but no supplied node.exe path is valid.') }
-        'NODE_VERSION_UNSUPPORTED' { $reasons.Add("Node.js 22 or newer is required; found $($probe.NodeVersion).") }
-        'CHECKER_PATH_INVALID' { $reasons.Add("Package checker path is invalid: $checker") }
-        'CHECKER_NOT_FOUND' { $reasons.Add("Package checker was not found: $checker") }
-        'CHECKER_FAILED' { $reasons.Add('Could not inspect the installed Codex package.') }
-        'CHECKER_JSON_INVALID' { $reasons.Add('The package checker emitted malformed JSON.') }
-        'CHECKER_SCHEMA_INVALID' { $reasons.Add('The package checker emitted incomplete or inconsistent evidence.') }
-    }
-    if ($probe.Code -eq 'CHECKER_OK' -and -not $probe.AffectedBuildDetected) {
-        $reasons.Add('The installed package does not match the known Windows controller bug signature. Refusing to inject into an unreviewed build.')
-    }
+    $formattedProbe = Get-CcodPublicProbeResult -Probe $probe -CheckerPath $checker
+    foreach ($reason in $formattedProbe.Reasons) { $reasons.Add($reason) }
 
     $warnings.Add('Account authentication cannot be verified locally. Complete any MFA, SSO, or passkey required by the account/workspace; the tested account required MFA before enrollment.')
     $warnings.Add('The renderer debug endpoint remains on 127.0.0.1 until Codex exits; run only on a trusted machine.')

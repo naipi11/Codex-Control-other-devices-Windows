@@ -85,6 +85,30 @@ function Get-CcodProbeAdapters {
     return $resolved
 }
 
+function New-CcodPackageIdentityFailure {
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Message,
+        [hashtable]$Metadata = @{},
+        [bool]$PackageInstalled = $false
+    )
+
+    return [pscustomobject]@{
+        Found = $false
+        PackageInstalled = $PackageInstalled
+        StaticClassification = 'UnknownOrIncompatible'
+        Code = $Code
+        Message = $Message
+        FullName = $Metadata['PackageFullName']
+        FamilyName = $Metadata['PackageFamilyName']
+        Version = $Metadata['Version']
+        InstallLocation = $Metadata['InstallLocation']
+        ExecutablePath = $null
+        AppAsarPath = $null
+        NativeDirectory = $null
+    }
+}
+
 function New-CcodUnknownProbeResult {
     param(
         [string]$Code,
@@ -94,11 +118,13 @@ function New-CcodUnknownProbeResult {
     )
 
     $identityFound = $null -ne $Identity -and $null -ne $Identity.PSObject.Properties['Found'] -and [bool]$Identity.Found
+    $identityPackageInstalled = if ($null -eq $Identity -or $null -eq $Identity.PSObject.Properties['PackageInstalled']) { $identityFound } else { [bool]$Identity.PackageInstalled }
     $identityFullName = if ($null -eq $Identity -or $null -eq $Identity.PSObject.Properties['FullName']) { $null } else { $Identity.FullName }
     $identityFamilyName = if ($null -eq $Identity -or $null -eq $Identity.PSObject.Properties['FamilyName']) { $null } else { $Identity.FamilyName }
     $identityVersion = if ($null -eq $Identity -or $null -eq $Identity.PSObject.Properties['Version']) { $null } else { $Identity.Version }
     $identityExecutable = if ($null -eq $Identity -or $null -eq $Identity.PSObject.Properties['ExecutablePath']) { $null } else { $Identity.ExecutablePath }
     $identityAsar = if ($null -eq $Identity -or $null -eq $Identity.PSObject.Properties['AppAsarPath']) { $null } else { $Identity.AppAsarPath }
+    $identityInstallLocation = if ($null -eq $Identity -or $null -eq $Identity.PSObject.Properties['InstallLocation']) { $null } else { $Identity.InstallLocation }
     return [pscustomobject][ordered]@{
         Ready = $false
         Code = $Code
@@ -106,11 +132,12 @@ function New-CcodUnknownProbeResult {
         SchemaVersion = $null
         StaticClassification = 'UnknownOrIncompatible'
         AffectedBuildDetected = $false
-        PackageInstalled = $identityFound
+        PackageInstalled = $identityPackageInstalled
         PackageFullName = $identityFullName
         PackageFamilyName = $identityFamilyName
         FamilyName = $identityFamilyName
         PackageVersion = $identityVersion
+        PackageInstallLocation = $identityInstallLocation
         ExecutablePath = $identityExecutable
         AppAsarPath = $identityAsar
         AppAsarSha256 = $null
@@ -130,42 +157,48 @@ function Get-CcodPackageIdentity {
     param([hashtable]$Adapters)
 
     $adapters = Get-CcodProbeAdapters -Adapters $Adapters
+    $metadata = @{}
+    $package = $null
     try {
         $packages = @(& $adapters.GetPackage | Where-Object { $null -ne $_ })
         if ($packages.Count -eq 0) {
-            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_NOT_FOUND'; Message = 'The OpenAI.Codex package is not installed.' }
+            return New-CcodPackageIdentityFailure -Code 'PACKAGE_NOT_FOUND' -Message 'The OpenAI.Codex package is not installed.'
         }
         if ($packages.Count -ne 1) {
-            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_AMBIGUOUS'; Message = 'Expected exactly one current-user OpenAI.Codex package.' }
+            return New-CcodPackageIdentityFailure -Code 'PACKAGE_AMBIGUOUS' -Message 'Expected exactly one current-user OpenAI.Codex package.'
         }
 
         $package = $packages[0]
-        $metadata = @{}
+        $missingMetadata = $null
         foreach ($name in @('PackageFullName', 'PackageFamilyName', 'Version', 'InstallLocation')) {
             $property = $package.PSObject.Properties[$name]
             if ($null -eq $property -or $null -eq $property.Value -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_METADATA_INVALID'; Message = "The installed package is missing valid $name metadata." }
+                if ($null -eq $missingMetadata) { $missingMetadata = $name }
+                continue
             }
             $metadata[$name] = [string]$property.Value
         }
+        if ($null -ne $missingMetadata) {
+            return New-CcodPackageIdentityFailure -Code 'PACKAGE_METADATA_INVALID' -Message "The installed package is missing valid $missingMetadata metadata." -Metadata $metadata -PackageInstalled $true
+        }
         if ($metadata.PackageFamilyName -cne $script:CcodExpectedFamilyName) {
-            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_FAMILY_MISMATCH'; Message = 'The installed package family is not the expected OpenAI.Codex package.' }
+            return New-CcodPackageIdentityFailure -Code 'PACKAGE_FAMILY_MISMATCH' -Message 'The installed package family is not the expected OpenAI.Codex package.' -Metadata $metadata -PackageInstalled $true
         }
         if (-not [IO.Path]::IsPathRooted($metadata.InstallLocation)) {
-            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_LOCATION_INVALID'; Message = 'The installed package does not have an absolute install location.' }
+            return New-CcodPackageIdentityFailure -Code 'PACKAGE_LOCATION_INVALID' -Message 'The installed package does not have an absolute install location.' -Metadata $metadata -PackageInstalled $true
         }
 
         $executablePath = [string](& $adapters.JoinPath $metadata.InstallLocation 'app\ChatGPT.exe')
         $appAsarPath = [string](& $adapters.JoinPath $metadata.InstallLocation 'app\resources\app.asar')
         $nativeDirectory = [string](& $adapters.JoinPath $metadata.InstallLocation 'app\resources\native')
         if ([string]::IsNullOrWhiteSpace($executablePath) -or [string]::IsNullOrWhiteSpace($appAsarPath) -or [string]::IsNullOrWhiteSpace($nativeDirectory)) {
-            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_METADATA_INVALID'; Message = 'The installed package produced invalid resource paths.' }
+            return New-CcodPackageIdentityFailure -Code 'PACKAGE_METADATA_INVALID' -Message 'The installed package produced invalid resource paths.' -Metadata $metadata -PackageInstalled $true
         }
         if (-not (& $adapters.TestPath $executablePath)) {
-            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_EXECUTABLE_MISSING'; Message = 'The installed package executable was not found.' }
+            return New-CcodPackageIdentityFailure -Code 'PACKAGE_EXECUTABLE_MISSING' -Message 'The installed package executable was not found.' -Metadata $metadata -PackageInstalled $true
         }
         if (-not (& $adapters.TestPath $appAsarPath)) {
-            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_ASAR_MISSING'; Message = 'The installed package app.asar was not found.' }
+            return New-CcodPackageIdentityFailure -Code 'PACKAGE_ASAR_MISSING' -Message 'The installed package app.asar was not found.' -Metadata $metadata -PackageInstalled $true
         }
         return [pscustomobject]@{
             Found = $true
@@ -173,12 +206,13 @@ function Get-CcodPackageIdentity {
             FullName = $metadata.PackageFullName
             FamilyName = $metadata.PackageFamilyName
             Version = $metadata.Version
+            InstallLocation = $metadata.InstallLocation
             ExecutablePath = $executablePath
             AppAsarPath = $appAsarPath
             NativeDirectory = $nativeDirectory
         }
     } catch {
-        return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_METADATA_INVALID'; Message = 'The installed package metadata could not be validated.' }
+        return New-CcodPackageIdentityFailure -Code 'PACKAGE_METADATA_INVALID' -Message 'The installed package metadata could not be validated.' -Metadata $metadata -PackageInstalled ($null -ne $package)
     }
 }
 
@@ -253,6 +287,45 @@ function Get-CcodPackageClassification {
     }
 }
 
+function Get-CcodPublicProbeResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Probe,
+        [Parameter(Mandatory)][string]$CheckerPath
+    )
+
+    $code = if ($null -eq $Probe.PSObject.Properties['Code']) { $null } else { [string]$Probe.Code }
+    $message = if ($null -eq $Probe.PSObject.Properties['Message']) { $null } else { [string]$Probe.Message }
+    $affected = $null -ne $Probe.PSObject.Properties['AffectedBuildDetected'] -and [bool]$Probe.AffectedBuildDetected
+    $reasons = [System.Collections.Generic.List[string]]::new()
+    switch ($code) {
+        'PACKAGE_NOT_FOUND' { $reasons.Add('The Microsoft Store/MSIX OpenAI.Codex package is not installed.') }
+        'PACKAGE_AMBIGUOUS' { $reasons.Add('Expected exactly one current-user OpenAI.Codex package.') }
+        'PACKAGE_FAMILY_MISMATCH' { $reasons.Add('The installed package family is not the expected OpenAI.Codex package.') }
+        'PACKAGE_LOCATION_INVALID' { $reasons.Add('The installed OpenAI.Codex package has an invalid install location.') }
+        'PACKAGE_METADATA_INVALID' { $reasons.Add('The installed OpenAI.Codex package metadata is incomplete or invalid.') }
+        'PACKAGE_EXECUTABLE_MISSING' { $reasons.Add('The installed Codex executable was not found.') }
+        'PACKAGE_ASAR_MISSING' { $reasons.Add('The installed Codex app.asar was not found.') }
+        'NODE_NOT_FOUND' { $reasons.Add('Node.js 22 or newer is required but no supplied node.exe path is valid.') }
+        'NODE_VERSION_UNSUPPORTED' { $reasons.Add('Node.js 22 or newer is required but the supplied Node.js version is unsupported.') }
+        'CHECKER_PATH_INVALID' { $reasons.Add("Package checker path is invalid: $CheckerPath") }
+        'CHECKER_NOT_FOUND' { $reasons.Add("Package checker was not found: $CheckerPath") }
+        'CHECKER_FAILED' { $reasons.Add('Could not inspect the installed Codex package.') }
+        'CHECKER_JSON_INVALID' { $reasons.Add('The package checker emitted malformed JSON.') }
+        'CHECKER_SCHEMA_INVALID' { $reasons.Add('The package checker emitted incomplete or inconsistent evidence.') }
+        'CHECKER_OK' {
+            if (-not $affected) {
+                $reasons.Add('The installed package does not match the known Windows controller bug signature. Refusing to inject into an unreviewed build.')
+            }
+        }
+        default {
+            if (-not [string]::IsNullOrWhiteSpace($message)) { $reasons.Add($message) }
+            elseif (-not [string]::IsNullOrWhiteSpace($code)) { $reasons.Add("Compatibility probe failed: $code") }
+        }
+    }
+    return [pscustomobject]@{ Code = $code; Message = $message; Reasons = $reasons.ToArray() }
+}
+
 function Invoke-CcodStaticProbe {
     [CmdletBinding()]
     param(
@@ -304,6 +377,7 @@ function Invoke-CcodStaticProbe {
         PackageFamilyName = $identity.FamilyName
         FamilyName = $identity.FamilyName
         PackageVersion = $identity.Version
+        PackageInstallLocation = $identity.InstallLocation
         ExecutablePath = $identity.ExecutablePath
         AppAsarPath = $identity.AppAsarPath
         AppAsarSha256 = $classification.AppAsarSha256
@@ -318,4 +392,4 @@ function Invoke-CcodStaticProbe {
     }
 }
 
-Export-ModuleMember -Function Get-CcodPackageIdentity, Resolve-CcodNodeCandidate, Invoke-CcodStaticProbe, Get-CcodPackageClassification
+Export-ModuleMember -Function Get-CcodPackageIdentity, Resolve-CcodNodeCandidate, Invoke-CcodStaticProbe, Get-CcodPackageClassification, Get-CcodPublicProbeResult

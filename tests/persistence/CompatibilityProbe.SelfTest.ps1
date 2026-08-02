@@ -29,6 +29,7 @@ function New-CcodProbeAdapters {
         [string]$FamilyName = 'OpenAI.Codex_2p2nqsd0c76g0',
         [bool]$NodeExists = $true,
         [bool]$ExecutableExists = $true,
+        [bool]$AppAsarExists = $true,
         [bool]$OmitPackageFullName = $false,
         [string]$OmitPackageProperty = $null,
         $InvocationCounter = $null
@@ -40,6 +41,7 @@ function New-CcodProbeAdapters {
     $family = $FamilyName
     $exists = $NodeExists
     $executableExists = $ExecutableExists
+    $appAsarExists = $AppAsarExists
     $omitFullName = $OmitPackageFullName
     $omitProperty = $OmitPackageProperty
     $counter = $InvocationCounter
@@ -57,6 +59,7 @@ function New-CcodProbeAdapters {
         TestPath = {
             param($Path)
             if ($Path -eq 'C:\Fake\Codex\app\ChatGPT.exe') { return $executableExists }
+            if ($Path -eq 'C:\Fake\Codex\app\resources\app.asar') { return $appAsarExists }
             if ($Path -like 'C:\Node\*') { return $exists }
             return $true
         }.GetNewClosure()
@@ -147,8 +150,29 @@ try {
         Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification 'missing executable is not a usable package entrypoint'
         Assert-CcodEqual $false $result.Ready 'missing executable fails closed'
         Assert-CcodEqual 'PACKAGE_EXECUTABLE_MISSING' $result.Code 'missing executable has an auditable code'
+        Assert-CcodTrue (-not [string]::IsNullOrWhiteSpace($result.Message)) 'missing executable retains an auditable message'
+        Assert-CcodEqual 'OpenAI.Codex_1_x64__2p2nqsd0c76g0' $result.PackageFullName 'missing executable retains discovered full name'
+        Assert-CcodEqual 'OpenAI.Codex_2p2nqsd0c76g0' $result.PackageFamilyName 'missing executable retains discovered family'
+        Assert-CcodEqual '1.0.0.0' $result.PackageVersion 'missing executable retains discovered version'
+        Assert-CcodEqual 'C:\Fake\Codex' $result.PackageInstallLocation 'missing executable retains discovered install location'
+        Assert-CcodEqual $null $result.ExecutablePath 'missing executable is not reported as a verified entrypoint'
         Assert-CcodEqual 0 $calls.NodeVersionCount 'missing executable must not invoke Node'
         Assert-CcodEqual 0 $calls.Count 'missing executable must not invoke the package checker'
+    }
+
+    Invoke-CcodTest 'fails closed before Node invocation when the current package asar is absent' {
+        $calls = [pscustomobject]@{ Count = 0; NodeVersionCount = 0 }
+        $adapters = New-CcodProbeAdapters -AppAsarExists $false -InvocationCounter $calls
+        $result = Invoke-CcodStaticProbe -NodeCandidates @('C:\Node\node.exe') -CheckerPath 'C:\Runtime\check-package.mjs' -Adapters $adapters
+        Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification 'missing asar is not a statically inspectable package'
+        Assert-CcodEqual $false $result.Ready 'missing asar fails closed'
+        Assert-CcodEqual 'PACKAGE_ASAR_MISSING' $result.Code 'missing asar has an auditable code'
+        Assert-CcodTrue (-not [string]::IsNullOrWhiteSpace($result.Message)) 'missing asar retains an auditable message'
+        Assert-CcodEqual 'OpenAI.Codex_1_x64__2p2nqsd0c76g0' $result.PackageFullName 'missing asar retains discovered full name'
+        Assert-CcodEqual 'C:\Fake\Codex' $result.PackageInstallLocation 'missing asar retains discovered install location'
+        Assert-CcodEqual $null $result.AppAsarPath 'missing asar is not reported as a verified resource'
+        Assert-CcodEqual 0 $calls.NodeVersionCount 'missing asar must not invoke Node'
+        Assert-CcodEqual 0 $calls.Count 'missing asar must not invoke the package checker'
     }
 
     Invoke-CcodTest 'fails closed for an empty Node candidate list without PATH discovery' {
@@ -169,6 +193,9 @@ try {
         Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification 'incomplete package metadata is uncertain evidence'
         Assert-CcodEqual $false $result.Ready 'incomplete package metadata fails closed'
         Assert-CcodEqual 'PACKAGE_METADATA_INVALID' $result.Code 'incomplete metadata has an auditable code'
+        Assert-CcodTrue (-not [string]::IsNullOrWhiteSpace($result.Message)) 'incomplete metadata retains an auditable message'
+        Assert-CcodEqual 'OpenAI.Codex_2p2nqsd0c76g0' $result.PackageFamilyName 'partial metadata retains safely discovered family'
+        Assert-CcodEqual '1.0.0.0' $result.PackageVersion 'partial metadata retains safely discovered version'
         Assert-CcodEqual 0 $calls.NodeVersionCount 'incomplete metadata must not invoke Node'
         Assert-CcodEqual 0 $calls.Count 'incomplete metadata must not invoke the package checker'
     }
