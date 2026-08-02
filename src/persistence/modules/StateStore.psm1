@@ -42,7 +42,7 @@ function Assert-CcodExactProperties {
 
     $actual = @(Get-CcodStatePropertyNames -Value $Value | Sort-Object)
     $wanted = @($Expected | Sort-Object)
-    if ($actual.Count -ne $wanted.Count -or @($actual | Where-Object { $_ -notin $wanted }).Count -ne 0) {
+    if ($actual.Count -ne $wanted.Count -or @($actual | Where-Object { $wanted -cnotcontains $_ }).Count -ne 0) {
         Throw-CcodStateError $ErrorId "$Kind state has unexpected or missing fields" $Value
     }
 }
@@ -182,12 +182,12 @@ function Assert-CcodStatusShape {
     foreach ($name in @('sessionId', 'runtimeId', 'sessionState')) {
         if ($Status.session.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($Status.session.$name)) { Throw-CcodStateError 'CCOD_STATUS_INVALID' "Status $name must be a non-empty string" $Status }
     }
-    if ($Status.session.sessionState -notin @('Ordinary', 'Active', 'Transitioning', 'Recovering', 'Error', 'Paused')) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status sessionState is invalid' $Status }
+    if (@('Ordinary', 'Active', 'Transitioning', 'Recovering', 'Error', 'Paused') -cnotcontains $Status.session.sessionState) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status sessionState is invalid' $Status }
     if ($null -eq $Status.session.codex) {
-        if ($Status.session.sessionState -eq 'Active') { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Active status requires a validated Codex identity' $Status }
+        if ($Status.session.sessionState -ceq 'Active') { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Active status requires a validated Codex identity' $Status }
         return
     }
-    if ($Status.session.sessionState -ne 'Active') { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'A validated Codex identity requires Active sessionState' $Status }
+    if ($Status.session.sessionState -cne 'Active') { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'A validated Codex identity requires Active sessionState' $Status }
     if ($Status.session.codex -isnot [pscustomobject] -and $Status.session.codex -isnot [Collections.IDictionary]) { Throw-CcodStateError 'CCOD_STATUS_INVALID' 'Status codex must be null or an object' $Status }
     $codexFields = @('pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainPort', 'rendererPort', 'mainProbe', 'rendererProbe')
     Assert-CcodExactProperties -Value $Status.session.codex -Expected $codexFields -ErrorId 'CCOD_STATUS_INVALID' -Kind 'Status codex'
@@ -219,12 +219,12 @@ function Assert-CcodVerifiedPackagesShape {
         foreach ($name in $required | Where-Object { $_ -ne 'confirmedAtUtc' }) {
             if ($record.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($record.$name)) { Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' "Verified record $name must be a non-empty string" $record }
         }
-        if ($record.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or $record.staticClassification -notin @('CandidateCompatible', 'NativeModulePresent', 'UnknownOrIncompatible', 'VerifiedCompatible') -or $record.dynamicOutcome -notin @('Succeeded', 'Failed') -or $record.probeState -notin @('Valid', 'Invalid', 'NotRun')) {
+        if ($record.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or @('CandidateCompatible', 'NativeModulePresent', 'UnknownOrIncompatible', 'VerifiedCompatible') -cnotcontains $record.staticClassification -or @('Succeeded', 'Failed') -cnotcontains $record.dynamicOutcome -or @('Valid', 'Invalid', 'NotRun') -cnotcontains $record.probeState) {
             Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified record has an invalid classification or outcome' $record
         }
-        if (($record.dynamicOutcome -eq 'Succeeded' -and $record.probeState -ne 'Valid') -or
-            ($record.dynamicOutcome -eq 'Failed' -and $record.probeState -notin @('Invalid', 'NotRun')) -or
-            ($record.staticClassification -in @('NativeModulePresent', 'UnknownOrIncompatible') -and $record.dynamicOutcome -eq 'Succeeded')) {
+        if (($record.dynamicOutcome -ceq 'Succeeded' -and $record.probeState -cne 'Valid') -or
+            ($record.dynamicOutcome -ceq 'Failed' -and @('Invalid', 'NotRun') -cnotcontains $record.probeState) -or
+            (@('NativeModulePresent', 'UnknownOrIncompatible') -ccontains $record.staticClassification -and $record.dynamicOutcome -ceq 'Succeeded')) {
             Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified record has an invalid classification, outcome, or probe pairing' $record
         }
         Assert-CcodUtcTimestamp -Value $record.confirmedAtUtc -ErrorId 'CCOD_VERIFIED_PACKAGES_INVALID' -Name 'confirmedAtUtc'
@@ -256,7 +256,7 @@ function Assert-CcodTransitionShape {
     $required = @('transactionId', 'stage', 'sourcePid', 'sourceCreationTimeUtc', 'packageFullName', 'appAsarSha256', 'runtimeId', 'mainPort', 'rendererPort', 'specialPid', 'specialCreationTimeUtc', 'recoveryPid', 'recoveryCreationTimeUtc', 'createdAtUtc', 'updatedAtUtc')
     Assert-CcodExactProperties -Value $transaction -Expected $required -ErrorId 'CCOD_TRANSITION_INVALID' -Kind 'Active transition'
     foreach ($name in @('transactionId', 'packageFullName', 'runtimeId')) { if ($transaction.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($transaction.$name)) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' "$name must be a non-empty string" $transaction } }
-    if ($transaction.stage -isnot [string] -or $transaction.stage -notin @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered')) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition stage is invalid' $transaction }
+    if ($transaction.stage -isnot [string] -or @('IntentWritten', 'StopRequested', 'OrdinaryStopped', 'SpecialLaunchRequested', 'SpecialStarted', 'Validated', 'RecoveryLaunchRequested', 'Recovered') -cnotcontains $transaction.stage) { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'Transition stage is invalid' $transaction }
     Assert-CcodPositiveInteger -Value $transaction.sourcePid -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'sourcePid'
     Assert-CcodUtcTimestamp -Value $transaction.sourceCreationTimeUtc -ErrorId 'CCOD_TRANSITION_INVALID' -Name 'sourceCreationTimeUtc'
     if ($transaction.appAsarSha256 -isnot [string] -or $transaction.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$') { Throw-CcodStateError 'CCOD_TRANSITION_INVALID' 'appAsarSha256 must be lowercase SHA-256' $transaction }
@@ -345,9 +345,7 @@ function Read-CcodStatus {
 function Assert-CcodLiveProbeShape {
     param([Parameter(Mandatory)]$LiveProbeResult)
 
-    foreach ($name in @('Valid', 'runtimeId', 'pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainPort', 'rendererPort', 'mainProbe', 'rendererProbe')) {
-        if (-not (Test-CcodStateProperty -Value $LiveProbeResult -Name $name)) { Throw-CcodStateError 'CCOD_LIVE_PROBE_INVALID' "Live probe is missing $name" $LiveProbeResult }
-    }
+    Assert-CcodExactProperties -Value $LiveProbeResult -Expected @('Valid', 'runtimeId', 'pid', 'creationTimeUtc', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainPort', 'rendererPort', 'mainProbe', 'rendererProbe') -ErrorId 'CCOD_LIVE_PROBE_INVALID' -Kind 'Live probe'
     if ($LiveProbeResult.Valid -isnot [bool] -or $LiveProbeResult.Valid -ne $true) { Throw-CcodStateError 'CCOD_LIVE_PROBE_INVALID' 'Live probe Valid must be boolean true' $LiveProbeResult }
     foreach ($name in @('runtimeId', 'packageFullName', 'packageVersion', 'appAsarSha256', 'mainProbe', 'rendererProbe')) {
         if ($LiveProbeResult.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($LiveProbeResult.$name)) { Throw-CcodStateError 'CCOD_LIVE_PROBE_INVALID' "Live probe $name must be a non-empty string" $LiveProbeResult }

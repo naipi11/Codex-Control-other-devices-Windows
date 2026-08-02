@@ -211,6 +211,55 @@ try {
         }
     }
 
+    Invoke-CcodTest 'quarantines case-variant fixed enums and rejects extra live-probe fields' {
+        $statusCases = @(
+            [pscustomobject]@{ Name = 'lowercase session state'; Mutate = { param($status) $status.session.sessionState = 'active' } },
+            [pscustomobject]@{ Name = 'lowercase main probe'; Mutate = { param($status) $status.session.codex.mainProbe = 'closed' } },
+            [pscustomobject]@{ Name = 'mixed renderer probe'; Mutate = { param($status) $status.session.codex.rendererProbe = 'bridgeValid' } }
+        )
+        foreach ($case in $statusCases) {
+            $state = Join-Path $root ('status-case-' + [Guid]::NewGuid().ToString('N'))
+            Initialize-CcodStateFixture -StateRoot $state
+            $status = New-CcodStatusFixture
+            & $case.Mutate $status
+            Write-CcodStateJson -StateRoot $state -Leaf 'status.json' -Value $status
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodEqual $true $loaded.StatusRebuildRequired "$($case.Name) cannot be adopted"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'status.json.corrupt.*').Count "$($case.Name) status is quarantined"
+        }
+        $verifiedCases = @(
+            [pscustomobject]@{ Name = 'lowercase classification'; Field = 'staticClassification'; Value = 'candidatecompatible' },
+            [pscustomobject]@{ Name = 'lowercase outcome'; Field = 'dynamicOutcome'; Value = 'failed' },
+            [pscustomobject]@{ Name = 'lowercase probe'; Field = 'probeState'; Value = 'invalid' }
+        )
+        foreach ($case in $verifiedCases) {
+            $state = Join-Path $root ('verified-case-' + [Guid]::NewGuid().ToString('N'))
+            Initialize-CcodStateFixture -StateRoot $state
+            $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+            $record = New-CcodVerifiedRecord
+            $record[$case.Field] = $case.Value
+            Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion = 1; packages = [ordered]@{ $key = $record } })
+            $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+            Assert-CcodEqual $false $loaded.AutomaticCandidateTrialsAllowed "$($case.Name) cannot authorize a trial"
+            Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'verified-packages.json.corrupt.*').Count "$($case.Name) verified evidence is quarantined"
+        }
+        $state = Join-Path $root 'transition-case'
+        Initialize-CcodStateFixture -StateRoot $state
+        $transaction = New-CcodTransitionFixture
+        $transaction.stage = 'intentwritten'
+        Write-CcodStateJson -StateRoot $state -Leaf 'transition.json' -Value ([ordered]@{ schemaVersion = 1; activeTransaction = $transaction })
+        $loaded = Read-CcodState -StateRoot $state -Adapters (New-CcodStateTestAdapters)
+        Assert-CcodEqual $false $loaded.TransitionActionsAllowed 'lowercase transition stage forbids actions'
+        Assert-CcodEqual 1 @(Get-ChildItem -LiteralPath $state -File -Filter 'transition.json.corrupt.*').Count 'lowercase transition stage is quarantined'
+
+        $liveState = Join-Path $root 'live-probe-extra'
+        Initialize-CcodStateFixture -StateRoot $liveState
+        $probe = New-CcodLiveProbeFixture
+        $probe | Add-Member -NotePropertyName unexpected -NotePropertyValue 'extra'
+        Assert-CcodThrows { Write-CcodStatus -StateRoot $liveState -Status (New-CcodStatusFixture) -LiveProbeResult $probe } 'CCOD_LIVE_PROBE_INVALID'
+        Assert-CcodEqual $null (Read-CcodStatus -StateRoot $liveState -Adapters (New-CcodStateTestAdapters)).session 'extra probe data leaves existing status intact'
+    }
+
     Invoke-CcodTest 'rejects coercive live-probe types and case changes before writing status' {
         $state = Join-Path $root 'live-probe-types'
         Initialize-CcodStateFixture -StateRoot $state
