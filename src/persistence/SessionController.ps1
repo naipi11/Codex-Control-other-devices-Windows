@@ -202,6 +202,16 @@ function Get-CcodControllerStableLeaseCode {
     return 'CCOD_KERNEL_OPEN_FAILED'
 }
 
+function Get-CcodControllerStableTransitionCode {
+    param($Failure)
+    $allowed=@('CCOD_TRANSITION_INVALID','CCOD_TRANSITION_CONFLICT','CCOD_TRANSITION_STAGE_INVALID','CCOD_TRANSITION_COMPLETION_INVALID','CCOD_TRANSITION_ARCHIVE_FAILED','CCOD_TRANSITION_RECEIPT_INVALID')
+    if($null -ne $Failure -and $Failure.FullyQualifiedErrorId -is [string]){
+        $id=($Failure.FullyQualifiedErrorId -split ',')[0]
+        if($allowed -ccontains $id){return $id}
+    }
+    return 'CCOD_TRANSITION_INVALID'
+}
+
 function Invoke-CcodSessionController {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,[Parameter(Mandatory)][string]$ResultPath,[hashtable]$Adapters)
@@ -228,7 +238,7 @@ function Invoke-CcodSessionController {
                         $sessionLeaseAcquired=$true
                         if($accountLease.Abandoned -or $sessionLease.Abandoned){[void](Write-CcodControllerAbandonedWarning $Request $Paths $adapter)}
                         try{$active=& $adapter.ReadJournal $Paths.TransitionPath}catch{
-                            $code=if($_.FullyQualifiedErrorId -like 'CCOD_TRANSITION_*'){($_.FullyQualifiedErrorId -split ',')[0]}else{'CCOD_TRANSITION_INVALID'}
+                            $code=Get-CcodControllerStableTransitionCode $_
                             $result=New-CcodControllerErrorResult $Request $code 'JournalPreflight' 'The transition journal failed strict validation.'
                             $diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter
                         }

@@ -268,6 +268,37 @@ try{
         }finally{[void](Close-CcodControllerTestLease $account)}
     }
 
+    Invoke-CcodTest 'journal callback IDs use only the six exact transition errors with no callback data' {
+        $stableIds=@('CCOD_TRANSITION_INVALID','CCOD_TRANSITION_CONFLICT','CCOD_TRANSITION_STAGE_INVALID','CCOD_TRANSITION_COMPLETION_INVALID','CCOD_TRANSITION_ARCHIVE_FAILED','CCOD_TRANSITION_RECEIPT_INVALID')
+        $cases=@($stableIds|ForEach-Object{[pscustomobject]@{Id=$_;Expected=$_}})+@(
+            [pscustomobject]@{Id='CCOD_TRANSITION_INVALID_LOOKALIKE';Expected='CCOD_TRANSITION_INVALID'},
+            [pscustomobject]@{Id='CCOD_TRANSITION_ARCHIVE_FAILED_EVIL';Expected='CCOD_TRANSITION_INVALID'},
+            [pscustomobject]@{Id='EVIL_JOURNAL_CALLBACK';Expected='CCOD_TRANSITION_INVALID'}
+        )
+        foreach($case in $cases){
+            $request=New-CcodControllerRequest;$forgedId=$case.Id;$engineCalls=[Collections.Generic.List[string]]::new();$logs=[Collections.Generic.List[string]]::new();$stdout=[Collections.Generic.List[string]]::new()
+            $run=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
+                ReadJournal={
+                    param($Path)
+                    $exception=[InvalidOperationException]::new("C:\private\journal-callback`n--token hunter2")
+                    throw [Management.Automation.ErrorRecord]::new($exception,$forgedId,[Management.Automation.ErrorCategory]::InvalidData,'C:\private\journal-target')
+                }.GetNewClosure()
+                EngineInvoker={param($Action,$Request,$Paths)$engineCalls.Add($Action);throw 'journal failure must prevent engine'}.GetNewClosure()
+                WriteResult={param($Path,$Value)};WriteStdout={param($Line)$stdout.Add($Line)}.GetNewClosure();WriteStderr={param($Line)}
+                WriteLog={param($Path,$Line)$logs.Add($Line)}.GetNewClosure()
+            }
+            Assert-CcodEqual 0 $engineCalls.Count "$($case.Id) cannot reach engine"
+            Assert-CcodEqual $case.Expected $run.Result.error.code "$($case.Id) uses only the exact six-ID allowlist"
+            Assert-CcodEqual 'JournalPreflight' $run.Result.stage "$($case.Id) stays in journal preflight"
+            Assert-CcodEqual $request.transactionId $run.Result.transactionId "$($case.Id) preserves correlation"
+            Assert-CcodEqual 1 $stdout.Count "$($case.Id) emits one stdout frame"
+            Assert-CcodEqual 1 $logs.Count "$($case.Id) emits one bounded diagnostic"
+            Assert-CcodEqual $case.Expected (($logs[0]|ConvertFrom-Json).code) "$($case.Id) diagnostic contains only the normalized code"
+            Assert-CcodTrue ((($run.Result|ConvertTo-Json -Depth 16 -Compress)+$stdout[0]+$logs[0]) -cnotmatch 'private|hunter2|journal-target|LOOKALIKE|EVIL_JOURNAL') "$($case.Id) exposes no callback message target or FQID"
+            Assert-CcodEqual 1 $run.ExitCode "$($case.Id) exits unsafe"
+        }
+    }
+
     Invoke-CcodTest 'active journal permits only Recover and otherwise requires a fresh replay request' {
         $active=[pscustomobject]@{transactionId='1b2c5c27-e6e3-4ae4-a876-a59418519d41';stage='OrdinaryStopped'}
         $recoverCalls=[Collections.Generic.List[string]]::new();$recoverRequest=New-CcodControllerRequest -Action Recover

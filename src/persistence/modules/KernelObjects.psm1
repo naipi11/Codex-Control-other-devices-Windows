@@ -5,11 +5,31 @@ $script:CcodKernelLocalKinds=@('Supervisor','Transition','Shutdown','Ready')
 $script:CcodKernelAccountKinds=@('AccountSupervisor','AccountTransition')
 $script:CcodKernelAllKinds=@('AccountSupervisor','AccountTransition','Supervisor','Transition','Shutdown','Ready')
 $script:CcodKernelMaximumNameLength=260
+$script:CcodKernelStableErrorIds=@('CCOD_KERNEL_INPUT_INVALID','CCOD_KERNEL_ACL_MISMATCH','CCOD_KERNEL_OBJECT_TYPE_MISMATCH','CCOD_KERNEL_ACCESS_DENIED','CCOD_KERNEL_OPEN_FAILED','CCOD_KERNEL_LEASE_INVALID','CCOD_KERNEL_RELEASE_FAILED')
 
 function Throw-CcodKernelError {
     param($Id,$Category)
     $exception=[InvalidOperationException]::new('The protected kernel-object operation failed safely.')
     throw [Management.Automation.ErrorRecord]::new($exception,$Id,$Category,$null)
+}
+
+function Throw-CcodNormalizedKernelError {
+    param($Failure,[string]$FallbackId)
+    $id=$FallbackId
+    if($null -ne $Failure -and $Failure.FullyQualifiedErrorId -is [string]){
+        $candidate=($Failure.FullyQualifiedErrorId -split ',')[0]
+        if($script:CcodKernelStableErrorIds -ccontains $candidate){$id=$candidate}
+    }
+    $category=switch($id){
+        'CCOD_KERNEL_INPUT_INVALID' {[Management.Automation.ErrorCategory]::InvalidArgument;break}
+        'CCOD_KERNEL_ACL_MISMATCH' {[Management.Automation.ErrorCategory]::SecurityError;break}
+        'CCOD_KERNEL_OBJECT_TYPE_MISMATCH' {[Management.Automation.ErrorCategory]::InvalidType;break}
+        'CCOD_KERNEL_ACCESS_DENIED' {[Management.Automation.ErrorCategory]::SecurityError;break}
+        'CCOD_KERNEL_LEASE_INVALID' {[Management.Automation.ErrorCategory]::InvalidData;break}
+        'CCOD_KERNEL_RELEASE_FAILED' {[Management.Automation.ErrorCategory]::InvalidOperation;break}
+        default {[Management.Automation.ErrorCategory]::OpenError}
+    }
+    Throw-CcodKernelError $id $category
 }
 
 function Get-CcodCurrentUserSidValue {
@@ -19,8 +39,7 @@ function Get-CcodCurrentUserSidValue {
         if($null -eq $identity -or $null -eq $identity.User){Throw-CcodKernelError 'CCOD_KERNEL_ACCESS_DENIED' ([Management.Automation.ErrorCategory]::SecurityError)}
         return $identity.User.Value
     }catch{
-        if($_.FullyQualifiedErrorId -like 'CCOD_KERNEL_*'){throw}
-        Throw-CcodKernelError 'CCOD_KERNEL_ACCESS_DENIED' ([Management.Automation.ErrorCategory]::SecurityError)
+        Throw-CcodNormalizedKernelError $_ 'CCOD_KERNEL_ACCESS_DENIED'
     }finally{if($null -ne $identity){$identity.Dispose()}}
 }
 
@@ -86,8 +105,7 @@ function New-CcodMutexSecurity {
         }
         return $security
     }catch{
-        if($_.FullyQualifiedErrorId -like 'CCOD_KERNEL_*'){throw}
-        Throw-CcodKernelError 'CCOD_KERNEL_OPEN_FAILED' ([Management.Automation.ErrorCategory]::OpenError)
+        Throw-CcodNormalizedKernelError $_ 'CCOD_KERNEL_OPEN_FAILED'
     }
 }
 
@@ -106,8 +124,7 @@ function New-CcodEventSecurity {
         }
         return $security
     }catch{
-        if($_.FullyQualifiedErrorId -like 'CCOD_KERNEL_*'){throw}
-        Throw-CcodKernelError 'CCOD_KERNEL_OPEN_FAILED' ([Management.Automation.ErrorCategory]::OpenError)
+        Throw-CcodNormalizedKernelError $_ 'CCOD_KERNEL_OPEN_FAILED'
     }
 }
 
@@ -127,9 +144,8 @@ function Assert-CcodKernelSecurity {
         }
         if($seen.Count -ne 3){Throw-CcodKernelError 'CCOD_KERNEL_ACL_MISMATCH' ([Management.Automation.ErrorCategory]::SecurityError)}
     }catch{
-        if($_.FullyQualifiedErrorId -like 'CCOD_KERNEL_*'){throw}
-        if($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [Security.SecurityException]){Throw-CcodKernelError 'CCOD_KERNEL_ACCESS_DENIED' ([Management.Automation.ErrorCategory]::SecurityError)}
-        Throw-CcodKernelError 'CCOD_KERNEL_ACL_MISMATCH' ([Management.Automation.ErrorCategory]::SecurityError)
+        $fallback=if($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [Security.SecurityException]){'CCOD_KERNEL_ACCESS_DENIED'}else{'CCOD_KERNEL_ACL_MISMATCH'}
+        Throw-CcodNormalizedKernelError $_ $fallback
     }
 }
 
@@ -192,7 +208,7 @@ function Resolve-CcodKernelName {
         else{$default=Get-CcodKernelObjectName -Kind $Kind -UserSid $UserSid -SessionId $SessionId}
     }else{$default=Get-CcodKernelObjectName -Kind $Kind -UserSid $UserSid}
     try{$name=& $Adapter.GetName $Kind $UserSid $(if($HasSession){$SessionId}else{$null}) $(if($HasToken){$ReadyToken}else{$null}) $default}
-    catch{Throw-CcodKernelError 'CCOD_KERNEL_OPEN_FAILED' ([Management.Automation.ErrorCategory]::OpenError)}
+    catch{Throw-CcodNormalizedKernelError $_ 'CCOD_KERNEL_OPEN_FAILED'}
     if($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name) -or $name.Length -gt $script:CcodKernelMaximumNameLength){Throw-CcodKernelError 'CCOD_KERNEL_INPUT_INVALID' ([Management.Automation.ErrorCategory]::InvalidArgument)}
     $expectedPrefix=if($script:CcodKernelAccountKinds -ccontains $Kind){'Global\'}else{'Local\'}
     if(-not $name.StartsWith($expectedPrefix,[StringComparison]::Ordinal)){Throw-CcodKernelError 'CCOD_KERNEL_INPUT_INVALID' ([Management.Automation.ErrorCategory]::InvalidArgument)}
@@ -230,9 +246,8 @@ function Enter-CcodMutex {
         return $lease
     }catch{
         if($null -ne $handle){if($ownsMutex){try{& $adapter.ReleaseMutex $handle}catch{}};try{& $adapter.DisposeHandle $handle}catch{}}
-        if($_.FullyQualifiedErrorId -like 'CCOD_KERNEL_*'){throw}
-        if($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [Security.SecurityException]){Throw-CcodKernelError 'CCOD_KERNEL_ACCESS_DENIED' ([Management.Automation.ErrorCategory]::SecurityError)}
-        Throw-CcodKernelError 'CCOD_KERNEL_OPEN_FAILED' ([Management.Automation.ErrorCategory]::OpenError)
+        $fallback=if($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [Security.SecurityException]){'CCOD_KERNEL_ACCESS_DENIED'}else{'CCOD_KERNEL_OPEN_FAILED'}
+        Throw-CcodNormalizedKernelError $_ $fallback
     }
 }
 
@@ -277,9 +292,8 @@ function New-CcodEvent {
         $result=New-CcodEventResult $name $Kind $opened.CreatedNew $handle;$handle=$null;return $result
     }catch{
         if($null -ne $handle){try{& $adapter.DisposeHandle $handle}catch{}}
-        if($_.FullyQualifiedErrorId -like 'CCOD_KERNEL_*'){throw}
-        if($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [Security.SecurityException]){Throw-CcodKernelError 'CCOD_KERNEL_ACCESS_DENIED' ([Management.Automation.ErrorCategory]::SecurityError)}
-        Throw-CcodKernelError 'CCOD_KERNEL_OPEN_FAILED' ([Management.Automation.ErrorCategory]::OpenError)
+        $fallback=if($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [Security.SecurityException]){'CCOD_KERNEL_ACCESS_DENIED'}else{'CCOD_KERNEL_OPEN_FAILED'}
+        Throw-CcodNormalizedKernelError $_ $fallback
     }
 }
 
@@ -296,9 +310,8 @@ function Open-CcodEvent {
         $result=New-CcodEventResult $name $Kind $false $handle;$handle=$null;return $result
     }catch{
         if($null -ne $handle){try{& $adapter.DisposeHandle $handle}catch{}}
-        if($_.FullyQualifiedErrorId -like 'CCOD_KERNEL_*'){throw}
-        if($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [Security.SecurityException]){Throw-CcodKernelError 'CCOD_KERNEL_ACCESS_DENIED' ([Management.Automation.ErrorCategory]::SecurityError)}
-        Throw-CcodKernelError 'CCOD_KERNEL_OPEN_FAILED' ([Management.Automation.ErrorCategory]::OpenError)
+        $fallback=if($_.Exception -is [UnauthorizedAccessException] -or $_.Exception -is [Security.SecurityException]){'CCOD_KERNEL_ACCESS_DENIED'}else{'CCOD_KERNEL_OPEN_FAILED'}
+        Throw-CcodNormalizedKernelError $_ $fallback
     }
 }
 

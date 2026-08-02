@@ -125,6 +125,37 @@ try{
         }
     }
 
+    Invoke-CcodTest 'normalizes exact and lookalike callback IDs to fresh non-secret kernel errors on every public open path' {
+        $stableIds=@('CCOD_KERNEL_INPUT_INVALID','CCOD_KERNEL_ACL_MISMATCH','CCOD_KERNEL_OBJECT_TYPE_MISMATCH','CCOD_KERNEL_ACCESS_DENIED','CCOD_KERNEL_OPEN_FAILED','CCOD_KERNEL_LEASE_INVALID','CCOD_KERNEL_RELEASE_FAILED')
+        $idCases=@($stableIds|ForEach-Object{[pscustomobject]@{Id=$_;Expected=$_}})+@(
+            [pscustomobject]@{Id='CCOD_KERNEL_OPEN_FAILED_LOOKALIKE';Expected='CCOD_KERNEL_OPEN_FAILED'},
+            [pscustomobject]@{Id='CCOD_KERNEL_ACL_MISMATCH_EVIL';Expected='CCOD_KERNEL_OPEN_FAILED'},
+            [pscustomobject]@{Id='EVIL_KERNEL_CALLBACK';Expected='CCOD_KERNEL_OPEN_FAILED'}
+        )
+        foreach($path in @('EnterMutex','NewEvent','OpenEvent')){
+            foreach($idCase in $idCases){
+                $forgedId=$idCase.Id
+                $throwing={
+                    $exception=[InvalidOperationException]::new("C:\private\kernel-callback`n--token hunter2")
+                    throw [Management.Automation.ErrorRecord]::new($exception,$forgedId,[Management.Automation.ErrorCategory]::InvalidOperation,'C:\private\target-object')
+                }.GetNewClosure()
+                $caught=$null
+                try{
+                    switch($path){
+                        'EnterMutex' {Enter-CcodMutex -Kind Transition -UserSid $userSid -SessionId $sessionId -TimeoutMilliseconds 0 -Adapters @{CreateMutex=$throwing}|Out-Null}
+                        'NewEvent' {New-CcodEvent -Kind Shutdown -UserSid $userSid -SessionId $sessionId -Adapters @{CreateEvent=$throwing}|Out-Null}
+                        'OpenEvent' {Open-CcodEvent -Kind Shutdown -UserSid $userSid -SessionId $sessionId -Adapters @{OpenEvent=$throwing}|Out-Null}
+                    }
+                }catch{$caught=$_}
+                Assert-CcodTrue ($null -ne $caught) "$path $forgedId is rejected"
+                Assert-CcodEqual $idCase.Expected (($caught.FullyQualifiedErrorId -split ',')[0]) "$path $forgedId uses only the exact stable allowlist"
+                Assert-CcodEqual 'The protected kernel-object operation failed safely.' $caught.Exception.Message "$path $forgedId receives a fresh fixed message"
+                Assert-CcodEqual $null $caught.TargetObject "$path $forgedId receives a fresh null target"
+                Assert-CcodTrue ((([string]$caught.Exception.Message)+([string]$caught.FullyQualifiedErrorId)+([string]$caught.TargetObject)) -cnotmatch 'private|hunter2|target-object|LOOKALIKE|EVIL_KERNEL') "$path $forgedId exposes no callback data"
+            }
+        }
+    }
+
     Invoke-CcodTest 'constructs protected exact mutex and event DACLs' {
         foreach($case in @(
             @{Security=(New-CcodMutexSecurity -UserSid $userSid);Type=[Security.AccessControl.MutexSecurity];Rights='MutexRights'},
