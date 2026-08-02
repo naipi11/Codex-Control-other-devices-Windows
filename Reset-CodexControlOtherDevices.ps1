@@ -21,23 +21,42 @@ function Resolve-CcodResetInstalledController {
     [pscustomobject]@{RuntimeId=$active.activeRuntime;Controller=[IO.Path]::GetFullPath($controller);StateModule=[IO.Path]::GetFullPath($stateModule)}
 }
 
+function Get-CcodResetSupervisorIdentity {
+    $process=[Diagnostics.Process]::GetCurrentProcess()
+    try{$created=$process.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture);$sessionId=[string]$process.SessionId}finally{$process.Dispose()}
+    [pscustomobject][ordered]@{pid=$PID;creationTimeUtc=$created;sessionId=$sessionId}
+}
+
+function New-CcodResetControllerRequest {
+    param([string]$RuntimeId,[bool]$DoNotRestart,$SupervisorIdentity=(Get-CcodResetSupervisorIdentity),[string]$TransactionId=([guid]::NewGuid().ToString('D')))
+    [pscustomobject][ordered]@{schemaVersion=1;action='Recover';transactionId=$TransactionId;runtimeId=$RuntimeId;supervisorIdentity=$SupervisorIdentity;source=$null;existingOnly=$true;rendererPort=$null;mainPort=$null;timeoutMilliseconds=30000;restartOrdinary=(-not $DoNotRestart)}
+}
+
 function New-CcodResetControllerArguments {
-    param([string]$Controller,[bool]$DoNotRestart)
-    $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$Controller,'-Action','Recover')
-    if($DoNotRestart){$arguments+=@('-RestartOrdinary:$false')}
-    return $arguments
+    param([string]$Controller,[string]$RequestPath,[string]$ResultPath)
+    @('-NoProfile','-ExecutionPolicy','Bypass','-File',$Controller,'-RequestPath',$RequestPath,'-ResultPath',$ResultPath)
 }
 
 function Invoke-CcodResetInstalledController {
-    param($Resolved,[string[]]$Arguments)
+    param($Resolved,$Request)
     $powershell=(Get-Command powershell.exe -ErrorAction Stop).Source
+    $requestDirectory=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'CodexControlOtherDevices'))
+    [IO.Directory]::CreateDirectory($requestDirectory)|Out-Null
+    $nonce=[guid]::NewGuid().ToString('N');$requestPath=[IO.Path]::GetFullPath((Join-Path $requestDirectory "reset-$nonce-request.json"));$resultPath=[IO.Path]::GetFullPath((Join-Path $requestDirectory "reset-$nonce-result.json"))
     $stderrPath=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("ccod-reset-$([guid]::NewGuid().ToString('N')).err")))
-    try{$stdout=@(& $powershell @Arguments 2>$stderrPath);$exitCode=$LASTEXITCODE}finally{if([IO.File]::Exists($stderrPath)){[IO.File]::Delete($stderrPath)}}
-    $lines=@($stdout|ForEach-Object{[string]$_}|Where-Object{-not [string]::IsNullOrWhiteSpace($_)})
-    if($lines.Count -ne 1){throw 'Installed controller did not return exactly one machine-readable result line.'}
-    try{$result=$lines[0]|ConvertFrom-Json -ErrorAction Stop}catch{throw 'Installed controller returned invalid JSON.'}
-    if($exitCode -ne 0 -or $result.ok -ne $true){throw "Session reset failed safely: $($result.error.code) $($result.error.message)"}
-    return $result
+    try{
+        [IO.File]::WriteAllText($requestPath,($Request|ConvertTo-Json -Depth 16 -Compress),[Text.UTF8Encoding]::new($false))
+        $arguments=New-CcodResetControllerArguments -Controller $Resolved.Controller -RequestPath $requestPath -ResultPath $resultPath
+        $stdout=@(& $powershell @arguments 2>$stderrPath);$exitCode=$LASTEXITCODE
+        $lines=@($stdout|ForEach-Object{[string]$_}|Where-Object{-not [string]::IsNullOrWhiteSpace($_)})
+        if($lines.Count -ne 1 -or -not [IO.File]::Exists($resultPath)){throw 'Installed controller did not return one persisted machine-readable result.'}
+        try{$fromStdout=$lines[0]|ConvertFrom-Json -ErrorAction Stop;$result=Get-Content -LiteralPath $resultPath -Raw|ConvertFrom-Json -ErrorAction Stop}catch{throw 'Installed controller returned invalid JSON.'}
+        if(($fromStdout|ConvertTo-Json -Depth 16 -Compress) -cne ($result|ConvertTo-Json -Depth 16 -Compress) -or $result.transactionId -cne $Request.transactionId -or $result.action -cne 'Recover' -or $result.outcome -isnot [string]){throw 'Installed controller result is incomplete or uncorrelated.'}
+        if($exitCode -ne 0 -or $result.ok -ne $true){throw "Session reset failed safely: $($result.error.code) $($result.error.message)"}
+        return $result
+    }finally{
+        foreach($path in @($requestPath,$resultPath,$stderrPath)){if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+    }
 }
 
 function Move-CcodResetDeviceKeyStore {
@@ -50,14 +69,32 @@ function Move-CcodResetDeviceKeyStore {
     return $destination
 }
 
+function Invoke-CcodResetWorkflow {
+    param(
+        $Resolved,
+        $Request,
+        [bool]$BackupDeviceKeyStore,
+        [scriptblock]$ControllerInvoker={param($ResolvedValue,$RequestValue)Invoke-CcodResetInstalledController -Resolved $ResolvedValue -Request $RequestValue},
+        [scriptblock]$BackupMover={param($StateModule)Move-CcodResetDeviceKeyStore -StateModule $StateModule}
+    )
+    $result=& $ControllerInvoker $Resolved $Request
+    $backupPath=$null;$warning=$null
+    if($BackupDeviceKeyStore){
+        try{$backupPath=& $BackupMover $Resolved.StateModule}
+        catch{$warning='The session reset succeeded, but the optional device-key backup could not be completed.'}
+    }
+    [pscustomobject][ordered]@{Result=$result;BackupPath=$backupPath;Warning=$warning}
+}
+
 if($MyInvocation.InvocationName -ne '.'){
     $installRoot=[IO.Path]::GetFullPath((Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexControlOtherDevices'))
-    $resolved=Resolve-CcodResetInstalledController -InstallRoot $installRoot;$arguments=New-CcodResetControllerArguments -Controller $resolved.Controller -DoNotRestart ([bool]$DoNotRestart)
-    $result=Invoke-CcodResetInstalledController -Resolved $resolved -Arguments $arguments;$backup=$null
-    if($BackupDeviceKeyStore){$backup=Move-CcodResetDeviceKeyStore -StateModule $resolved.StateModule}
+    $resolved=Resolve-CcodResetInstalledController -InstallRoot $installRoot;$request=New-CcodResetControllerRequest -RuntimeId $resolved.RuntimeId -DoNotRestart ([bool]$DoNotRestart)
+    $workflow=Invoke-CcodResetWorkflow -Resolved $resolved -Request $request -BackupDeviceKeyStore ([bool]$BackupDeviceKeyStore)
+    $result=$workflow.Result;$backup=$workflow.BackupPath
     Write-Host ''
     Write-Host 'The runtime fix is no longer active.' -ForegroundColor Green
     if($backup){Write-Host "The encrypted device-key store was moved to: $backup";Write-Host 'This local move does not revoke server-side authorization; revoke the device in Codex first.' -ForegroundColor Yellow}
+    if($workflow.Warning){Write-Warning $workflow.Warning}
     if($DoNotRestart){Write-Host 'Codex Desktop was left closed.'}else{Write-Host 'Codex Desktop was returned to an ordinary session.'}
     Write-Host ''
 }

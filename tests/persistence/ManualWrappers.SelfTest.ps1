@@ -9,6 +9,25 @@ Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\PersistenceIO.
 
 function Get-CcodScriptAst([string]$Path){$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($Path,[ref]$tokens,[ref]$errors);if($errors.Count -ne 0){throw ($errors|Out-String)};return $ast}
 
+function New-CcodFakeFileModeController([string]$Path){
+    $source=@'
+[CmdletBinding()]
+param([Parameter(Mandatory)][string]$RequestPath,[Parameter(Mandatory)][string]$ResultPath)
+$ErrorActionPreference='Stop'
+$request=Get-Content -LiteralPath $RequestPath -Raw|ConvertFrom-Json
+$expected='schemaVersion,action,transactionId,runtimeId,supervisorIdentity,source,existingOnly,rendererPort,mainPort,timeoutMilliseconds,restartOrdinary'
+if(($request.PSObject.Properties.Name -join ',') -cne $expected -or $request.existingOnly -isnot [bool] -or $request.restartOrdinary -isnot [bool]){exit 7}
+$outcome=if($request.action -ceq 'Apply'){'Activated'}elseif($request.restartOrdinary){'Recovered'}else{'Closed'}
+$safe=if($outcome -ceq 'Activated'){'SpecialValidated'}elseif($outcome -ceq 'Closed'){'Closed'}else{'OrdinaryRunning'}
+$result=[pscustomobject][ordered]@{schemaVersion=1;action=$request.action;ok=$true;outcome=$outcome;safeState=$safe;stage='Completed';transactionId=$request.transactionId;package=$null;source=[pscustomobject][ordered]@{existingOnly=$request.existingOnly;restartOrdinary=$request.restartOrdinary;timeoutMilliseconds=$request.timeoutMilliseconds;rendererPort=$request.rendererPort;mainPort=$request.mainPort};special=$null;probes=$null;recovery=$null;error=$null;logFile=$null}
+$json=$result|ConvertTo-Json -Depth 16 -Compress
+[IO.File]::WriteAllText($ResultPath,$json,[Text.UTF8Encoding]::new($false))
+[Console]::Out.WriteLine($json)
+'@
+    [IO.Directory]::CreateDirectory((Split-Path $Path -Parent))|Out-Null
+    [IO.File]::WriteAllText($Path,$source,[Text.UTF8Encoding]::new($false))
+}
+
 $root=Join-Path ([IO.Path]::GetTempPath()) ('ccod-wrapper-selftest-'+[guid]::NewGuid().ToString('N'))
 try{
     Invoke-CcodTest 'keeps exact public parameters and contains no process bridge or kill implementation' {
@@ -22,16 +41,57 @@ try{
         }
     }
 
-    Invoke-CcodTest 'maps Start closed-app ports and Reset DoNotRestart to direct installed controller arguments' {
-        $automatic=New-CcodStartControllerArguments -Controller 'C:\installed\SessionController.ps1' -RendererDebugPort 0 -MainInspectorPort 0 -TimeoutSeconds 30
-        Assert-CcodTrue (($automatic -join ',') -cmatch '-Action,Apply,-ExistingOnly:\$false') 'Start explicitly allows a closed app with existingOnly false'
-        Assert-CcodTrue (($automatic -join ',') -cnotmatch 'RendererPort|MainPort') 'public zero ports map to nullable omitted controller ports'
-        $explicit=New-CcodStartControllerArguments -Controller 'C:\installed\SessionController.ps1' -RendererDebugPort 41001 -MainInspectorPort 41002 -TimeoutSeconds 40
-        Assert-CcodTrue (($explicit -join ',') -cmatch '-RendererPort,41001,-MainPort,41002') 'explicit public ports are preserved'
-        $normal=New-CcodResetControllerArguments -Controller 'C:\installed\SessionController.ps1' -DoNotRestart $false
-        Assert-CcodTrue (($normal -join ',') -cnotmatch 'RestartOrdinary') 'normal Reset uses default ordinary recovery'
-        $closed=New-CcodResetControllerArguments -Controller 'C:\installed\SessionController.ps1' -DoNotRestart $true
-        Assert-CcodTrue (($closed -join ',') -cmatch '-RestartOrdinary:\$false') 'DoNotRestart maps to the durable close request'
+    Invoke-CcodTest 'maps public Start and Reset values into exact typed file-mode requests' {
+        $identity=[pscustomobject][ordered]@{pid=11;creationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1'}
+        $automatic=New-CcodStartControllerRequest -RuntimeId 'runtime-1' -RendererDebugPort 0 -MainInspectorPort 0 -TimeoutSeconds 120 -SupervisorIdentity $identity -TransactionId '5f496d99-c839-4458-a6a2-d37ea1afdbda'
+        Assert-CcodEqual 'schemaVersion,action,transactionId,runtimeId,supervisorIdentity,source,existingOnly,rendererPort,mainPort,timeoutMilliseconds,restartOrdinary' (($automatic.PSObject.Properties.Name)-join ',') 'Start request has the strict eleven fields'
+        Assert-CcodEqual $false $automatic.existingOnly 'Start explicitly allows a closed app with a real JSON false'
+        Assert-CcodEqual $null $automatic.rendererPort 'public zero renderer port maps to null'
+        Assert-CcodEqual $null $automatic.mainPort 'public zero main port maps to null'
+        Assert-CcodEqual 120000 $automatic.timeoutMilliseconds 'public 120 seconds is preserved exactly'
+
+        $explicit=New-CcodStartControllerRequest -RuntimeId 'runtime-1' -RendererDebugPort 41001 -MainInspectorPort 41002 -TimeoutSeconds 61 -SupervisorIdentity $identity -TransactionId 'f81b6259-8e99-45fb-b557-c5292f05dfa3'
+        Assert-CcodEqual 41001 $explicit.rendererPort 'explicit public renderer port is preserved'
+        Assert-CcodEqual 41002 $explicit.mainPort 'explicit public main port is preserved'
+        Assert-CcodEqual 61000 $explicit.timeoutMilliseconds 'public 61 seconds survives request creation'
+
+        $normal=New-CcodResetControllerRequest -RuntimeId 'runtime-1' -DoNotRestart $false -SupervisorIdentity $identity -TransactionId '30fc56b0-547b-4b60-996a-d82b7301384c'
+        Assert-CcodEqual $true $normal.restartOrdinary 'normal Reset requests ordinary recovery with a real JSON true'
+        $closed=New-CcodResetControllerRequest -RuntimeId 'runtime-1' -DoNotRestart $true -SupervisorIdentity $identity -TransactionId 'b56470ad-948a-4df7-b5f2-04a4df86a256'
+        Assert-CcodEqual $false $closed.restartOrdinary 'DoNotRestart maps to a real JSON false'
+
+        $arguments=New-CcodStartControllerArguments -Controller 'C:\installed\SessionController.ps1' -RequestPath 'C:\request.json' -ResultPath 'C:\result.json'
+        Assert-CcodEqual '-NoProfile,-ExecutionPolicy,Bypass,-File,C:\installed\SessionController.ps1,-RequestPath,C:\request.json,-ResultPath,C:\result.json' ($arguments -join ',') 'child arguments carry only file paths, never Boolean text'
+    }
+
+    Invoke-CcodTest 'real powershell file-mode children receive Boolean JSON without parameter binding failures' {
+        $controller=Join-Path $root 'fake-runtime\SessionController.ps1';New-CcodFakeFileModeController $controller
+        $resolved=[pscustomobject]@{RuntimeId='runtime-1';Controller=[IO.Path]::GetFullPath($controller)}
+        $identity=[pscustomobject][ordered]@{pid=11;creationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1'}
+        $startRequest=New-CcodStartControllerRequest -RuntimeId 'runtime-1' -RendererDebugPort 41001 -MainInspectorPort 41002 -TimeoutSeconds 120 -SupervisorIdentity $identity -TransactionId '5f496d99-c839-4458-a6a2-d37ea1afdbda'
+        $start=Invoke-CcodStartInstalledController -Resolved $resolved -Request $startRequest
+        Assert-CcodEqual $false $start.source.existingOnly 'Start false crossed the real powershell.exe child as Boolean'
+        Assert-CcodEqual $true $start.source.restartOrdinary 'Start true crossed the real powershell.exe child as Boolean'
+        Assert-CcodEqual 120000 $start.source.timeoutMilliseconds '120 seconds crossed the real child unchanged'
+
+        $resetRequest=New-CcodResetControllerRequest -RuntimeId 'runtime-1' -DoNotRestart $true -SupervisorIdentity $identity -TransactionId 'b56470ad-948a-4df7-b5f2-04a4df86a256'
+        $reset=Invoke-CcodResetInstalledController -Resolved $resolved -Request $resetRequest
+        Assert-CcodEqual $false $reset.source.restartOrdinary 'Reset DoNotRestart false crossed the real powershell.exe child as Boolean'
+    }
+
+    Invoke-CcodTest 'keeps a successful reset successful when the optional device-key backup fails' {
+        $calls=[pscustomobject]@{Controller=0;Backup=0}
+        $resolved=[pscustomobject]@{RuntimeId='runtime-1';Controller='C:\installed\SessionController.ps1';StateModule='C:\installed\StateStore.psm1'}
+        $request=New-CcodResetControllerRequest -RuntimeId 'runtime-1' -DoNotRestart $false -SupervisorIdentity ([pscustomobject][ordered]@{pid=11;creationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1'})
+        $workflow=Invoke-CcodResetWorkflow -Resolved $resolved -Request $request -BackupDeviceKeyStore $true `
+            -ControllerInvoker {param($Resolved,$Request)$calls.Controller++;[pscustomobject]@{ok=$true;outcome='Recovered';transactionId=$Request.transactionId}}.GetNewClosure() `
+            -BackupMover {param($StateModule)$calls.Backup++;throw "C:\secret\device-key.json`n--token hunter2"}.GetNewClosure()
+        Assert-CcodEqual 'Recovered' $workflow.Result.outcome 'the already successful controller result is retained'
+        Assert-CcodEqual $null $workflow.BackupPath 'a failed optional backup reports no invented path'
+        Assert-CcodEqual 'The session reset succeeded, but the optional device-key backup could not be completed.' $workflow.Warning 'backup failure returns only a fixed non-secret warning'
+        Assert-CcodTrue ($workflow.Warning -cnotmatch 'secret|hunter2|[\r\n]') 'backup warning never publishes raw exception data'
+        Assert-CcodEqual 1 $calls.Controller 'backup failure never retries the controller operation'
+        Assert-CcodEqual 1 $calls.Backup 'the optional backup is attempted only once'
     }
 
     Invoke-CcodTest 'fails clearly in checkout-only mode before creating durable state' {

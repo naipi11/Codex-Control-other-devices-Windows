@@ -14,7 +14,7 @@ param(
     [Parameter(ParameterSetName='Manual')]
     [Nullable[int]]$MainPort=$null,
     [Parameter(ParameterSetName='Manual')]
-    [ValidateRange(1,60000)][int]$TimeoutMilliseconds=30000,
+    [ValidateRange(500,120000)][int]$TimeoutMilliseconds=30000,
     [Parameter(ParameterSetName='Manual')]
     [bool]$RestartOrdinary=$true
 )
@@ -26,16 +26,41 @@ $VerbosePreference='SilentlyContinue'
 $InformationPreference='SilentlyContinue'
 
 $controllerModuleRoot=Join-Path $PSScriptRoot 'modules'
+$script:CcodControllerScriptPath=[IO.Path]::GetFullPath($PSCommandPath)
 Import-Module (Join-Path $controllerModuleRoot 'SessionEngine.psm1') -Force
 Import-Module (Join-Path $controllerModuleRoot 'PersistenceIO.psm1') -Force -Global
+Import-Module (Join-Path $controllerModuleRoot 'RuntimeManifest.psm1') -Force
+
+function Test-CcodControllerCanonicalGuid([object]$Value){
+    if($Value -isnot [string]){return $false}
+    $parsed=[guid]::Empty
+    return [guid]::TryParseExact($Value,'D',[ref]$parsed) -and $parsed.ToString('D') -ceq $Value
+}
 
 function New-CcodControllerErrorResult {
     param($Request,[string]$Code,[string]$Stage,[string]$Message)
     $action=$null;$transactionId=$null
-    if($null -ne $Request -and $null -ne $Request.PSObject.Properties['action'] -and $Request.action -is [string]){$action=$Request.action}
-    if($null -ne $Request -and $null -ne $Request.PSObject.Properties['transactionId'] -and $Request.transactionId -is [string]){$transactionId=$Request.transactionId}
-    $clean=($Message -replace '[\r\n]+',' ').Trim();if($clean.Length -gt 300){$clean=$clean.Substring(0,300)}
-    [pscustomobject][ordered]@{schemaVersion=1;action=$action;ok=$false;outcome='Error';safeState='Error';stage=$Stage;transactionId=$transactionId;package=$null;source=$null;special=$null;probes=$null;recovery=$null;error=[pscustomobject][ordered]@{code=$Code;stage=$Stage;message=$clean};logFile=$null}
+    if($null -ne $Request -and $null -ne $Request.PSObject.Properties['action'] -and $Request.action -is [string] -and @('Inspect','Apply','RepairRenderer','Recover') -ccontains $Request.action){$action=$Request.action}
+    if($null -ne $Request -and $null -ne $Request.PSObject.Properties['transactionId'] -and (Test-CcodControllerCanonicalGuid $Request.transactionId)){$transactionId=$Request.transactionId}
+    [pscustomobject][ordered]@{schemaVersion=1;action=$action;ok=$false;outcome='Error';safeState='Error';stage=$Stage;transactionId=$transactionId;package=$null;source=$null;special=$null;probes=$null;recovery=$null;error=[pscustomobject][ordered]@{code=$Code;stage=$Stage;message='The session controller failed safely. See the session log for details.'};logFile=$null}
+}
+
+function Write-CcodControllerDiagnostic {
+    param($Result,$Request,$Paths,[hashtable]$Adapter)
+    if($null -eq $Result -or $null -eq $Paths -or $null -eq $Adapter -or $null -eq $Adapter.WriteLog){return $false}
+    $record=[pscustomobject][ordered]@{
+        schemaVersion=1
+        timestampUtc=[DateTime]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+        action=$Result.action
+        transactionId=$Result.transactionId
+        stage=$Result.stage
+        code=$Result.error.code
+    }
+    try{
+        & $Adapter.WriteLog $Paths.SessionLogPath ($record|ConvertTo-Json -Depth 4 -Compress)|Out-Null
+        $Result.logFile=$Paths.SessionLogPath
+        return $true
+    }catch{return $false}
 }
 
 function Assert-CcodControllerEngineResult {
@@ -52,6 +77,7 @@ function Get-CcodControllerAdapters($Adapters){
         WriteResult={param($Path,$Value)Write-CcodAtomicJson -Path $Path -Value $Value}
         WriteStdout={param($Line)[Console]::Out.WriteLine($Line)}
         WriteStderr={param($Line)[Console]::Error.WriteLine($Line)}
+        WriteLog={param($Path,$Message)Write-CcodRotatingLog -Path $Path -Message $Message}
     }
     if($null -ne $Adapters){foreach($key in $Adapters.Keys){$defaults[$key]=$Adapters[$key]}}
     return $defaults
@@ -60,7 +86,7 @@ function Get-CcodControllerAdapters($Adapters){
 function Invoke-CcodSessionController {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,[Parameter(Mandatory)][string]$ResultPath,[hashtable]$Adapters)
-    $adapter=Get-CcodControllerAdapters $Adapters;$result=$null
+    $adapter=Get-CcodControllerAdapters $Adapters;$result=$null;$diagnosticWritten=$false
     try{
         $output=@(& $adapter.EngineInvoker $Request.action $Request $Paths)
         $candidates=@($output|Where-Object{$_ -is [pscustomobject] -and $null -ne $_.PSObject.Properties['schemaVersion']})
@@ -68,11 +94,13 @@ function Invoke-CcodSessionController {
         $result=$candidates[0];Assert-CcodControllerEngineResult $result $Request
     }catch{
         $result=New-CcodControllerErrorResult $Request 'CCOD_CONTROLLER_ENGINE_RESULT_INVALID' 'EngineResult' $_.Exception.Message
+        $diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter
     }
     try{
         & $adapter.WriteResult $ResultPath $result|Out-Null
     }catch{
         $result=New-CcodControllerErrorResult $Request 'CCOD_CONTROLLER_RESULT_WRITE_FAILED' 'ResultWrite' $_.Exception.Message
+        if(-not $diagnosticWritten){$diagnosticWritten=Write-CcodControllerDiagnostic $result $Request $Paths $adapter}
         try{& $adapter.WriteStderr 'CCOD_CONTROLLER_RESULT_WRITE_FAILED: result persistence failed'|Out-Null}catch{}
     }
     $line=$result|ConvertTo-Json -Depth 16 -Compress
@@ -81,9 +109,31 @@ function Invoke-CcodSessionController {
     return [pscustomobject][ordered]@{Result=$result;ExitCode=if($safe){0}else{1}}
 }
 
+function Get-CcodControllerInstallRoot {
+    $localAppData=[Environment]::GetEnvironmentVariable('LOCALAPPDATA','Process')
+    if([string]::IsNullOrWhiteSpace($localAppData)){$localAppData=[Environment]::GetFolderPath('LocalApplicationData')}
+    if([string]::IsNullOrWhiteSpace($localAppData) -or -not [IO.Path]::IsPathRooted($localAppData)){throw 'LOCALAPPDATA is unavailable'}
+    return [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetFullPath($localAppData)) 'CodexControlOtherDevices'))
+}
+
+function Resolve-CcodControllerRuntime {
+    param([string]$InstallRoot=(Get-CcodControllerInstallRoot),[string]$ControllerPath=$script:CcodControllerScriptPath)
+    try{
+        $active=Read-CcodActiveRuntime -InstallRoot $InstallRoot
+        $runtimeRoot=[IO.Path]::GetFullPath((Join-Path (Join-Path $InstallRoot 'runtime') $active.activeRuntime))
+        $validation=Test-CcodRuntimeManifest -RuntimeDirectory $runtimeRoot -ExpectedRuntimeId $active.activeRuntime
+        $expectedController=[IO.Path]::GetFullPath((Join-Path $runtimeRoot 'src\persistence\SessionController.ps1'))
+        if(-not $validation.Valid -or [IO.Path]::GetFullPath($ControllerPath) -cne $expectedController){throw 'active runtime mismatch'}
+        return [pscustomobject][ordered]@{InstallRoot=[IO.Path]::GetFullPath($InstallRoot);RuntimeRoot=$runtimeRoot;RuntimeId=$active.activeRuntime;ControllerPath=$expectedController}
+    }catch{
+        $exception=[InvalidOperationException]::new('This controller is not the manifest-verified active installed runtime.')
+        throw [Management.Automation.ErrorRecord]::new($exception,'CCOD_RUNTIME_UNAUTHORIZED',[Management.Automation.ErrorCategory]::SecurityError,$ControllerPath)
+    }
+}
+
 function Get-CcodInstalledControllerPaths {
-    $runtimeRoot=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-    $installRoot=Split-Path (Split-Path $runtimeRoot -Parent) -Parent
+    param([Parameter(Mandatory)]$RuntimeContext)
+    $runtimeRoot=$RuntimeContext.RuntimeRoot;$installRoot=$RuntimeContext.InstallRoot
     $stateRoot=[IO.Path]::GetFullPath((Join-Path $installRoot 'state'))
     [pscustomobject][ordered]@{
         StateRoot=$stateRoot
@@ -102,13 +152,24 @@ function New-CcodManualControllerRequest {
 }
 
 if($MyInvocation.InvocationName -ne '.'){
+    if($PSCmdlet.ParameterSetName -ceq 'Supervisor' -and ([string]::IsNullOrWhiteSpace($RequestPath) -or [string]::IsNullOrWhiteSpace($ResultPath) -or -not [IO.Path]::IsPathRooted($RequestPath) -or -not [IO.Path]::IsPathRooted($ResultPath) -or [IO.Path]::GetFullPath($RequestPath) -cne $RequestPath -or [IO.Path]::GetFullPath($ResultPath) -cne $ResultPath)){
+        $failure=New-CcodControllerErrorResult $null 'CCOD_REQUEST_INVALID' 'InputValidation' 'Canonical absolute RequestPath and ResultPath are required'
+        [Console]::Out.WriteLine(($failure|ConvertTo-Json -Depth 16 -Compress));exit 1
+    }
+    try{$runtimeContext=Resolve-CcodControllerRuntime}catch{
+        $failure=New-CcodControllerErrorResult $null 'CCOD_RUNTIME_UNAUTHORIZED' 'RuntimeAuthorization' 'The active installed runtime could not be verified.'
+        if($PSCmdlet.ParameterSetName -ceq 'Supervisor'){try{Write-CcodAtomicJson -Path $ResultPath -Value $failure}catch{}}
+        [Console]::Out.WriteLine(($failure|ConvertTo-Json -Depth 16 -Compress));exit 1
+    }
+    $paths=Get-CcodInstalledControllerPaths -RuntimeContext $runtimeContext
     if($PSCmdlet.ParameterSetName -ceq 'Supervisor'){
-        if([string]::IsNullOrWhiteSpace($RequestPath) -or [string]::IsNullOrWhiteSpace($ResultPath) -or -not [IO.Path]::IsPathRooted($RequestPath) -or -not [IO.Path]::IsPathRooted($ResultPath) -or [IO.Path]::GetFullPath($RequestPath) -cne $RequestPath -or [IO.Path]::GetFullPath($ResultPath) -cne $ResultPath){
-            $failure=New-CcodControllerErrorResult $null 'CCOD_REQUEST_INVALID' 'InputValidation' 'Canonical absolute RequestPath and ResultPath are required'
-            [Console]::Out.WriteLine(($failure|ConvertTo-Json -Depth 16 -Compress));exit 1
-        }
         try{$request=Read-CcodStrictJson -Path $RequestPath -ExpectedSchema 1 -Kind 'session controller request'}catch{
             $failure=New-CcodControllerErrorResult $null 'CCOD_REQUEST_INVALID' 'InputValidation' $_.Exception.Message
+            try{Write-CcodAtomicJson -Path $ResultPath -Value $failure}catch{}
+            [Console]::Out.WriteLine(($failure|ConvertTo-Json -Depth 16 -Compress));exit 1
+        }
+        if($request.runtimeId -isnot [string] -or $request.runtimeId -cne $runtimeContext.RuntimeId){
+            $failure=New-CcodControllerErrorResult $request 'CCOD_RUNTIME_UNAUTHORIZED' 'RuntimeAuthorization' 'The request runtime does not match the active installed runtime.'
             try{Write-CcodAtomicJson -Path $ResultPath -Value $failure}catch{}
             [Console]::Out.WriteLine(($failure|ConvertTo-Json -Depth 16 -Compress));exit 1
         }
@@ -117,13 +178,13 @@ if($MyInvocation.InvocationName -ne '.'){
             $failure=New-CcodControllerErrorResult $null 'CCOD_REQUEST_INVALID' 'InputValidation' 'A manual Action is required'
             [Console]::Out.WriteLine(($failure|ConvertTo-Json -Depth 16 -Compress));exit 1
         }
-        $paths=Get-CcodInstalledControllerPaths;$runtimeRoot=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent;$runtimeId=Split-Path $runtimeRoot -Leaf
+        $runtimeId=$runtimeContext.RuntimeId
         $process=[Diagnostics.Process]::GetCurrentProcess()
         try{$created=$process.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture);$sessionId=[string]$process.SessionId}finally{$process.Dispose()}
         $request=New-CcodManualControllerRequest -Action $Action -RuntimeId $runtimeId -SupervisorIdentity ([pscustomobject][ordered]@{pid=$PID;creationTimeUtc=$created;sessionId=$sessionId}) -ExistingOnly $ExistingOnly -RendererPort $RendererPort -MainPort $MainPort -TimeoutMilliseconds $TimeoutMilliseconds -RestartOrdinary $RestartOrdinary
         $resultDirectory=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'CodexControlOtherDevices'))
         [IO.Directory]::CreateDirectory($resultDirectory)|Out-Null;$ResultPath=[IO.Path]::GetFullPath((Join-Path $resultDirectory ("manual-$($request.transactionId).json")))
     }
-    $run=Invoke-CcodSessionController -Request $request -Paths (Get-CcodInstalledControllerPaths) -ResultPath $ResultPath
+    $run=Invoke-CcodSessionController -Request $request -Paths $paths -ResultPath $ResultPath
     exit $run.ExitCode
 }
