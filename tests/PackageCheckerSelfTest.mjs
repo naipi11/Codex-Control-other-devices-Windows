@@ -1,22 +1,96 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { inspectPackage } from "../src/check-package.mjs";
+import { inspectPackage, runCheckPackageCli } from "../src/check-package.mjs";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "ccod-package-test-"));
-try {
-  const asar = path.join(root, "app.asar");
-  const body = Buffer.from("782640499 remote-control-device-key.node Remote control device keys are only available on macOS Control other devices from this PC trailing-hash-bytes");
-  fs.writeFileSync(asar, body);
-  const result = await inspectPackage(asar, path.join(root, "native"));
+const firstChunk = Buffer.concat([
+  Buffer.from("782640499 remote-control-device-key.node Remote control device keys are only available on macOS Control other devices from this PC "),
+  Buffer.alloc(4 * 1024 * 1024),
+]);
+const trailingChunk = Buffer.from("trailing-hash-bytes");
+const expectedDigest = `fake-sha256:${Buffer.concat([firstChunk, trailingChunk]).toString("hex")}`;
+const expectedSignatures = {
+  invertedGate: true,
+  deviceKeyModuleReference: true,
+  macOnlyGuard: true,
+  windowsControllerUi: true,
+};
+
+function createFakeAdapters({ nativeModulePresent = false } = {}) {
+  const stdout = [];
+  return {
+    adapters: {
+      async access(asarPath) {
+        if (asarPath !== "fixture.asar") throw new Error(`missing fixture: ${asarPath}`);
+      },
+      createHash(algorithm) {
+        const chunks = [];
+        return {
+          update(chunk) { chunks.push(Buffer.from(chunk)); },
+          digest(encoding) {
+            if (encoding !== "hex") throw new Error(`unexpected digest encoding: ${encoding}`);
+            return `fake-${algorithm}:${Buffer.concat(chunks).toString("hex")}`;
+          },
+        };
+      },
+      createReadStream(asarPath, options) {
+        if (asarPath !== "fixture.asar") throw new Error(`missing fixture: ${asarPath}`);
+        if (options.highWaterMark !== 4 * 1024 * 1024) throw new Error("unexpected chunk size");
+        return (async function* () {
+          yield firstChunk;
+          yield trailingChunk;
+        })();
+      },
+      async readdir(directory) {
+        if (directory !== "fixture.native") throw new Error(`unexpected directory: ${directory}`);
+        if (!nativeModulePresent) {
+          const error = new Error("missing native directory");
+          error.code = "ENOENT";
+          throw error;
+        }
+        return [{
+          isDirectory: () => false,
+          isFile: () => true,
+          name: "remote-control-device-key.node",
+        }];
+      },
+      joinPath: (...parts) => parts.join("/"),
+      process: {
+        argv: ["node", "check-package.mjs", "fixture.asar", "fixture.native"],
+        stderr: { write: () => {} },
+        stdout: { write: (text) => stdout.push(text) },
+      },
+    },
+    stdout,
+  };
+}
+
+{
+  const { adapters } = createFakeAdapters();
+  const result = await inspectPackage("fixture.asar", "fixture.native", adapters);
   assert.equal(result.schemaVersion, 1);
   assert.equal(result.classification, "CandidateCompatible");
-  assert.equal(result.appAsarSha256, crypto.createHash("sha256").update(body).digest("hex"));
-  fs.mkdirSync(path.join(root, "native"), { recursive: true });
-  fs.writeFileSync(path.join(root, "native", "remote-control-device-key.node"), "fixture");
-  assert.equal((await inspectPackage(asar, path.join(root, "native"))).classification, "NativeModulePresent");
-} finally {
-  fs.rmSync(root, { force: true, recursive: true });
+  assert.equal(result.affected, true);
+  assert.equal(result.appAsarSha256, expectedDigest);
+  assert.deepEqual(result.signatures, expectedSignatures);
+}
+
+{
+  const { adapters } = createFakeAdapters({ nativeModulePresent: true });
+  const result = await inspectPackage("fixture.asar", "fixture.native", adapters);
+  assert.equal(result.classification, "NativeModulePresent");
+  assert.equal(result.affected, false);
+}
+
+{
+  const { adapters, stdout } = createFakeAdapters();
+  assert.equal(await runCheckPackageCli(adapters), 0);
+  assert.deepEqual(JSON.parse(stdout.join("")), {
+    affected: true,
+    appAsarSha256: expectedDigest,
+    asarPath: "fixture.asar",
+    classification: "CandidateCompatible",
+    nativeDirectory: "fixture.native",
+    nativeModulePresent: false,
+    schemaVersion: 1,
+    signatures: expectedSignatures,
+  });
 }
