@@ -473,6 +473,16 @@ function New-CcodFailedAttemptClearReceipt {
     return [pscustomobject][ordered]@{ Outcome = $Outcome }
 }
 
+function Assert-CcodFailedAttemptAdapters {
+    param([Parameter(Mandatory)][hashtable]$Adapters)
+
+    foreach ($name in @('BeforeFailedPackageAttemptRecheck', 'WriteAtomicJson')) {
+        if ($Adapters[$name] -isnot [scriptblock]) {
+            Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_ADAPTER_INVALID' 'Failed package attempt adapter contract is invalid' $null
+        }
+    }
+}
+
 function Assert-CcodFailedAttemptClearInputs {
     param(
         [AllowNull()]$StateRoot,
@@ -499,6 +509,9 @@ function Assert-CcodFailedAttemptClearInputs {
     }
     if ($RuntimeId -isnot [string] -or $RuntimeId -cnotmatch '^[A-Za-z0-9._-]{1,96}$') {
         Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'RuntimeId must be a Task 1-safe runtime ID' $RuntimeId
+    }
+    if ($ExpectedConfirmedAtUtc -isnot [string]) {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' 'ExpectedConfirmedAtUtc must be an exact canonical UTC timestamp string' $ExpectedConfirmedAtUtc
     }
     Assert-CcodUtcTimestamp -Value $ExpectedConfirmedAtUtc -ErrorId 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID' -Name 'ExpectedConfirmedAtUtc'
     return $canonicalRoot
@@ -559,11 +572,15 @@ function Clear-CcodFailedPackageAttempt {
         [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$AppAsarSha256,
         [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$RuntimeId,
         [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedConfirmedAtUtc,
-        [hashtable]$Adapters
+        [AllowNull()]$Adapters
     )
 
     $canonicalRoot = Assert-CcodFailedAttemptClearInputs -StateRoot $StateRoot -PackageFullName $PackageFullName -AppAsarSha256 $AppAsarSha256 -RuntimeId $RuntimeId -ExpectedConfirmedAtUtc $ExpectedConfirmedAtUtc
+    if ($null -ne $Adapters -and $Adapters -isnot [hashtable]) {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_ADAPTER_INVALID' 'Failed package attempt adapter contract is invalid' $null
+    }
     $adapters = Get-CcodStateAdapters -Adapters $Adapters
+    Assert-CcodFailedAttemptAdapters -Adapters $adapters
     $path = Get-CcodStatePath -StateRoot $canonicalRoot -Leaf 'verified-packages.json'
     $suppressionKey = Get-CcodSuppressionKey -PackageFullName $PackageFullName -AppAsarSha256 $AppAsarSha256 -RuntimeId $RuntimeId
 
@@ -573,12 +590,16 @@ function Clear-CcodFailedPackageAttempt {
     if (-not (Test-CcodFailedAttemptIdentity -Record $initialEntry.Value -PackageFullName $PackageFullName -AppAsarSha256 $AppAsarSha256 -RuntimeId $RuntimeId)) {
         Throw-CcodStateError 'CCOD_VERIFIED_PACKAGES_INVALID' 'Verified package record identity does not match its exact suppression key' $initialEntry.Value
     }
-    if ($initialEntry.Value.confirmedAtUtc -cne $ExpectedConfirmedAtUtc) { return New-CcodFailedAttemptClearReceipt -Outcome 'Conflict' }
     if ($initialEntry.Value.dynamicOutcome -cne 'Failed') { return New-CcodFailedAttemptClearReceipt -Outcome 'NotFailed' }
+    if ($initialEntry.Value.confirmedAtUtc -cne $ExpectedConfirmedAtUtc) { return New-CcodFailedAttemptClearReceipt -Outcome 'Conflict' }
 
     $initialSnapshot = $initial | ConvertTo-Json -Depth 16 -Compress
     $updated = New-CcodVerifiedPackagesWithoutKey -VerifiedPackages $initial -SuppressionKey $suppressionKey -Adapters $adapters
-    [void](& $adapters.BeforeFailedPackageAttemptRecheck $path $suppressionKey)
+    try {
+        [void](& $adapters.BeforeFailedPackageAttemptRecheck $path $suppressionKey)
+    } catch {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_RECHECK_FAILED' 'Failed package attempt precommit recheck failed' $null
+    }
 
     $current = Read-CcodVerifiedPackages -StateRoot $canonicalRoot -Adapters $adapters
     $currentEntry = Get-CcodExactStateEntry -Container $current.packages -Name $suppressionKey
@@ -592,7 +613,11 @@ function Clear-CcodFailedPackageAttempt {
         return New-CcodFailedAttemptClearReceipt -Outcome 'Conflict'
     }
 
-    [void](& $adapters.WriteAtomicJson $path $updated)
+    try {
+        [void](& $adapters.WriteAtomicJson $path $updated)
+    } catch {
+        Throw-CcodStateError 'CCOD_FAILED_ATTEMPT_WRITE_FAILED' 'Failed package attempt atomic write failed' $null
+    }
     return New-CcodFailedAttemptClearReceipt -Outcome 'Cleared'
 }
 

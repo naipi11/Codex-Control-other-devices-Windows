@@ -500,6 +500,7 @@ try {
         $beforeSuccess = [IO.File]::ReadAllBytes((Join-Path $state 'verified-packages.json'))
 
         Assert-CcodFailedAttemptClearReceipt -Receipt (Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z') -Outcome 'NotFailed' -Message 'successful record clear'
+        Assert-CcodFailedAttemptClearReceipt -Receipt (Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:07.0000000Z') -Outcome 'NotFailed' -Message 'successful record stale timestamp clear'
         Assert-CcodEqual ([Convert]::ToBase64String($beforeSuccess)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $state 'verified-packages.json')))) 'successful history bytes are unchanged'
 
         $failed = New-CcodVerifiedRecord
@@ -517,15 +518,20 @@ try {
         Initialize-CcodStateFixture -StateRoot $state
         $common = @{ StateRoot=$state; PackageFullName='pkg'; AppAsarSha256=('a' * 64); RuntimeId='runtime-1'; ExpectedConfirmedAtUtc='2030-02-03T04:05:06.0000000Z' }
         $cases = @(
+            @{ Name='state null'; Mutate={ param($x) $x.StateRoot=$null } },
             @{ Name='state type'; Mutate={ param($x) $x.StateRoot=123 } },
             @{ Name='state dot path'; Mutate={ param($x) $x.StateRoot=(Join-Path $state '.') } },
+            @{ Name='package null'; Mutate={ param($x) $x.PackageFullName=$null } },
             @{ Name='package type'; Mutate={ param($x) $x.PackageFullName=123 } },
             @{ Name='package empty'; Mutate={ param($x) $x.PackageFullName='' } },
             @{ Name='package delimiter'; Mutate={ param($x) $x.PackageFullName='pkg|other' } },
+            @{ Name='hash null'; Mutate={ param($x) $x.AppAsarSha256=$null } },
             @{ Name='hash type'; Mutate={ param($x) $x.AppAsarSha256=123 } },
             @{ Name='hash uppercase'; Mutate={ param($x) $x.AppAsarSha256=('A' * 64) } },
+            @{ Name='runtime null'; Mutate={ param($x) $x.RuntimeId=$null } },
             @{ Name='runtime type'; Mutate={ param($x) $x.RuntimeId=123 } },
             @{ Name='runtime unsafe'; Mutate={ param($x) $x.RuntimeId='../runtime' } },
+            @{ Name='timestamp null'; Mutate={ param($x) $x.ExpectedConfirmedAtUtc=$null } },
             @{ Name='timestamp type'; Mutate={ param($x) $x.ExpectedConfirmedAtUtc=[DateTime]::UtcNow } },
             @{ Name='timestamp noncanonical'; Mutate={ param($x) $x.ExpectedConfirmedAtUtc='2030-02-03T04:05:06Z' } }
         )
@@ -535,6 +541,48 @@ try {
             & $case.Mutate $arguments
             Assert-CcodThrows { Clear-CcodFailedPackageAttempt @arguments } 'CCOD_FAILED_ATTEMPT_CLEAR_INVALID'
         }
+    }
+
+    Invoke-CcodTest 'rejects invalid callback adapter shapes with one bounded non-secret error' {
+        foreach ($adapterName in @('BeforeFailedPackageAttemptRecheck', 'WriteAtomicJson')) {
+            $state = Join-Path $root ('clear-failed-adapter-' + $adapterName.ToLowerInvariant())
+            Initialize-CcodStateFixture -StateRoot $state
+            $path = Join-Path $state 'verified-packages.json'
+            $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+            Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion=1; packages=[ordered]@{ $key=(New-CcodVerifiedRecord) } })
+            $before = [IO.File]::ReadAllBytes($path)
+            $secretAdapterValue = 'SECRET_ADAPTER_VALUE_' + $adapterName + '_' + $state
+            $receipt = $null
+            $caught = $null
+            try {
+                $receipt = Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z' -Adapters @{ $adapterName=$secretAdapterValue }
+            } catch {
+                $caught = $_
+            }
+
+            Assert-CcodEqual $null $receipt "$adapterName invalid shape returns no receipt"
+            Assert-CcodTrue ($null -ne $caught) "$adapterName invalid shape throws"
+            Assert-CcodEqual 'CCOD_FAILED_ATTEMPT_ADAPTER_INVALID' (([string]$caught.FullyQualifiedErrorId -split ',')[0]) "$adapterName invalid shape uses one stable ID"
+            Assert-CcodEqual 'Failed package attempt adapter contract is invalid' $caught.Exception.Message "$adapterName invalid shape uses a fixed generic message"
+            Assert-CcodEqual $null $caught.TargetObject "$adapterName invalid shape has null TargetObject"
+            Assert-CcodTrue (-not (($caught | Out-String).Contains($secretAdapterValue))) "$adapterName invalid shape does not expose the adapter value"
+            Assert-CcodEqual ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) "$adapterName invalid shape leaves exact prior target bytes"
+        }
+
+        $state = Join-Path $root 'clear-failed-adapter-container'
+        Initialize-CcodStateFixture -StateRoot $state
+        $secretAdapterShape = 'SECRET_INVALID_ADAPTER_CONTAINER_' + $state
+        $caught = $null
+        try {
+            Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z' -Adapters $secretAdapterShape | Out-Null
+        } catch {
+            $caught = $_
+        }
+        Assert-CcodTrue ($null -ne $caught) 'invalid adapter container throws'
+        Assert-CcodEqual 'CCOD_FAILED_ATTEMPT_ADAPTER_INVALID' (([string]$caught.FullyQualifiedErrorId -split ',')[0]) 'invalid adapter container uses one stable ID'
+        Assert-CcodEqual 'Failed package attempt adapter contract is invalid' $caught.Exception.Message 'invalid adapter container uses a fixed generic message'
+        Assert-CcodEqual $null $caught.TargetObject 'invalid adapter container has null TargetObject'
+        Assert-CcodTrue (-not (($caught | Out-String).Contains($secretAdapterShape))) 'invalid adapter container does not expose its value'
     }
 
     Invoke-CcodTest 'refuses missing corrupt or identity-inconsistent verified state without changing evidence' {
@@ -601,23 +649,55 @@ try {
         }
     }
 
-    Invoke-CcodTest 'leaves the complete verified file unchanged when atomic commit fails' {
-        $state = Join-Path $root 'clear-failed-atomic-error'
-        Initialize-CcodStateFixture -StateRoot $state
-        $path = Join-Path $state 'verified-packages.json'
-        $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
-        Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion=1; packages=[ordered]@{ $key=(New-CcodVerifiedRecord) } })
-        $before = [IO.File]::ReadAllBytes($path)
-        $calls = [pscustomobject]@{ Count=0 }
-        $writer = {
-            param($VerifiedPath, $Value)
-            $calls.Count++
-            throw [Management.Automation.ErrorRecord]::new([IO.IOException]::new('injected atomic write failure'), 'CCOD_TEST_ATOMIC_FAILURE', [Management.Automation.ErrorCategory]::WriteError, $VerifiedPath)
-        }.GetNewClosure()
-        Assert-CcodThrows { Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z' -Adapters @{ WriteAtomicJson=$writer } } 'CCOD_TEST_ATOMIC_FAILURE'
-        Assert-CcodEqual 1 $calls.Count 'atomic writer is attempted exactly once'
-        Assert-CcodEqual ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) 'failed commit leaves exact prior target bytes'
-        Assert-CcodEqual 1 @((Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).packages.PSObject.Properties).Count 'failed commit leaves a complete parseable store'
+    Invoke-CcodTest 'replaces every recheck and atomic writer callback failure with a fresh bounded error' {
+        foreach ($stage in @('Recheck', 'Write')) {
+            $state = Join-Path $root ('clear-failed-callback-' + $stage.ToLowerInvariant())
+            Initialize-CcodStateFixture -StateRoot $state
+            $path = Join-Path $state 'verified-packages.json'
+            $key = 'pkg|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|runtime-1'
+            Write-CcodStateJson -StateRoot $state -Leaf 'verified-packages.json' -Value ([ordered]@{ schemaVersion=1; packages=[ordered]@{ $key=(New-CcodVerifiedRecord) } })
+            $before = [IO.File]::ReadAllBytes($path)
+            $secretTarget = Join-Path $state ('secret-' + $stage + '.txt')
+            $secretMessage = 'SECRET_CALLBACK_MESSAGE_' + $stage + '_' + $secretTarget
+            $expectedId = if ($stage -ceq 'Recheck') { 'CCOD_FAILED_ATTEMPT_RECHECK_FAILED' } else { 'CCOD_FAILED_ATTEMPT_WRITE_FAILED' }
+            $expectedMessage = if ($stage -ceq 'Recheck') { 'Failed package attempt precommit recheck failed' } else { 'Failed package attempt atomic write failed' }
+            $calls = [pscustomobject]@{ Recheck=0; Write=0 }
+            $recheck = {
+                param($VerifiedPath, $SuppressionKey)
+                $calls.Recheck++
+                if ($stage -ceq 'Recheck') {
+                    throw [Management.Automation.ErrorRecord]::new([InvalidOperationException]::new($secretMessage), $expectedId, [Management.Automation.ErrorCategory]::InvalidData, $secretTarget)
+                }
+            }.GetNewClosure()
+            $writer = {
+                param($VerifiedPath, $Value)
+                $calls.Write++
+                if ($stage -ceq 'Write') {
+                    throw [Management.Automation.ErrorRecord]::new([IO.IOException]::new($secretMessage), $expectedId, [Management.Automation.ErrorCategory]::WriteError, $secretTarget)
+                }
+            }.GetNewClosure()
+
+            $receipt = $null
+            $caught = $null
+            try {
+                $receipt = Clear-CcodFailedPackageAttempt -StateRoot $state -PackageFullName 'pkg' -AppAsarSha256 ('a' * 64) -RuntimeId 'runtime-1' -ExpectedConfirmedAtUtc '2030-02-03T04:05:06.0000000Z' -Adapters @{ BeforeFailedPackageAttemptRecheck=$recheck; WriteAtomicJson=$writer }
+            } catch {
+                $caught = $_
+            }
+
+            Assert-CcodEqual $null $receipt "$stage callback failure returns no Cleared receipt"
+            Assert-CcodTrue ($null -ne $caught) "$stage callback failure throws"
+            Assert-CcodEqual $expectedId (([string]$caught.FullyQualifiedErrorId -split ',')[0]) "$stage callback failure uses the exact stable ID"
+            Assert-CcodEqual $expectedMessage $caught.Exception.Message "$stage callback failure uses a fixed generic message"
+            Assert-CcodEqual $null $caught.TargetObject "$stage callback failure has null TargetObject"
+            $rendered = $caught | Out-String
+            Assert-CcodTrue (-not $rendered.Contains($secretMessage)) "$stage callback error does not expose the secret message"
+            Assert-CcodTrue (-not $rendered.Contains($secretTarget)) "$stage callback error does not expose the secret target"
+            Assert-CcodEqual 1 $calls.Recheck "$stage path invokes recheck once"
+            Assert-CcodEqual ($(if ($stage -ceq 'Write') { 1 } else { 0 })) $calls.Write "$stage path invokes writer only when recheck succeeds"
+            Assert-CcodEqual ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) "$stage callback failure leaves exact prior target bytes"
+            Assert-CcodEqual 1 @((Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).packages.PSObject.Properties).Count "$stage callback failure leaves a complete parseable store"
+        }
     }
 
     Invoke-CcodTest 'updates each consent without changing the other consent or verified candidates' {
