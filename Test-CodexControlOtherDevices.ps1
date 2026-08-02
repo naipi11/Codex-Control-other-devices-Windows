@@ -1,11 +1,13 @@
 [CmdletBinding()]
 param(
-    [switch]$Json
+    [switch]$Json,
+    [string[]]$NodePath
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $checker = Join-Path $projectRoot 'src\check-package.mjs'
+Import-Module (Join-Path $projectRoot 'src\persistence\modules\CompatibilityProbe.psm1') -Force
 $reasons = [System.Collections.Generic.List[string]]::new()
 $warnings = [System.Collections.Generic.List[string]]::new()
 
@@ -14,6 +16,8 @@ $result = [ordered]@{
     OperatingSystem = [System.Environment]::OSVersion.VersionString
     IsWindows = $env:OS -eq 'Windows_NT' -or $PSVersionTable.PSEdition -eq 'Desktop'
     PackageInstalled = $false
+    PackageFullName = $null
+    PackageFamilyName = $null
     PackageVersion = $null
     ExecutablePath = $null
     AppAsarPath = $null
@@ -21,6 +25,10 @@ $result = [ordered]@{
     NodeVersion = $null
     NodeMajor = $null
     NodeSupported = $false
+    NodeCapabilities = $null
+    SchemaVersion = $null
+    StaticClassification = 'UnknownOrIncompatible'
+    AppAsarSha256 = $null
     PackageSignatures = $null
     AffectedBuildDetected = $false
     Reasons = $reasons
@@ -36,55 +44,33 @@ try {
         $reasons.Add('CODEX_HOME must be an absolute path so launch and rollback resolve the same key store.')
     }
 
-    $package = Get-AppxPackage OpenAI.Codex -ErrorAction SilentlyContinue
-    if (-not $package) {
-        $reasons.Add('The Microsoft Store/MSIX OpenAI.Codex package is not installed.')
-    } else {
-        $result.PackageInstalled = $true
-        $result.PackageVersion = $package.Version.ToString()
-        $result.ExecutablePath = Join-Path $package.InstallLocation 'app\ChatGPT.exe'
-        $result.AppAsarPath = Join-Path $package.InstallLocation 'app\resources\app.asar'
-        $nativeDirectory = Join-Path $package.InstallLocation 'app\resources\native'
-
-        if (-not (Test-Path -LiteralPath $result.ExecutablePath -PathType Leaf)) {
-            $reasons.Add("Codex executable was not found: $($result.ExecutablePath)")
-        }
-        if (-not (Test-Path -LiteralPath $result.AppAsarPath -PathType Leaf)) {
-            $reasons.Add("Codex app.asar was not found: $($result.AppAsarPath)")
+    $nodeCandidates = @($NodePath)
+    if (-not $PSBoundParameters.ContainsKey('NodePath')) {
+        $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+        if ($nodeCommand) {
+            $nodeCandidates = @([IO.Path]::GetFullPath([string]$nodeCommand.Source))
         }
     }
-
-    $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-    if (-not $nodeCommand) {
-        $reasons.Add('Node.js 22 or newer is required but node.exe is not on PATH.')
-    } else {
-        $result.NodePath = $nodeCommand.Source
-        $result.NodeVersion = (& $nodeCommand.Source --version).Trim()
-        $result.NodeMajor = [int](($result.NodeVersion -replace '^v', '').Split('.')[0])
-        $result.NodeSupported = $result.NodeMajor -ge 22
-        if (-not $result.NodeSupported) {
-            $reasons.Add("Node.js 22 or newer is required; found $($result.NodeVersion).")
-        }
+    $probe = Invoke-CcodStaticProbe -NodeCandidates $nodeCandidates -CheckerPath $checker
+    foreach ($name in @('PackageInstalled', 'PackageFullName', 'PackageFamilyName', 'PackageVersion', 'ExecutablePath', 'AppAsarPath', 'NodePath', 'NodeVersion', 'NodeMajor', 'NodeSupported', 'NodeCapabilities', 'SchemaVersion', 'StaticClassification', 'AppAsarSha256', 'PackageSignatures', 'AffectedBuildDetected')) {
+        $result[$name] = $probe.$name
     }
 
-    if (-not (Test-Path -LiteralPath $checker -PathType Leaf)) {
-        $reasons.Add("Package checker was not found: $checker")
+    switch ($probe.Code) {
+        'PACKAGE_NOT_FOUND' { $reasons.Add('The Microsoft Store/MSIX OpenAI.Codex package is not installed.') }
+        'PACKAGE_AMBIGUOUS' { $reasons.Add('Expected exactly one current-user OpenAI.Codex package.') }
+        'PACKAGE_FAMILY_MISMATCH' { $reasons.Add('The installed package family is not the expected OpenAI.Codex package.') }
+        'PACKAGE_LOCATION_INVALID' { $reasons.Add('The installed OpenAI.Codex package has an invalid install location.') }
+        'NODE_NOT_FOUND' { $reasons.Add('Node.js 22 or newer is required but no supplied node.exe path is valid.') }
+        'NODE_VERSION_UNSUPPORTED' { $reasons.Add("Node.js 22 or newer is required; found $($probe.NodeVersion).") }
+        'CHECKER_PATH_INVALID' { $reasons.Add("Package checker path is invalid: $checker") }
+        'CHECKER_NOT_FOUND' { $reasons.Add("Package checker was not found: $checker") }
+        'CHECKER_FAILED' { $reasons.Add('Could not inspect the installed Codex package.') }
+        'CHECKER_JSON_INVALID' { $reasons.Add('The package checker emitted malformed JSON.') }
+        'CHECKER_SCHEMA_INVALID' { $reasons.Add('The package checker emitted incomplete or inconsistent evidence.') }
     }
-
-    if ($result.PackageInstalled -and $result.NodeSupported -and
-        (Test-Path -LiteralPath $result.AppAsarPath -PathType Leaf) -and
-        (Test-Path -LiteralPath $checker -PathType Leaf)) {
-        $checkerOutput = & $result.NodePath $checker $result.AppAsarPath $nativeDirectory 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $reasons.Add("Could not inspect the installed Codex package: $($checkerOutput -join ' ')")
-        } else {
-            $packageState = ($checkerOutput -join "`n") | ConvertFrom-Json
-            $result.PackageSignatures = $packageState
-            $result.AffectedBuildDetected = [bool]$packageState.affected
-            if (-not $result.AffectedBuildDetected) {
-                $reasons.Add('The installed package does not match the known Windows controller bug signature. Refusing to inject into an unreviewed build.')
-            }
-        }
+    if ($probe.Code -eq 'CHECKER_OK' -and -not $probe.AffectedBuildDetected) {
+        $reasons.Add('The installed package does not match the known Windows controller bug signature. Refusing to inject into an unreviewed build.')
     }
 
     $warnings.Add('Account authentication cannot be verified locally. Complete any MFA, SSO, or passkey required by the account/workspace; the tested account required MFA before enrollment.')
@@ -111,6 +97,7 @@ if ($Json) {
     Write-Host ('  Codex package:    {0}' -f $packageDisplay)
     Write-Host ('  Node.js:          {0}' -f $nodeDisplay)
     Write-Host ('  Heuristic match:  {0}' -f $result.AffectedBuildDetected)
+    Write-Host ('  Static class:     {0}' -f $result.StaticClassification)
 
     if ($reasons.Count -gt 0) {
         Write-Host ''
