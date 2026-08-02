@@ -132,43 +132,60 @@ function Get-CcodPackageIdentity {
     $adapters = Get-CcodProbeAdapters -Adapters $Adapters
     try {
         $packages = @(& $adapters.GetPackage | Where-Object { $null -ne $_ })
+        if ($packages.Count -eq 0) {
+            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_NOT_FOUND'; Message = 'The OpenAI.Codex package is not installed.' }
+        }
+        if ($packages.Count -ne 1) {
+            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_AMBIGUOUS'; Message = 'Expected exactly one current-user OpenAI.Codex package.' }
+        }
+
+        $package = $packages[0]
+        $metadata = @{}
+        foreach ($name in @('PackageFullName', 'PackageFamilyName', 'Version', 'InstallLocation')) {
+            $property = $package.PSObject.Properties[$name]
+            if ($null -eq $property -or $null -eq $property.Value -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_METADATA_INVALID'; Message = "The installed package is missing valid $name metadata." }
+            }
+            $metadata[$name] = [string]$property.Value
+        }
+        if ($metadata.PackageFamilyName -cne $script:CcodExpectedFamilyName) {
+            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_FAMILY_MISMATCH'; Message = 'The installed package family is not the expected OpenAI.Codex package.' }
+        }
+        if (-not [IO.Path]::IsPathRooted($metadata.InstallLocation)) {
+            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_LOCATION_INVALID'; Message = 'The installed package does not have an absolute install location.' }
+        }
+
+        $executablePath = [string](& $adapters.JoinPath $metadata.InstallLocation 'app\ChatGPT.exe')
+        $appAsarPath = [string](& $adapters.JoinPath $metadata.InstallLocation 'app\resources\app.asar')
+        $nativeDirectory = [string](& $adapters.JoinPath $metadata.InstallLocation 'app\resources\native')
+        if ([string]::IsNullOrWhiteSpace($executablePath) -or [string]::IsNullOrWhiteSpace($appAsarPath) -or [string]::IsNullOrWhiteSpace($nativeDirectory)) {
+            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_METADATA_INVALID'; Message = 'The installed package produced invalid resource paths.' }
+        }
+        if (-not (& $adapters.TestPath $executablePath)) {
+            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_EXECUTABLE_MISSING'; Message = 'The installed package executable was not found.' }
+        }
+        if (-not (& $adapters.TestPath $appAsarPath)) {
+            return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_ASAR_MISSING'; Message = 'The installed package app.asar was not found.' }
+        }
+        return [pscustomobject]@{
+            Found = $true
+            Code = 'PACKAGE_FOUND'
+            FullName = $metadata.PackageFullName
+            FamilyName = $metadata.PackageFamilyName
+            Version = $metadata.Version
+            ExecutablePath = $executablePath
+            AppAsarPath = $appAsarPath
+            NativeDirectory = $nativeDirectory
+        }
     } catch {
-        return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_QUERY_FAILED'; Message = $_.Exception.Message }
-    }
-    if ($packages.Count -eq 0) {
-        return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_NOT_FOUND'; Message = 'The OpenAI.Codex package is not installed.' }
-    }
-    if ($packages.Count -ne 1) {
-        return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_AMBIGUOUS'; Message = 'Expected exactly one current-user OpenAI.Codex package.' }
-    }
-
-    $package = $packages[0]
-    $familyProperty = $package.PSObject.Properties['PackageFamilyName']
-    if ($null -eq $familyProperty -or [string]$familyProperty.Value -cne $script:CcodExpectedFamilyName) {
-        return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_FAMILY_MISMATCH'; Message = 'The installed package family is not the expected OpenAI.Codex package.' }
-    }
-    $locationProperty = $package.PSObject.Properties['InstallLocation']
-    if ($null -eq $locationProperty -or [string]::IsNullOrWhiteSpace([string]$locationProperty.Value) -or -not [IO.Path]::IsPathRooted([string]$locationProperty.Value)) {
-        return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_LOCATION_INVALID'; Message = 'The installed package does not have an absolute install location.' }
-    }
-
-    $location = [string]$locationProperty.Value
-    return [pscustomobject]@{
-        Found = $true
-        Code = 'PACKAGE_FOUND'
-        FullName = [string]$package.PackageFullName
-        FamilyName = [string]$package.PackageFamilyName
-        Version = [string]$package.Version
-        ExecutablePath = & $adapters.JoinPath $location 'app\ChatGPT.exe'
-        AppAsarPath = & $adapters.JoinPath $location 'app\resources\app.asar'
-        NativeDirectory = & $adapters.JoinPath $location 'app\resources\native'
+        return [pscustomobject]@{ Found = $false; StaticClassification = 'UnknownOrIncompatible'; Code = 'PACKAGE_METADATA_INVALID'; Message = 'The installed package metadata could not be validated.' }
     }
 }
 
 function Resolve-CcodNodeCandidate {
     [CmdletBinding()]
     param(
-        [string[]]$NodeCandidates,
+        [AllowNull()][AllowEmptyCollection()][string[]]$NodeCandidates,
         [hashtable]$Adapters
     )
 
@@ -239,7 +256,7 @@ function Get-CcodPackageClassification {
 function Invoke-CcodStaticProbe {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string[]]$NodeCandidates,
+        [AllowNull()][AllowEmptyCollection()][string[]]$NodeCandidates,
         [Parameter(Mandatory)][string]$CheckerPath,
         [hashtable]$Adapters
     )

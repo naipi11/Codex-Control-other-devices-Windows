@@ -27,7 +27,11 @@ function New-CcodProbeAdapters {
         [int]$CheckerExitCode = 0,
         [string]$NodeVersion = 'v22.23.1',
         [string]$FamilyName = 'OpenAI.Codex_2p2nqsd0c76g0',
-        [bool]$NodeExists = $true
+        [bool]$NodeExists = $true,
+        [bool]$ExecutableExists = $true,
+        [bool]$OmitPackageFullName = $false,
+        [string]$OmitPackageProperty = $null,
+        $InvocationCounter = $null
     )
 
     $checker = $CheckerJson
@@ -35,24 +39,36 @@ function New-CcodProbeAdapters {
     $version = $NodeVersion
     $family = $FamilyName
     $exists = $NodeExists
+    $executableExists = $ExecutableExists
+    $omitFullName = $OmitPackageFullName
+    $omitProperty = $OmitPackageProperty
+    $counter = $InvocationCounter
     return @{
         GetPackage = {
-            [pscustomobject]@{
-                PackageFullName = 'OpenAI.Codex_1_x64__2p2nqsd0c76g0'
+            $package = [ordered]@{
                 PackageFamilyName = $family
                 Version = '1.0.0.0'
                 InstallLocation = 'C:\Fake\Codex'
             }
+            if (-not $omitFullName) { $package.PackageFullName = 'OpenAI.Codex_1_x64__2p2nqsd0c76g0' }
+            if (-not [string]::IsNullOrWhiteSpace($omitProperty)) { [void]$package.Remove($omitProperty) }
+            [pscustomobject]$package
         }.GetNewClosure()
         TestPath = {
             param($Path)
+            if ($Path -eq 'C:\Fake\Codex\app\ChatGPT.exe') { return $executableExists }
             if ($Path -like 'C:\Node\*') { return $exists }
             return $true
         }.GetNewClosure()
         GetFullPath = { param($Path) $Path }
-        GetNodeVersion = { param($NodePath) $version }.GetNewClosure()
+        GetNodeVersion = {
+            param($NodePath)
+            if ($null -ne $counter) { $counter.NodeVersionCount++ }
+            $version
+        }.GetNewClosure()
         InvokeNode = {
             param($NodePath, $Arguments)
+            if ($null -ne $counter) { $counter.Count++ }
             [pscustomobject]@{ ExitCode = $exitCode; Stdout = $checker; Stderr = 'checker stderr' }
         }.GetNewClosure()
     }
@@ -122,6 +138,52 @@ try {
         Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification 'unexpected family cannot be inspected'
         Assert-CcodEqual $false $result.Ready 'family mismatch fails closed'
         Assert-CcodEqual 'PACKAGE_FAMILY_MISMATCH' $result.Code 'family mismatch has an auditable code'
+    }
+
+    Invoke-CcodTest 'fails closed before checker invocation when the current package executable is absent' {
+        $calls = [pscustomobject]@{ Count = 0; NodeVersionCount = 0 }
+        $adapters = New-CcodProbeAdapters -ExecutableExists $false -InvocationCounter $calls
+        $result = Invoke-CcodStaticProbe -NodeCandidates @('C:\Node\node.exe') -CheckerPath 'C:\Runtime\check-package.mjs' -Adapters $adapters
+        Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification 'missing executable is not a usable package entrypoint'
+        Assert-CcodEqual $false $result.Ready 'missing executable fails closed'
+        Assert-CcodEqual 'PACKAGE_EXECUTABLE_MISSING' $result.Code 'missing executable has an auditable code'
+        Assert-CcodEqual 0 $calls.NodeVersionCount 'missing executable must not invoke Node'
+        Assert-CcodEqual 0 $calls.Count 'missing executable must not invoke the package checker'
+    }
+
+    Invoke-CcodTest 'fails closed for an empty Node candidate list without PATH discovery' {
+        $calls = [pscustomobject]@{ Count = 0; NodeVersionCount = 0 }
+        $adapters = New-CcodProbeAdapters -InvocationCounter $calls
+        $result = Invoke-CcodStaticProbe -NodeCandidates @() -CheckerPath 'C:\Runtime\check-package.mjs' -Adapters $adapters
+        Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification 'an empty supplied list is not a trusted Node source'
+        Assert-CcodEqual $false $result.Ready 'empty Node list fails closed'
+        Assert-CcodEqual 'NODE_NOT_FOUND' $result.Code 'empty Node list has an auditable code'
+        Assert-CcodEqual 0 $calls.NodeVersionCount 'empty Node list must not invoke Node'
+        Assert-CcodEqual 0 $calls.Count 'empty Node list must not invoke the package checker'
+    }
+
+    Invoke-CcodTest 'fails closed for incomplete package metadata without Node invocation' {
+        $calls = [pscustomobject]@{ Count = 0; NodeVersionCount = 0 }
+        $adapters = New-CcodProbeAdapters -OmitPackageFullName $true -InvocationCounter $calls
+        $result = Invoke-CcodStaticProbe -NodeCandidates @('C:\Node\node.exe') -CheckerPath 'C:\Runtime\check-package.mjs' -Adapters $adapters
+        Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification 'incomplete package metadata is uncertain evidence'
+        Assert-CcodEqual $false $result.Ready 'incomplete package metadata fails closed'
+        Assert-CcodEqual 'PACKAGE_METADATA_INVALID' $result.Code 'incomplete metadata has an auditable code'
+        Assert-CcodEqual 0 $calls.NodeVersionCount 'incomplete metadata must not invoke Node'
+        Assert-CcodEqual 0 $calls.Count 'incomplete metadata must not invoke the package checker'
+    }
+
+    Invoke-CcodTest 'fails closed for every missing required package metadata field' {
+        foreach ($missing in @('PackageFullName', 'PackageFamilyName', 'Version', 'InstallLocation')) {
+            $calls = [pscustomobject]@{ Count = 0; NodeVersionCount = 0 }
+            $adapters = New-CcodProbeAdapters -OmitPackageProperty $missing -InvocationCounter $calls
+            $result = Invoke-CcodStaticProbe -NodeCandidates @('C:\Node\node.exe') -CheckerPath 'C:\Runtime\check-package.mjs' -Adapters $adapters
+            Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification "missing $missing is uncertain evidence"
+            Assert-CcodEqual $false $result.Ready "missing $missing fails closed"
+            Assert-CcodEqual 'PACKAGE_METADATA_INVALID' $result.Code "missing $missing has an auditable code"
+            Assert-CcodEqual 0 $calls.NodeVersionCount "missing $missing must not invoke Node"
+            Assert-CcodEqual 0 $calls.Count "missing $missing must not invoke the package checker"
+        }
     }
 } catch {
     Write-Error $_
