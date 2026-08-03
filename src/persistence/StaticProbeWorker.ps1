@@ -34,6 +34,7 @@ $script:CcodStaticProbeStages = @(
     'InputValidation','RuntimeAuthorization','ModuleLoad','StateRead','SupervisorPreflight','TargetPreflight',
     'StaticProbe','SupervisorPostflight','TargetPostflight','RuntimePostflight','ResultValidation'
 )
+$script:CcodStaticProbeRuntimeBindings = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
 
 function Throw-CcodStaticProbeError {
     param([string]$Id,[string]$Message,$Target)
@@ -227,7 +228,11 @@ function Assert-CcodStaticProbeResult {
 function Get-CcodStaticProbePathAdapters {
     param([hashtable]$Adapters)
     $resolved=@{
-        GetItem={param($Path)Get-Item -LiteralPath $Path -Force -ErrorAction Stop}
+        GetItem={
+            param($Path,[bool]$AllowMissing)
+            try{return Get-Item -LiteralPath $Path -Force -ErrorAction Stop}
+            catch [Management.Automation.ItemNotFoundException]{if($AllowMissing){return $null};throw}
+        }
         FileExists={param($Path)[IO.File]::Exists($Path)}
         DirectoryExists={param($Path)[IO.Directory]::Exists($Path)}
     }
@@ -245,9 +250,11 @@ function Assert-CcodStaticProbeNoReparse {
     if($pathFull.Length -gt $rootFull.Length){$segments=@($pathFull.Substring($rootFull.Length).TrimStart('\') -split '\\')}
     foreach($segment in @('')+$segments){
         if($segment -ne ''){$cursor=Join-Path $cursor $segment}
-        if($AllowMissingLeaf -and $cursor -ceq $pathFull){return}
-        try{$item=Invoke-CcodStaticAdapter $adapter.GetItem @($cursor) Single 'CCOD_STATIC_PATH_INVALID'}catch{Throw-CcodStaticProbeError 'CCOD_STATIC_PATH_INVALID' 'Required path is missing' $null}
+        $missingLeafAllowed=[bool]($AllowMissingLeaf -and $cursor -ceq $pathFull)
+        try{$item=Invoke-CcodStaticAdapter $adapter.GetItem @($cursor,$missingLeafAllowed) OptionalSingle 'CCOD_STATIC_PATH_INVALID'}catch{Throw-CcodStaticProbeError 'CCOD_STATIC_PATH_INVALID' 'Required path is missing' $null}
+        if($null -eq $item){if($missingLeafAllowed){return};Throw-CcodStaticProbeError 'CCOD_STATIC_PATH_INVALID' 'Required path is missing' $null}
         if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){Throw-CcodStaticProbeError 'CCOD_STATIC_PATH_INVALID' 'Reparse path is not authorized' $null}
+        if($missingLeafAllowed){Throw-CcodStaticProbeError 'CCOD_STATIC_PATH_INVALID' 'The result path already exists' $null}
     }
 }
 
@@ -469,6 +476,31 @@ function Get-CcodStaticProbeRuntimeAuthorization {
     }
 }
 
+function Invoke-CcodStaticProbeRuntimeBinding {
+    param([string]$BindingId,[string]$Name,[object[]]$ArgumentList)
+    if(-not $script:CcodStaticProbeRuntimeBindings.ContainsKey($BindingId)){
+        Throw-CcodStaticProbeError 'CCOD_STATIC_MODULE_LOAD_FAILED' 'The verified runtime facade is unavailable' $null
+    }
+    $binding=$script:CcodStaticProbeRuntimeBindings[$BindingId]
+    if($null -eq $binding -or -not $binding.Contains($Name)){Throw-CcodStaticProbeError 'CCOD_STATIC_MODULE_LOAD_FAILED' 'The verified runtime facade operation is unavailable' $null}
+    $callback=$binding[$Name]
+    if($callback -isnot [scriptblock]){Throw-CcodStaticProbeError 'CCOD_STATIC_MODULE_LOAD_FAILED' 'The verified runtime facade is invalid' $null}
+    return & $callback @ArgumentList
+}
+
+function New-CcodStaticProbeRuntimeFacade {
+    param([string]$BindingId)
+    if($BindingId -cnotmatch '^[0-9a-f]{32}$'){Throw-CcodStaticProbeError 'CCOD_STATIC_MODULE_LOAD_FAILED' 'The verified runtime facade identity is invalid' $null}
+    return [pscustomobject][ordered]@{
+        TestRuntimeManifest=[scriptblock]::Create("param(`$RuntimeDirectory,`$ExpectedRuntimeId);Invoke-CcodStaticProbeRuntimeBinding '$BindingId' 'TestRuntimeManifest' ([object[]]@(`$RuntimeDirectory,`$ExpectedRuntimeId))")
+        ReadStrictJson=[scriptblock]::Create("param(`$Path,`$ExpectedSchema,`$Kind);Invoke-CcodStaticProbeRuntimeBinding '$BindingId' 'ReadStrictJson' ([object[]]@(`$Path,`$ExpectedSchema,`$Kind))")
+        ReadSettings=[scriptblock]::Create("param(`$StateRoot);Invoke-CcodStaticProbeRuntimeBinding '$BindingId' 'ReadSettings' ([object[]]@(`$StateRoot))")
+        GetPackageIdentity=[scriptblock]::Create("param();Invoke-CcodStaticProbeRuntimeBinding '$BindingId' 'GetPackageIdentity' ([object[]]@())")
+        InvokeStaticProbe=[scriptblock]::Create("param([string[]]`$NodeCandidates,`$CheckerPath,`$Adapters);`$arguments=[object[]]::new(3);`$arguments[0]=`$NodeCandidates;`$arguments[1]=`$CheckerPath;`$arguments[2]=`$Adapters;Invoke-CcodStaticProbeRuntimeBinding '$BindingId' 'InvokeStaticProbe' `$arguments")
+        GetProcessSnapshot=[scriptblock]::Create("param(`$ProcessId,`$StatusEvidence,`$Adapters);`$arguments=[object[]]::new(3);`$arguments[0]=`$ProcessId;`$arguments[1]=`$StatusEvidence;`$arguments[2]=`$Adapters;Invoke-CcodStaticProbeRuntimeBinding '$BindingId' 'GetProcessSnapshot' `$arguments")
+    }
+}
+
 function Import-CcodStaticProbeRuntime {
     param($Context)
     $modulePaths=[pscustomobject][ordered]@{
@@ -478,11 +510,11 @@ function Import-CcodStaticProbeRuntime {
         CompatibilityProbe=[IO.Path]::GetFullPath((Join-Path $Context.RuntimeRoot 'src\persistence\modules\CompatibilityProbe.psm1'))
         ProcessControl=[IO.Path]::GetFullPath((Join-Path $Context.RuntimeRoot 'src\persistence\modules\ProcessControl.psm1'))
     }
-    $bindings=[ordered]@{}
+    $bindings=[ordered]@{};$bindingId=$null;$registered=$false
     try{
         foreach($specification in @(
             [pscustomobject]@{Name='RuntimeManifest';Exports=[ordered]@{TestRuntimeManifest='Test-CcodRuntimeManifest'}},
-            [pscustomobject]@{Name='PersistenceIO';Exports=[ordered]@{ReadStrictJson='Read-CcodStrictJson';WriteAtomicJson='Write-CcodAtomicJson'}},
+            [pscustomobject]@{Name='PersistenceIO';Exports=[ordered]@{ReadStrictJson='Read-CcodStrictJson'}},
             [pscustomobject]@{Name='StateStore';Exports=[ordered]@{ReadSettings='Read-CcodSettings'}},
             [pscustomobject]@{Name='CompatibilityProbe';Exports=[ordered]@{GetPackageIdentity='Get-CcodPackageIdentity';InvokeStaticProbe='Invoke-CcodStaticProbe'}},
             [pscustomobject]@{Name='ProcessControl';Exports=[ordered]@{GetProcessSnapshot='Get-CcodProcessSnapshot'}}
@@ -497,17 +529,14 @@ function Import-CcodStaticProbeRuntime {
                 $bindings[[string]$entry.Key]=$command.ScriptBlock
             }
         }
+        $bindingId=[guid]::NewGuid().ToString('N');$script:CcodStaticProbeRuntimeBindings.Add($bindingId,$bindings);$registered=$true
+        $facade=New-CcodStaticProbeRuntimeFacade $bindingId
         return [pscustomobject][ordered]@{
-            TestRuntimeManifest=$bindings.TestRuntimeManifest
-            ReadStrictJson=$bindings.ReadStrictJson
-            WriteAtomicJson=$bindings.WriteAtomicJson
-            ReadSettings=$bindings.ReadSettings
-            GetPackageIdentity=$bindings.GetPackageIdentity
-            InvokeStaticProbe=$bindings.InvokeStaticProbe
-            GetProcessSnapshot=$bindings.GetProcessSnapshot
-            ModulePaths=$modulePaths
+            TestRuntimeManifest=$facade.TestRuntimeManifest;ReadStrictJson=$facade.ReadStrictJson;ReadSettings=$facade.ReadSettings
+            GetPackageIdentity=$facade.GetPackageIdentity;InvokeStaticProbe=$facade.InvokeStaticProbe;GetProcessSnapshot=$facade.GetProcessSnapshot;ModulePaths=$modulePaths
         }
     }catch{
+        if($registered){[void]$script:CcodStaticProbeRuntimeBindings.Remove($bindingId);$registered=$false}
         Throw-CcodStaticProbeError 'CCOD_STATIC_MODULE_LOAD_FAILED' 'Verified runtime modules could not be loaded' $null
     }finally{
         $unloadFailed=$false
@@ -517,7 +546,7 @@ function Import-CcodStaticProbeRuntime {
             }
             if(@(Get-Module -All|Where-Object{$_.Path -is [string] -and $_.Path -ceq $path}).Count -ne 0){$unloadFailed=$true}
         }
-        if($unloadFailed){Throw-CcodStaticProbeError 'CCOD_STATIC_MODULE_LOAD_FAILED' 'Verified runtime modules could not be isolated' $null}
+        if($unloadFailed){if($registered){[void]$script:CcodStaticProbeRuntimeBindings.Remove($bindingId)};Throw-CcodStaticProbeError 'CCOD_STATIC_MODULE_LOAD_FAILED' 'Verified runtime modules could not be isolated' $null}
     }
 }
 
@@ -649,6 +678,31 @@ function Assert-CcodStaticNodeTerminationReceipt {
     return $Receipt
 }
 
+function New-CcodStaticOwnedNodeCleanupReceipt {
+    param($Owned)
+    return [pscustomobject][ordered]@{Pid=$Owned.Pid;CreationTimeUtc=$Owned.CreationTimeUtc;Handle=$Owned.Handle}
+}
+
+function Invoke-CcodStaticOwnedNodeCleanupAttempt {
+    param($Owned,[hashtable]$Adapter)
+    $current=Invoke-CcodStaticAdapter $Adapter.GetProcessIdentity @($Owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
+    if($null -ne $current -and -not(Test-CcodStaticOwnedNodeIdentityMatch $current $Owned)){return $true}
+    $termination=Invoke-CcodStaticAdapter $Adapter.TerminateNode @($Owned) Single 'CCOD_STATIC_PROBE_FAILED'
+    Assert-CcodStaticNodeTerminationReceipt $termination $Owned|Out-Null
+    $after=Invoke-CcodStaticAdapter $Adapter.GetProcessIdentity @($Owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
+    if(Test-CcodStaticOwnedNodeIdentityMatch $after $Owned){throw 'owned helper remains alive'}
+    return $true
+}
+
+function Invoke-CcodStaticOwnedNodeCleanup {
+    param($Owned,[hashtable]$Adapter)
+    $privateReceipt=New-CcodStaticOwnedNodeCleanupReceipt $Owned
+    for($attempt=0;$attempt -lt 2;$attempt++){
+        try{return Invoke-CcodStaticOwnedNodeCleanupAttempt $Owned $Adapter}catch{}
+    }
+    Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The owned Node helper cleanup could not be confirmed' $privateReceipt
+}
+
 function Get-CcodStaticNodeStartAdapters {
     param([hashtable]$Adapters)
     $resolved=@{
@@ -663,6 +717,49 @@ function Get-CcodStaticNodeStartAdapters {
     }
     if($null -ne $Adapters){foreach($key in $Adapters.Keys){$resolved[$key]=$Adapters[$key]}}
     return $resolved
+}
+
+function Test-CcodStaticPrivateNodeCleanupReceipt {
+    param($Receipt)
+    if($null -eq $Receipt -or $Receipt -isnot [pscustomobject]){return $false}
+    $properties=@($Receipt.PSObject.Properties)
+    if($properties.Count -ne 3 -or $properties[0].Name -cne 'Pid' -or $properties[1].Name -cne 'CreationTimeUtc' -or $properties[2].Name -cne 'Handle'){return $false}
+    return $null -ne $Receipt.Handle -and (($Receipt.Pid -is [int] -and $Receipt.Pid -gt 0 -and (Test-CcodStaticCanonicalUtc $Receipt.CreationTimeUtc)) -or ($null -eq $Receipt.Pid -and $null -eq $Receipt.CreationTimeUtc))
+}
+
+function Invoke-CcodStaticPartialNodeCleanup {
+    param($Receipt,[hashtable]$Adapters)
+    if(-not(Test-CcodStaticPrivateNodeCleanupReceipt $Receipt)){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The private Node cleanup receipt is invalid' $null}
+    $adapter=Get-CcodStaticNodeStartAdapters $Adapters;$cleanupConfirmed=$false
+    if($Receipt.Pid -is [int]){
+        $owned=[pscustomobject][ordered]@{Pid=$Receipt.Pid;CreationTimeUtc=$Receipt.CreationTimeUtc;Handle=$Receipt.Handle;StdoutTask=$null;StderrTask=$null}
+        try{
+            $current=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
+            if($null -ne $current -and -not(Test-CcodStaticOwnedNodeIdentityMatch $current $owned)){$cleanupConfirmed=$true}
+            elseif($null -ne $current){
+                $termination=Invoke-CcodStaticAdapter $adapter.TerminateStarted @($Receipt.Handle,$owned) Single 'CCOD_STATIC_PROBE_FAILED'
+                Assert-CcodStaticNodeTerminationReceipt $termination $owned|Out-Null
+                $after=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
+                if(Test-CcodStaticOwnedNodeIdentityMatch $after $owned){throw 'recovered helper remains alive'}
+                $cleanupConfirmed=$true
+            }
+        }catch{}
+    }
+    if(-not $cleanupConfirmed){
+        try{
+            $unbound=Invoke-CcodStaticAdapter $adapter.TerminateUnbound @($Receipt.Handle) Single 'CCOD_STATIC_PROBE_FAILED'
+            if($unbound -isnot [bool] -or -not $unbound){throw 'recovered exact handle remains alive'}
+            if($Receipt.Pid -is [int]){
+                $after=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($Receipt.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
+                $receiptIdentity=[pscustomobject][ordered]@{Pid=$Receipt.Pid;CreationTimeUtc=$Receipt.CreationTimeUtc}
+                if(Test-CcodStaticOwnedNodeIdentityMatch $after $receiptIdentity){throw 'recovered exact identity remains alive'}
+            }
+            $cleanupConfirmed=$true
+        }catch{}
+    }
+    if(-not $cleanupConfirmed){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The private Node cleanup receipt remains owned' $Receipt}
+    try{Invoke-CcodStaticAdapter $adapter.DisposeProcess @($Receipt.Handle) None 'CCOD_STATIC_PROBE_FAILED'|Out-Null}catch{Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The recovered Node helper handle could not be released' $Receipt}
+    return $true
 }
 
 function Start-CcodStaticOwnedNode {
@@ -686,77 +783,132 @@ function Start-CcodStaticOwnedNode {
         $owned.StdoutTask=$reads.StdoutTask;$owned.StderrTask=$reads.StderrTask
         return $owned
     }catch{
-        if($startAttempted -and -not $started){
+        $cleanupConfirmed=$false
+        if($startAttempted -and $started -and $null -eq $owned){
             try{
-                $ambiguous=Invoke-CcodStaticAdapter $adapter.TerminateUnbound @($process) Single 'CCOD_STATIC_PROBE_FAILED'
-                if($ambiguous -isnot [bool] -or -not $ambiguous){throw 'ambiguous helper remains alive'}
+                $retry=Invoke-CcodStaticAdapter $adapter.GetStartedIdentity @($process) Single 'CCOD_STATIC_PROBE_FAILED'
+                Assert-CcodStaticExactObject $retry @('Pid','CreationTimeUtc') 'CCOD_STATIC_PROBE_FAILED' 'Started Node identity'|Out-Null
+                if($retry.Pid -isnot [int] -or $retry.Pid -lt 1 -or -not(Test-CcodStaticCanonicalUtc $retry.CreationTimeUtc)){throw 'identity retry'}
+                $owned=[pscustomobject][ordered]@{Pid=$retry.Pid;CreationTimeUtc=$retry.CreationTimeUtc;Handle=$process;StdoutTask=$null;StderrTask=$null}
             }catch{}
-        }elseif($started){
+        }
+        if($startAttempted -and $started -and $null -ne $owned){
             try{
-                if($null -eq $owned){
-                    $retry=Invoke-CcodStaticAdapter $adapter.GetStartedIdentity @($process) Single 'CCOD_STATIC_PROBE_FAILED'
-                    Assert-CcodStaticExactObject $retry @('Pid','CreationTimeUtc') 'CCOD_STATIC_PROBE_FAILED' 'Started Node identity'|Out-Null
-                    if($retry.Pid -isnot [int] -or $retry.Pid -lt 1 -or -not(Test-CcodStaticCanonicalUtc $retry.CreationTimeUtc)){throw 'identity retry'}
-                    $owned=[pscustomobject][ordered]@{Pid=$retry.Pid;CreationTimeUtc=$retry.CreationTimeUtc;Handle=$process;StdoutTask=$null;StderrTask=$null}
-                }
-            }catch{$owned=$null}
-            try{
-                if($null -ne $owned){
-                    $current=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
-                    if($null -eq $current){
-                        $unbound=Invoke-CcodStaticAdapter $adapter.TerminateUnbound @($process) Single 'CCOD_STATIC_PROBE_FAILED'
-                        if($unbound -isnot [bool] -or -not $unbound){throw 'owned helper exit is unconfirmed'}
-                    }elseif(Test-CcodStaticOwnedNodeIdentityMatch $current $owned){
-                        $receipt=Invoke-CcodStaticAdapter $adapter.TerminateStarted @($process,$owned) Single 'CCOD_STATIC_PROBE_FAILED';Assert-CcodStaticNodeTerminationReceipt $receipt $owned|Out-Null
-                        $after=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
-                        if(Test-CcodStaticOwnedNodeIdentityMatch $after $owned){throw 'started helper remains alive'}
-                    }
-                }else{
-                    $unbound=Invoke-CcodStaticAdapter $adapter.TerminateUnbound @($process) Single 'CCOD_STATIC_PROBE_FAILED'
-                    if($unbound -isnot [bool] -or -not $unbound){throw 'unbound helper remains alive'}
+                $current=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
+                if($null -ne $current -and -not(Test-CcodStaticOwnedNodeIdentityMatch $current $owned)){$cleanupConfirmed=$true}
+                elseif($null -ne $current){
+                    $termination=Invoke-CcodStaticAdapter $adapter.TerminateStarted @($process,$owned) Single 'CCOD_STATIC_PROBE_FAILED'
+                    Assert-CcodStaticNodeTerminationReceipt $termination $owned|Out-Null
+                    $after=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
+                    if(Test-CcodStaticOwnedNodeIdentityMatch $after $owned){throw 'started helper remains alive'}
+                    $cleanupConfirmed=$true
                 }
             }catch{}
         }
-        if($null -ne $process){try{Invoke-CcodStaticAdapter $adapter.DisposeProcess @($process) None 'CCOD_STATIC_PROBE_FAILED'|Out-Null}catch{}}
-        Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The Node helper failed during bounded startup' $null
+        if($startAttempted -and -not $cleanupConfirmed){
+            try{
+                $unbound=Invoke-CcodStaticAdapter $adapter.TerminateUnbound @($process) Single 'CCOD_STATIC_PROBE_FAILED'
+                if($unbound -isnot [bool] -or -not $unbound){throw 'exact process handle remains alive'}
+                if($null -ne $owned){
+                    $after=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
+                    if(Test-CcodStaticOwnedNodeIdentityMatch $after $owned){throw 'exact process identity remains alive'}
+                }
+                $cleanupConfirmed=$true
+            }catch{}
+        }
+        if($cleanupConfirmed -and $null -ne $process){
+            try{Invoke-CcodStaticAdapter $adapter.DisposeProcess @($process) None 'CCOD_STATIC_PROBE_FAILED'|Out-Null}catch{Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The stopped Node helper handle could not be released' $null}
+            Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The Node helper failed during bounded startup' $null
+        }
+        $privateReceipt=[pscustomobject][ordered]@{Pid=$(if($null -eq $owned){$null}else{$owned.Pid});CreationTimeUtc=$(if($null -eq $owned){$null}else{$owned.CreationTimeUtc});Handle=$process}
+        Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The Node helper cleanup could not be confirmed' $privateReceipt
     }
 }
 
 function Get-CcodStaticOwnedNodeAdapters {
     param([hashtable]$Adapters)
+    $nodeStartAdapters=if($null -ne $Adapters -and $Adapters.ContainsKey('NodeStartAdapters')){$Adapters.NodeStartAdapters}else{$null}
     $resolved=@{
-        StartNode={param($Path,$Arguments)Start-CcodStaticOwnedNode $Path $Arguments}
+        StartNode={param($Path,$Arguments)Start-CcodStaticOwnedNode $Path $Arguments $nodeStartAdapters}.GetNewClosure()
+        RecoverStartNode={param($Receipt)Invoke-CcodStaticPartialNodeCleanup $Receipt $nodeStartAdapters}.GetNewClosure()
         WaitNode={param($Owned,$Milliseconds)$Owned.Handle.WaitForExit([int]$Milliseconds)}
         GetProcessIdentity={param($Pid)Get-CcodStaticGenericProcessIdentity $Pid}
-        TerminateNode={param($Owned)$Owned.Handle.Kill();$exited=$Owned.Handle.WaitForExit(5000);[pscustomobject][ordered]@{Pid=$Owned.Pid;CreationTimeUtc=$Owned.CreationTimeUtc;Exited=[bool]$exited}}
-        FinishNode={param($Owned)$Owned.Handle.WaitForExit();[pscustomobject][ordered]@{ExitCode=[int]$Owned.Handle.ExitCode;Stdout=[string]$Owned.StdoutTask.Result;Stderr=[string]$Owned.StderrTask.Result}}
+        TerminateNode={param($Owned)if(-not $Owned.Handle.HasExited){$Owned.Handle.Kill()};$exited=$Owned.Handle.HasExited -or $Owned.Handle.WaitForExit(5000);[pscustomobject][ordered]@{Pid=$Owned.Pid;CreationTimeUtc=$Owned.CreationTimeUtc;Exited=[bool]$exited}}
+        FinishNode={
+            param($Owned,$Milliseconds)
+            if($Milliseconds -isnot [int] -or $Milliseconds -lt 1){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
+            $finishWatch=[Diagnostics.Stopwatch]::StartNew()
+            if(-not $Owned.Handle.WaitForExit($Milliseconds)){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
+            $remaining=[int]([long]$Milliseconds-[long]$finishWatch.ElapsedMilliseconds)
+            if($remaining -lt 1){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
+            $tasks=[Threading.Tasks.Task[]]@($Owned.StdoutTask,$Owned.StderrTask)
+            if($tasks.Count -ne 2 -or $null -eq $tasks[0] -or $null -eq $tasks[1] -or -not [Threading.Tasks.Task]::WaitAll($tasks,$remaining)){
+                Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null
+            }
+            [pscustomobject][ordered]@{ExitCode=[int]$Owned.Handle.ExitCode;Stdout=[string]$Owned.StdoutTask.GetAwaiter().GetResult();Stderr=[string]$Owned.StderrTask.GetAwaiter().GetResult()}
+        }
         DisposeNode={param($Owned)if($null -ne $Owned.Handle -and $Owned.Handle -is [IDisposable]){$Owned.Handle.Dispose()}}
     }
-    if($null -ne $Adapters){foreach($key in $Adapters.Keys){$resolved[$key]=$Adapters[$key]}}
+    if($null -ne $Adapters){foreach($key in $Adapters.Keys){if($key -cne 'NodeStartAdapters'){$resolved[$key]=$Adapters[$key]}}}
     return $resolved
+}
+
+function Invoke-CcodStaticFinalNodeCleanup {
+    param($Receipt,[hashtable]$OwnedAdapters)
+    if(-not(Test-CcodStaticPrivateNodeCleanupReceipt $Receipt)){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The final private Node cleanup receipt is invalid' $null}
+    if(($null -ne $OwnedAdapters -and $OwnedAdapters.ContainsKey('NodeStartAdapters')) -or $null -eq $Receipt.Pid){
+        $startAdapters=if($null -ne $OwnedAdapters -and $OwnedAdapters.ContainsKey('NodeStartAdapters')){$OwnedAdapters.NodeStartAdapters}else{$null}
+        try{Invoke-CcodStaticPartialNodeCleanup $Receipt $startAdapters|Out-Null;return $true}catch{Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The final partial Node cleanup could not be confirmed' $Receipt}
+    }
+    $adapter=Get-CcodStaticOwnedNodeAdapters $OwnedAdapters
+    $owned=[pscustomobject][ordered]@{Pid=$Receipt.Pid;CreationTimeUtc=$Receipt.CreationTimeUtc;Handle=$Receipt.Handle;StdoutTask=$null;StderrTask=$null}
+    try{
+        Invoke-CcodStaticOwnedNodeCleanupAttempt $owned $adapter|Out-Null
+        Invoke-CcodStaticAdapter $adapter.DisposeNode @($owned) None 'CCOD_STATIC_PROBE_FAILED'|Out-Null
+        return $true
+    }catch{Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The final owned Node cleanup could not be confirmed' $Receipt}
 }
 
 function Invoke-CcodStaticProbeOwnedNode {
     [CmdletBinding()]
     param([string]$NodePath,[string[]]$Arguments,[int]$TimeoutMilliseconds,[hashtable]$Adapters)
     if($TimeoutMilliseconds -lt 1){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
-    $adapter=Get-CcodStaticOwnedNodeAdapters $Adapters;$owned=$null
+    $adapter=Get-CcodStaticOwnedNodeAdapters $Adapters;$owned=$null;$safeToDispose=$false;$helperExited=$false;$preserveTimeout=$false;$watch=[Diagnostics.Stopwatch]::StartNew()
     try{
         $owned=Invoke-CcodStaticAdapter $adapter.StartNode @($NodePath,$Arguments) Single 'CCOD_STATIC_PROBE_FAILED'
         if($null -eq $owned -or $owned.Pid -isnot [int] -or $owned.Pid -lt 1 -or -not(Test-CcodStaticCanonicalUtc $owned.CreationTimeUtc)){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The owned Node helper identity is invalid' $null}
-        $waited=Invoke-CcodStaticAdapter $adapter.WaitNode @($owned,$TimeoutMilliseconds) Single 'CCOD_STATIC_PROBE_FAILED'
+        $remaining=[int]([long]$TimeoutMilliseconds-[long]$watch.ElapsedMilliseconds)
+        if($remaining -lt 1){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
+        $waited=Invoke-CcodStaticAdapter $adapter.WaitNode @($owned,$remaining) Single 'CCOD_STATIC_PROBE_FAILED'
         if($waited -isnot [bool]){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The owned Node wait result is invalid' $null}
-        if(-not $waited){
-            $identity=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
-            if($null -eq $identity -or (Test-CcodStaticOwnedNodeIdentityMatch $identity $owned)){
-                $receipt=Invoke-CcodStaticAdapter $adapter.TerminateNode @($owned) Single 'CCOD_STATIC_PROBE_FAILED';Assert-CcodStaticNodeTerminationReceipt $receipt $owned|Out-Null
-                $after=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
-                if(Test-CcodStaticOwnedNodeIdentityMatch $after $owned){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The owned Node helper is still running after termination' $null}
-            }
+        if(-not $waited){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
+        $helperExited=$true;$safeToDispose=$true
+        $remaining=[int]([long]$TimeoutMilliseconds-[long]$watch.ElapsedMilliseconds)
+        if($remaining -lt 1){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
+        $value=Invoke-CcodStaticAdapter $adapter.FinishNode @($owned,$remaining) Single 'CCOD_STATIC_PROBE_FAILED'
+        if($watch.ElapsedMilliseconds -ge $TimeoutMilliseconds){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
+        return $value
+    }catch{
+        $failure=$_;$failureId=Get-CcodStaticProbeErrorId $failure;$ownershipResolved=$helperExited
+        if($null -ne $owned -and -not $helperExited){
+            Invoke-CcodStaticOwnedNodeCleanup $owned $adapter|Out-Null
+            $safeToDispose=$true;$ownershipResolved=$true
+        }elseif($null -eq $owned -and (Test-CcodStaticPrivateNodeCleanupReceipt $failure.TargetObject)){
+            $recovered=Invoke-CcodStaticAdapter $adapter.RecoverStartNode @($failure.TargetObject) Single 'CCOD_STATIC_PROBE_FAILED'
+            if($recovered -isnot [bool] -or -not $recovered){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The partial Node helper cleanup was not recovered' $failure.TargetObject}
+            $ownershipResolved=$true
+        }
+        if($failureId -ceq 'CCOD_STATIC_PROBE_TIMEOUT' -or $watch.ElapsedMilliseconds -ge $TimeoutMilliseconds){
+            $preserveTimeout=$true
             Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null
         }
-        return Invoke-CcodStaticAdapter $adapter.FinishNode @($owned) Single 'CCOD_STATIC_PROBE_FAILED'
-    }finally{if($null -ne $owned){Invoke-CcodStaticAdapter $adapter.DisposeNode @($owned) None 'CCOD_STATIC_PROBE_FAILED'|Out-Null}}
+        if($ownershipResolved){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The owned Node helper failed after exact cleanup' $null}
+        throw $failure
+    }finally{
+        if($null -ne $owned -and $safeToDispose){
+            try{Invoke-CcodStaticAdapter $adapter.DisposeNode @($owned) None 'CCOD_STATIC_PROBE_FAILED'|Out-Null}catch{if(-not $preserveTimeout){throw}}
+        }
+    }
 }
 
 function New-CcodStaticDeadline {
@@ -773,16 +925,24 @@ function Get-CcodStaticRemainingMilliseconds {
 function Invoke-CcodStaticProbeWithDeadline {
     param([string[]]$NodeCandidates,[string]$CheckerPath,$Deadline,[hashtable]$WorkerAdapters,$InvokeStaticProbe)
     if($null -eq $Deadline -or $Deadline.TimedOut -isnot [bool] -or $InvokeStaticProbe -isnot [scriptblock]){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The bounded static probe contract is invalid' $null}
-    $ownedAdapters=if($null -ne $WorkerAdapters -and $WorkerAdapters.ContainsKey('OwnedNodeAdapters')){$WorkerAdapters.OwnedNodeAdapters}else{$null}
+    $ownedAdapters=if($null -ne $WorkerAdapters -and $WorkerAdapters.ContainsKey('OwnedNodeAdapters')){$WorkerAdapters.OwnedNodeAdapters}else{$null};$cleanupLatch=[pscustomobject]@{Receipt=$null}
     $getRemainingCallback=(Get-Command Get-CcodStaticRemainingMilliseconds -CommandType Function -ErrorAction Stop).ScriptBlock
     $invokeOwnedCallback=(Get-Command Invoke-CcodStaticProbeOwnedNode -CommandType Function -ErrorAction Stop).ScriptBlock
     $getErrorIdCallback=(Get-Command Get-CcodStaticProbeErrorId -CommandType Function -ErrorAction Stop).ScriptBlock
+    $throwErrorCallback=(Get-Command Throw-CcodStaticProbeError -CommandType Function -ErrorAction Stop).ScriptBlock
+    $testCleanupReceiptCallback=(Get-Command Test-CcodStaticPrivateNodeCleanupReceipt -CommandType Function -ErrorAction Stop).ScriptBlock
+    $finalCleanupCallback=(Get-Command Invoke-CcodStaticFinalNodeCleanup -CommandType Function -ErrorAction Stop).ScriptBlock
     $nodeAdapters=@{
-        GetNodeVersion={param($NodePath)try{$remaining=& $getRemainingCallback $Deadline;$value=& $invokeOwnedCallback $NodePath @('--version') $remaining $ownedAdapters;if($value.ExitCode -ne 0){throw 'node version failed'};return ([string]$value.Stdout).Trim()}catch{if((& $getErrorIdCallback $_) -ceq 'CCOD_STATIC_PROBE_TIMEOUT'){$Deadline.TimedOut=$true};throw}}.GetNewClosure()
-        InvokeNode={param($NodePath,$Arguments)try{$remaining=& $getRemainingCallback $Deadline;return & $invokeOwnedCallback $NodePath @($Arguments) $remaining $ownedAdapters}catch{if((& $getErrorIdCallback $_) -ceq 'CCOD_STATIC_PROBE_TIMEOUT'){$Deadline.TimedOut=$true};throw}}.GetNewClosure()
+        GetNodeVersion={param($NodePath)try{if($null -ne $cleanupLatch.Receipt){& $throwErrorCallback 'CCOD_STATIC_PROBE_FAILED' 'A private Node cleanup remains pending' $cleanupLatch.Receipt};$remaining=& $getRemainingCallback $Deadline;$value=& $invokeOwnedCallback $NodePath @('--version') $remaining $ownedAdapters;if($value.ExitCode -ne 0){throw 'node version failed'};return ([string]$value.Stdout).Trim()}catch{$caught=$_;if((& $getErrorIdCallback $caught) -ceq 'CCOD_STATIC_PROBE_TIMEOUT'){$Deadline.TimedOut=$true};if($null -eq $cleanupLatch.Receipt -and (& $testCleanupReceiptCallback $caught.TargetObject)){$cleanupLatch.Receipt=[pscustomobject][ordered]@{Pid=$caught.TargetObject.Pid;CreationTimeUtc=$caught.TargetObject.CreationTimeUtc;Handle=$caught.TargetObject.Handle}};throw $caught}}.GetNewClosure()
+        InvokeNode={param($NodePath,$Arguments)try{if($null -ne $cleanupLatch.Receipt){& $throwErrorCallback 'CCOD_STATIC_PROBE_FAILED' 'A private Node cleanup remains pending' $cleanupLatch.Receipt};$remaining=& $getRemainingCallback $Deadline;return & $invokeOwnedCallback $NodePath @($Arguments) $remaining $ownedAdapters}catch{$caught=$_;if((& $getErrorIdCallback $caught) -ceq 'CCOD_STATIC_PROBE_TIMEOUT'){$Deadline.TimedOut=$true};if($null -eq $cleanupLatch.Receipt -and (& $testCleanupReceiptCallback $caught.TargetObject)){$cleanupLatch.Receipt=[pscustomobject][ordered]@{Pid=$caught.TargetObject.Pid;CreationTimeUtc=$caught.TargetObject.CreationTimeUtc;Handle=$caught.TargetObject.Handle}};throw $caught}}.GetNewClosure()
     }
     $probe=$null;$failure=$null
     try{$probe=Invoke-CcodStaticAdapter $InvokeStaticProbe @(@($NodeCandidates),$CheckerPath,$nodeAdapters) Single 'CCOD_STATIC_PROBE_FAILED'}catch{$failure=$_}
+    if($null -ne $cleanupLatch.Receipt){
+        $cleaned=& $finalCleanupCallback $cleanupLatch.Receipt $ownedAdapters
+        if($cleaned -isnot [bool] -or -not $cleaned){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The final private Node cleanup was not confirmed' $cleanupLatch.Receipt}
+        Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The static probe encountered a private Node cleanup failure' $null
+    }
     if($Deadline.TimedOut){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_TIMEOUT' 'The static probe deadline expired' $null}
     if($null -ne $failure){throw $failure}
     return $probe
@@ -820,7 +980,7 @@ function Get-CcodStaticProbeWorkerAdapters {
         GetTargetSnapshot={param($Pid,$Package,$RuntimeApi)$bound=$Package;& $RuntimeApi.GetProcessSnapshot -ProcessId $Pid -Adapters @{GetPackageIdentity={$bound}.GetNewClosure()}}
         StartDeadline={param($Timeout)New-CcodStaticDeadline $Timeout}
         InvokeProbe=$null
-        WriteResult={param($Path,$Value,$RuntimeApi)if($null -ne $RuntimeApi -and $null -ne $RuntimeApi.PSObject.Properties['WriteAtomicJson'] -and $RuntimeApi.WriteAtomicJson -is [scriptblock]){& $RuntimeApi.WriteAtomicJson -Path $Path -Value $Value}else{Write-CcodStaticProbeLocalAtomicJson -Path $Path -Value $Value}}
+        WriteResult={param($Path,$Value,$RuntimeApi)Write-CcodStaticProbeLocalAtomicJson -Path $Path -Value $Value}
         WriteStdout={param($Line)[Console]::Out.WriteLine($Line)}
         WriteStderr={param($Line)[Console]::Error.WriteLine($Line)}
     }

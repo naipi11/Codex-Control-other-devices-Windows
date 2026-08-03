@@ -176,7 +176,7 @@ function Get-CcodTestRuntimeRecords {
 }
 
 function New-CcodAuthorizedRuntimeFixture {
-    param([string]$Root)
+    param([string]$Root,[string]$ReadStrictJsonMarker)
     $install = Join-Path $Root 'install'
     $staging = Join-Path $install 'staging'
     foreach ($relative in @(
@@ -192,6 +192,11 @@ function New-CcodAuthorizedRuntimeFixture {
         $destination = Join-Path $staging $relative
         [IO.Directory]::CreateDirectory((Split-Path $destination -Parent)) | Out-Null
         [IO.File]::WriteAllBytes($destination,[IO.File]::ReadAllBytes($source))
+    }
+    if(-not [string]::IsNullOrWhiteSpace($ReadStrictJsonMarker)){
+        $persistencePath=Join-Path $staging 'src\persistence\modules\PersistenceIO.psm1'
+        $override="`nfunction Read-CcodStrictJson { param(`$Path,`$ExpectedSchema,`$Kind) [pscustomobject]@{ marker = '$ReadStrictJsonMarker' } }`nExport-ModuleMember -Function Read-CcodStrictJson`n"
+        [IO.File]::AppendAllText($persistencePath,$override,[Text.UTF8Encoding]::new($false))
     }
     $records = @(Get-CcodTestRuntimeRecords -RuntimeRoot $staging)
     $runtimeId = Get-CcodTestRuntimeId -ProjectVersion '2.0.0' -Files $records
@@ -432,8 +437,8 @@ try {
         $fixture=New-CcodAuthorizedRuntimeFixture -Root (Join-Path $root 'private-runtime-api')
         $context=Get-CcodStaticProbeRuntimeAuthorization -ScriptPath $fixture.WorkerPath
         $api=Import-CcodStaticProbeRuntime -Context $context
-        Assert-CcodEqual 'TestRuntimeManifest,ReadStrictJson,WriteAtomicJson,ReadSettings,GetPackageIdentity,InvokeStaticProbe,GetProcessSnapshot,ModulePaths' (($api.PSObject.Properties.Name)-join ',') 'private runtime API has only the seven allowed callbacks and path evidence'
-        foreach($name in @('TestRuntimeManifest','ReadStrictJson','WriteAtomicJson','ReadSettings','GetPackageIdentity','InvokeStaticProbe','GetProcessSnapshot')){Assert-CcodTrue ($api.$name -is [scriptblock]) "$name is a private bound callback"}
+        Assert-CcodEqual 'TestRuntimeManifest,ReadStrictJson,ReadSettings,GetPackageIdentity,InvokeStaticProbe,GetProcessSnapshot,ModulePaths' (($api.PSObject.Properties.Name)-join ',') 'private runtime API has only the six read/probe facades and path evidence'
+        foreach($name in @('TestRuntimeManifest','ReadStrictJson','ReadSettings','GetPackageIdentity','InvokeStaticProbe','GetProcessSnapshot')){Assert-CcodTrue ($api.$name -is [scriptblock]) "$name is a private worker-owned facade"}
         Assert-CcodEqual 'RuntimeManifest,PersistenceIO,StateStore,CompatibilityProbe,ProcessControl' (($api.ModulePaths.PSObject.Properties.Name)-join ',') 'module path evidence is exact'
         foreach($entry in @(
             @{Name='RuntimeManifest';Path='src\persistence\modules\RuntimeManifest.psm1'},@{Name='PersistenceIO';Path='src\persistence\modules\PersistenceIO.psm1'},
@@ -570,7 +575,7 @@ try {
     }
 
     Invoke-CcodTest 'rejects every relative noncanonical colliding existing misnamed or reparse framing path' {
-        foreach($variant in @('RelativeRequest','RelativeResult','NoncanonicalRequest','NoncanonicalResult','SamePath','ResultExists','WrongRequestName','WrongResultName','ReparseRequest')){
+        foreach($variant in @('RelativeRequest','RelativeResult','NoncanonicalRequest','NoncanonicalResult','SamePath','ResultExists','ResultDirectory','WrongRequestName','WrongResultName','ReparseRequest')){
             $harness=New-CcodWorkerHarness -Root (Join-Path $root ('framing-'+$variant.ToLowerInvariant()))
             $requestPath=$harness.RequestPath;$resultPath=$harness.ResultPath
             switch -CaseSensitive ($variant) {
@@ -580,6 +585,7 @@ try {
                 'NoncanonicalResult' {$resultPath=Join-Path (Split-Path $resultPath -Parent) ('..\workers\'+[IO.Path]::GetFileName($resultPath))}
                 'SamePath' {$resultPath=$requestPath}
                 'ResultExists' {[IO.File]::WriteAllText($resultPath,'{}',[Text.UTF8Encoding]::new($false))}
+                'ResultDirectory' {[IO.Directory]::CreateDirectory($resultPath)|Out-Null}
                 'WrongRequestName' {$wrong=Join-Path (Split-Path $requestPath -Parent) 'static-probe-00000000-0000-0000-0000-000000000000.request.json';[IO.File]::Copy($requestPath,$wrong);$requestPath=[IO.Path]::GetFullPath($wrong)}
                 'WrongResultName' {$resultPath=[IO.Path]::GetFullPath((Join-Path (Split-Path $resultPath -Parent) 'static-probe-00000000-0000-0000-0000-000000000000.result.json'))}
                 'ReparseRequest' {$reparsePath=$requestPath;$harness.Adapters.GetItem={param($Path)$item=Get-Item -LiteralPath $Path -Force -ErrorAction Stop;if($item.FullName -ceq $reparsePath){[pscustomobject]@{Attributes=[IO.FileAttributes]::ReparsePoint}}else{$item}}.GetNewClosure()}
@@ -824,8 +830,8 @@ try {
             }
             $expectedCode=if($variant -ceq 'ConfirmedExit'){'CCOD_STATIC_PROBE_TIMEOUT'}else{'CCOD_STATIC_PROBE_FAILED'}
             Assert-CcodThrows {Invoke-CcodStaticProbeOwnedNode -NodePath 'C:\Node\node.exe' -Arguments @('--version') -TimeoutMilliseconds 500 -Adapters $adapters|Out-Null} $expectedCode
-            Assert-CcodEqual 1 $calls.Terminate "$variant attempts one exact termination"
-            Assert-CcodEqual 1 $calls.Dispose "$variant disposes the owned handle once"
+            Assert-CcodEqual $(if($variant -ceq 'ConfirmedExit'){1}else{2}) $calls.Terminate "$variant retries exact termination once before releasing ownership"
+            Assert-CcodEqual $(if($variant -ceq 'ConfirmedExit'){1}else{0}) $calls.Dispose "$variant disposes only after exact exit proof"
         }
     }
 
@@ -911,6 +917,292 @@ try {
             }
         }
     }
+
+    $round2RedFailures=[Collections.Generic.List[string]]::new()
+    $runRound2Red={
+        param([string]$Name,[scriptblock]$Body)
+        try{Invoke-CcodTest $Name $Body|Out-Null}catch{$round2RedFailures.Add(("{0} => {1}" -f $Name,$_.Exception.Message))}
+    }.GetNewClosure()
+
+    & $runRound2Red 'round2 capability facade cannot recover source module mutation commands' {
+        $fixture=New-CcodAuthorizedRuntimeFixture -Root (Join-Path $root 'round2-capability-facade') -ReadStrictJsonMarker 'runtime-one'
+        $context=Get-CcodStaticProbeRuntimeAuthorization -ScriptPath $fixture.WorkerPath
+        $api=Import-CcodStaticProbeRuntime -Context $context
+        $callbacks=@('TestRuntimeManifest','ReadStrictJson','ReadSettings','GetPackageIdentity','InvokeStaticProbe','GetProcessSnapshot')
+        $expectedParameters=@{
+            TestRuntimeManifest='RuntimeDirectory,ExpectedRuntimeId';ReadStrictJson='Path,ExpectedSchema,Kind';ReadSettings='StateRoot'
+            GetPackageIdentity='';InvokeStaticProbe='NodeCandidates,CheckerPath,Adapters';GetProcessSnapshot='ProcessId,StatusEvidence,Adapters'
+        }
+        $forbidden=@(
+            'Write-CcodAtomicJson','Write-CcodRotatingLog','Set-CcodActiveRuntime','Write-CcodSettings','Write-CcodStatus','Write-CcodVerifiedPackages',
+            'Set-CcodAutomationEnabled','Set-CcodCandidateCompatibleOptIn','Start-CcodProcess','Stop-CcodProcessIfMatch'
+        )
+        $sourcePaths=@($api.ModulePaths.PSObject.Properties.Value)
+        $leaks=[Collections.Generic.List[string]]::new()
+        if($null -ne $api.PSObject.Properties['WriteAtomicJson']){$leaks.Add('RuntimeApi.WriteAtomicJson')}
+        foreach($callbackName in $callbacks){
+            $callback=$api.$callbackName
+            if($callback -isnot [scriptblock]){$leaks.Add("${callbackName}:not-scriptblock");continue}
+            $actualParameters=(@($callback.Ast.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath})-join ',')
+            if($actualParameters -cne $expectedParameters[$callbackName]){$leaks.Add("${callbackName}:parameters=$actualParameters")}
+            $module=$callback.Module
+            if($null -eq $module){continue}
+            if($sourcePaths -ccontains $module.Path){$leaks.Add("${callbackName}:source-module=$($module.Path)")}
+            foreach($commandName in $forbidden){
+                $scoped=@(& $module {param($Name) Get-Command $Name -ErrorAction SilentlyContinue} $commandName)
+                if($scoped.Count -gt 0){$leaks.Add("${callbackName}:module-scope=$commandName")}
+                if(-not [string]::IsNullOrWhiteSpace($module.Name)){
+                    $qualified=Get-Command ("{0}\{1}" -f $module.Name,$commandName) -ErrorAction SilentlyContinue
+                    if($null -ne $qualified){$leaks.Add("${callbackName}:qualified=$commandName")}
+                }
+            }
+        }
+        Assert-CcodEqual 0 $leaks.Count ('facade leaks: '+($leaks -join '; '))
+        $secondFixture=New-CcodAuthorizedRuntimeFixture -Root (Join-Path $root 'round2-capability-facade-second') -ReadStrictJsonMarker 'runtime-two'
+        $secondContext=Get-CcodStaticProbeRuntimeAuthorization -ScriptPath $secondFixture.WorkerPath
+        $secondApi=Import-CcodStaticProbeRuntime -Context $secondContext
+        $firstValue=& $api.ReadStrictJson -Path 'C:\ignored-first.json' -ExpectedSchema 1 -Kind 'first marker'
+        $secondValue=& $secondApi.ReadStrictJson -Path 'C:\ignored-second.json' -ExpectedSchema 1 -Kind 'second marker'
+        Assert-CcodEqual 'runtime-one,runtime-two' ((@($firstValue.marker,$secondValue.marker))-join ',') 'second import keeps old and new worker facade bindings isolated'
+    }
+
+    & $runRound2Red 'round2 one monotonic deadline includes FinishNode and output completion' {
+        $calls=[pscustomobject]@{FinishBudget=$null;Dispose=0}
+        $expected='2030-02-03T03:02:00.0000000Z'
+        $adapters=@{
+            StartNode={param($Path,$Arguments)[pscustomobject][ordered]@{Pid=501;CreationTimeUtc=$expected;Handle='fake';StdoutTask='stdout';StderrTask='stderr'}}.GetNewClosure()
+            WaitNode={param($Owned,$Milliseconds)$true}
+            GetProcessIdentity={param($Pid)$null}
+            TerminateNode={param($Owned)throw 'must not terminate a completed helper'}
+            FinishNode={param($Owned,$Milliseconds)$calls.FinishBudget=$Milliseconds;Start-Sleep -Milliseconds 900;[pscustomobject][ordered]@{ExitCode=0;Stdout='v22.23.1';Stderr=''}}.GetNewClosure()
+            DisposeNode={param($Owned)$calls.Dispose++}.GetNewClosure()
+        }
+        $watch=[Diagnostics.Stopwatch]::StartNew();$failure=$null
+        try{Invoke-CcodStaticProbeOwnedNode -NodePath 'C:\Node\node.exe' -Arguments @('--version') -TimeoutMilliseconds 100 -Adapters $adapters|Out-Null}catch{$failure=$_}
+        $watch.Stop()
+        $actualId=if($null -eq $failure){'<success>'}else{Get-CcodStaticProbeErrorId $failure}
+        Assert-CcodEqual 'CCOD_STATIC_PROBE_TIMEOUT' $actualId ("finishBudget=$($calls.FinishBudget); elapsed=$($watch.ElapsedMilliseconds)ms; dispose=$($calls.Dispose)")
+        Assert-CcodTrue ($calls.FinishBudget -is [int] -and $calls.FinishBudget -ge 1 -and $calls.FinishBudget -le 100) 'FinishNode receives only the monotonic remaining budget'
+        Assert-CcodEqual 1 $calls.Dispose 'completed helper is disposed exactly once after the bounded finish'
+    }
+
+    & $runRound2Red 'round2 timeout identity survives delayed Finish failure and safe-handle Dispose failure' {
+        $expected='2030-02-03T03:02:00.0000000Z'
+        $delayedCalls=[pscustomobject]@{Dispose=0}
+        $delayedAdapters=@{
+            StartNode={param($Path,$Arguments)[pscustomobject][ordered]@{Pid=501;CreationTimeUtc=$expected;Handle='fake';StdoutTask='stdout';StderrTask='stderr'}}.GetNewClosure()
+            WaitNode={param($Owned,$Milliseconds)$true}
+            GetProcessIdentity={param($Pid)$null}
+            TerminateNode={param($Owned)throw 'must not terminate a completed helper'}
+            FinishNode={param($Owned,$Milliseconds)Start-Sleep -Milliseconds 250;throw 'private delayed finish failure'}
+            DisposeNode={param($Owned)$delayedCalls.Dispose++}.GetNewClosure()
+        }
+        $delayedFailure=$null;try{Invoke-CcodStaticProbeOwnedNode 'C:\Node\node.exe' @('--version') 100 $delayedAdapters|Out-Null}catch{$delayedFailure=$_}
+
+        $disposeCalls=[pscustomobject]@{Dispose=0}
+        $disposeAdapters=@{
+            StartNode={param($Path,$Arguments)[pscustomobject][ordered]@{Pid=502;CreationTimeUtc=$expected;Handle='fake';StdoutTask='stdout';StderrTask='stderr'}}.GetNewClosure()
+            WaitNode={param($Owned,$Milliseconds)$false}
+            GetProcessIdentity={param($Pid)[pscustomobject][ordered]@{Pid=502;CreationTimeUtc='2030-02-03T03:02:01.0000000Z';SessionId=1;UserSid=$script:WorkerSid}}.GetNewClosure()
+            TerminateNode={param($Owned)throw 'mismatched PID must not be terminated'}
+            FinishNode={param($Owned,$Milliseconds)throw 'timeout cannot finish'}
+            DisposeNode={param($Owned)$disposeCalls.Dispose++;throw 'private stopped-handle dispose failure'}.GetNewClosure()
+        }
+        $disposeFailure=$null;try{Invoke-CcodStaticProbeOwnedNode 'C:\Node\node.exe' @('--version') 100 $disposeAdapters|Out-Null}catch{$disposeFailure=$_}
+        $actual=[pscustomobject][ordered]@{
+            DelayedId=$(if($null -eq $delayedFailure){'<success>'}else{Get-CcodStaticProbeErrorId $delayedFailure});DelayedDispose=$delayedCalls.Dispose
+            DisposeId=$(if($null -eq $disposeFailure){'<success>'}else{Get-CcodStaticProbeErrorId $disposeFailure});DisposeCalls=$disposeCalls.Dispose
+        }
+        $expectedState=[pscustomobject][ordered]@{DelayedId='CCOD_STATIC_PROBE_TIMEOUT';DelayedDispose=1;DisposeId='CCOD_STATIC_PROBE_TIMEOUT';DisposeCalls=1}
+        Assert-CcodEqual ($expectedState|ConvertTo-Json -Compress) ($actual|ConvertTo-Json -Compress) 'the fixed timeout identity has priority after deadline expiry and safe-handle disposal'
+    }
+
+    & $runRound2Red 'round2 consumed fake receipts cannot trigger duplicate cleanup after Wait or Finish failure' {
+        $expected='2030-02-03T03:02:00.0000000Z';$states=[Collections.Generic.List[object]]::new()
+        foreach($boundary in @('Wait','Finish')){
+            $handle=[pscustomobject]@{Token="SECRET_CONSUMED_${boundary}_RECEIPT";Alive=$true}
+            $calls=[pscustomobject]@{Terminate=0;Dispose=0;Caught=0}
+            $fakeReceipt=[pscustomobject][ordered]@{Pid=850;CreationTimeUtc=$expected;Handle=$handle}
+            $known=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new("private $boundary adapter failure"),'CCOD_STATIC_PROBE_FAILED',[Management.Automation.ErrorCategory]::InvalidData,$fakeReceipt)
+            $ownedAdapters=@{
+                StartNode={param($Path,$Arguments)[pscustomobject][ordered]@{Pid=850;CreationTimeUtc=$expected;Handle=$handle;StdoutTask='stdout';StderrTask='stderr'}}.GetNewClosure()
+                WaitNode={param($Owned,$Milliseconds)if($boundary -ceq 'Wait'){throw $known};$handle.Alive=$false;$true}.GetNewClosure()
+                GetProcessIdentity={param($Pid)if($handle.Alive){[pscustomobject][ordered]@{Pid=850;CreationTimeUtc=$expected;SessionId=1;UserSid=$script:WorkerSid}}else{$null}}.GetNewClosure()
+                TerminateNode={param($Owned)$calls.Terminate++;$handle.Alive=$false;[pscustomobject][ordered]@{Pid=850;CreationTimeUtc=$expected;Exited=$true}}.GetNewClosure()
+                FinishNode={param($Owned,$Milliseconds)throw $known}.GetNewClosure()
+                DisposeNode={param($Owned)$calls.Dispose++}.GetNewClosure()
+            }
+            $task4={param($NodeCandidates,$CheckerPath,$TaskAdapters)try{& $TaskAdapters.GetNodeVersion $NodeCandidates[0]|Out-Null}catch{$calls.Caught++};New-CcodTask4Probe -Code 'CHECKER_FAILED'}.GetNewClosure()
+            $returned=$null;$failure=$null
+            try{$returned=Invoke-CcodStaticProbeWithDeadline @('C:\Node\node.exe') 'C:\Runtime\check-package.mjs' (New-CcodStaticDeadline 5000) @{OwnedNodeAdapters=$ownedAdapters} $task4}catch{$failure=$_}
+            $states.Add([pscustomobject][ordered]@{
+                Boundary=$boundary;ReturnedCode=$(if($null -eq $returned){$null}else{$returned.Code});FailureId=$(if($null -eq $failure){$null}else{Get-CcodStaticProbeErrorId $failure})
+                Caught=$calls.Caught;Terminate=$calls.Terminate;Dispose=$calls.Dispose;Alive=$handle.Alive
+            })
+        }
+        $actual=$states.ToArray()|ConvertTo-Json -Compress
+        $expectedState=@(
+            [pscustomobject][ordered]@{Boundary='Wait';ReturnedCode='CHECKER_FAILED';FailureId=$null;Caught=1;Terminate=1;Dispose=1;Alive=$false},
+            [pscustomobject][ordered]@{Boundary='Finish';ReturnedCode='CHECKER_FAILED';FailureId=$null;Caught=1;Terminate=0;Dispose=1;Alive=$false}
+        )|ConvertTo-Json -Compress
+        Assert-CcodEqual $expectedState $actual 'only an unconfirmed cleanup receipt may leave the direct owning scope'
+    }
+
+    & $runRound2Red 'round2 cleanup failure retains ownership and Task4 cannot swallow final exact-handle cleanup' {
+        $expected='2030-02-03T03:02:00.0000000Z'
+        $partialHandle=[pscustomobject]@{Token='SECRET_PARTIAL_HANDLE';Alive=$true}
+        $partialCalls=[pscustomobject]@{Terminate=0;Unbound=0;Dispose=0}
+        $partialAdapters=@{
+            CreateProcess={param($StartInfo)$partialHandle}.GetNewClosure()
+            StartProcess={param($Process)$true}
+            GetStartedIdentity={param($Process)[pscustomobject][ordered]@{Pid=501;CreationTimeUtc=$expected}}.GetNewClosure()
+            BeginRead={param($Process)throw 'private partial read setup failure'}
+            GetProcessIdentity={param($Pid)[pscustomobject][ordered]@{Pid=501;CreationTimeUtc=$expected;SessionId=1;UserSid=$script:WorkerSid}}.GetNewClosure()
+            TerminateStarted={param($Process,$Owned)$partialCalls.Terminate++;throw 'private bound cleanup failure'}.GetNewClosure()
+            TerminateUnbound={param($Process)$partialCalls.Unbound++;throw 'private exact-handle fallback failure'}.GetNewClosure()
+            DisposeProcess={param($Process)$partialCalls.Dispose++;$Process.Alive=$false}.GetNewClosure()
+        }
+        $partialFailure=$null
+        try{Start-CcodStaticOwnedNode -Path 'C:\Node\node.exe' -Arguments @('--version') -Adapters $partialAdapters|Out-Null}catch{$partialFailure=$_}
+        $partialReceipt=$null;if($null -ne $partialFailure){$partialReceipt=$partialFailure.TargetObject}
+        $partialReceiptOk=$null -ne $partialReceipt -and $partialReceipt.PSObject.Properties.Name -join ',' -ceq 'Pid,CreationTimeUtc,Handle' -and
+            $partialReceipt.Pid -eq 501 -and $partialReceipt.CreationTimeUtc -ceq $expected -and [object]::ReferenceEquals($partialReceipt.Handle,$partialHandle)
+
+        $harness=New-CcodWorkerHarness -Root (Join-Path $root 'round2-task4-cleanup')
+        $ownedHandle=[pscustomobject]@{Token='SECRET_TASK4_HANDLE';Alive=$true}
+        $ownedCalls=[pscustomobject]@{Terminate=0;Dispose=0;Caught=0}
+        $ownedAdapters=@{
+            StartNode={param($Path,$Arguments)[pscustomobject][ordered]@{Pid=601;CreationTimeUtc=$expected;Handle=$ownedHandle;StdoutTask='stdout';StderrTask='stderr'}}.GetNewClosure()
+            WaitNode={param($Owned,$Milliseconds)$false}
+            GetProcessIdentity={param($Pid)if($ownedHandle.Alive){[pscustomobject][ordered]@{Pid=601;CreationTimeUtc=$expected;SessionId=1;UserSid=$script:WorkerSid}}else{$null}}.GetNewClosure()
+            TerminateNode={param($Owned)$ownedCalls.Terminate++;if($ownedCalls.Terminate -eq 1){throw 'SECRET_FIRST_CLEANUP_FAILURE'};$ownedHandle.Alive=$false;[pscustomobject][ordered]@{Pid=601;CreationTimeUtc=$expected;Exited=$true}}.GetNewClosure()
+            FinishNode={param($Owned,$Milliseconds)throw 'timeout cannot finish'}
+            DisposeNode={param($Owned)$ownedCalls.Dispose++}.GetNewClosure()
+        }
+        $task4={
+            param($NodeCandidates,$CheckerPath,$TaskAdapters)
+            try{& $TaskAdapters.GetNodeVersion $NodeCandidates[0]|Out-Null}catch{$ownedCalls.Caught++}
+            New-CcodTask4Probe -Code 'CHECKER_FAILED'
+        }.GetNewClosure()
+        $harness.Adapters.StartDeadline={param($Timeout)New-CcodStaticDeadline $Timeout}
+        $harness.Adapters.InvokeProbe={param($NodeCandidates,$CheckerPath,$Deadline)Invoke-CcodStaticProbeWithDeadline $NodeCandidates $CheckerPath $Deadline @{OwnedNodeAdapters=$ownedAdapters} $task4}.GetNewClosure()
+        $publicRun=Invoke-CcodStaticProbeWorker $harness.RequestPath $harness.ResultPath $harness.Adapters
+        $publicText=($publicRun|ConvertTo-Json -Depth 20 -Compress)+($harness.Written|ConvertTo-Json -Depth 20 -Compress)+($harness.Stdout -join '')
+
+        $partialHarness=New-CcodWorkerHarness -Root (Join-Path $root 'round2-task4-partial-cleanup')
+        $partialE2EHandle=[pscustomobject]@{Token='SECRET_PARTIAL_TASK4_HANDLE';Alive=$true}
+        $partialE2ECalls=[pscustomobject]@{Terminate=0;Unbound=0;Dispose=0;Caught=0}
+        $partialStartAdapters=@{
+            CreateProcess={param($StartInfo)$partialE2EHandle}.GetNewClosure()
+            StartProcess={param($Process)$true}
+            GetStartedIdentity={param($Process)[pscustomobject][ordered]@{Pid=701;CreationTimeUtc=$expected}}.GetNewClosure()
+            BeginRead={param($Process)throw 'private partial e2e read setup failure'}
+            GetProcessIdentity={param($Pid)if($partialE2EHandle.Alive){[pscustomobject][ordered]@{Pid=701;CreationTimeUtc=$expected;SessionId=1;UserSid=$script:WorkerSid}}else{$null}}.GetNewClosure()
+            TerminateStarted={param($Process,$Owned)$partialE2ECalls.Terminate++;if($partialE2ECalls.Terminate -eq 1){throw 'SECRET_PARTIAL_BOUND_FAILURE'};$partialE2EHandle.Alive=$false;[pscustomobject][ordered]@{Pid=701;CreationTimeUtc=$expected;Exited=$true}}.GetNewClosure()
+            TerminateUnbound={param($Process)$partialE2ECalls.Unbound++;if($partialE2ECalls.Unbound -eq 1){throw 'SECRET_PARTIAL_UNBOUND_FAILURE'};$partialE2EHandle.Alive=$false;$true}.GetNewClosure()
+            DisposeProcess={param($Process)$partialE2ECalls.Dispose++}.GetNewClosure()
+        }
+        $partialTask4={
+            param($NodeCandidates,$CheckerPath,$TaskAdapters)
+            try{& $TaskAdapters.GetNodeVersion $NodeCandidates[0]|Out-Null}catch{$partialE2ECalls.Caught++}
+            New-CcodTask4Probe -Code 'CHECKER_FAILED'
+        }.GetNewClosure()
+        $partialHarness.Adapters.StartDeadline={param($Timeout)New-CcodStaticDeadline $Timeout}
+        $partialHarness.Adapters.InvokeProbe={param($NodeCandidates,$CheckerPath,$Deadline)Invoke-CcodStaticProbeWithDeadline $NodeCandidates $CheckerPath $Deadline @{OwnedNodeAdapters=@{NodeStartAdapters=$partialStartAdapters}} $partialTask4}.GetNewClosure()
+        $partialPublicRun=Invoke-CcodStaticProbeWorker $partialHarness.RequestPath $partialHarness.ResultPath $partialHarness.Adapters
+        $partialPublicText=($partialPublicRun|ConvertTo-Json -Depth 20 -Compress)+($partialHarness.Written|ConvertTo-Json -Depth 20 -Compress)+($partialHarness.Stdout -join '')
+        $actual=[pscustomobject][ordered]@{
+            PartialId=$(if($null -eq $partialFailure){'<success>'}else{Get-CcodStaticProbeErrorId $partialFailure});PartialReceipt=$partialReceiptOk;PartialDispose=$partialCalls.Dispose;PartialAlive=$partialHandle.Alive
+            Task4Caught=$ownedCalls.Caught;Task4Terminate=$ownedCalls.Terminate;Task4Dispose=$ownedCalls.Dispose;Task4Alive=$ownedHandle.Alive;PublicExit=$publicRun.ExitCode
+            PartialTask4Caught=$partialE2ECalls.Caught;PartialTask4Terminate=$partialE2ECalls.Terminate;PartialTask4Unbound=$partialE2ECalls.Unbound;PartialTask4Dispose=$partialE2ECalls.Dispose;PartialTask4Alive=$partialE2EHandle.Alive;PartialPublicExit=$partialPublicRun.ExitCode
+            PublicLeak=($publicText.Contains('SECRET_PARTIAL_HANDLE') -or $publicText.Contains('SECRET_TASK4_HANDLE') -or $publicText.Contains('SECRET_FIRST_CLEANUP_FAILURE') -or $partialPublicText.Contains('SECRET_PARTIAL_TASK4_HANDLE') -or $partialPublicText.Contains('SECRET_PARTIAL_BOUND_FAILURE') -or $partialPublicText.Contains('SECRET_PARTIAL_UNBOUND_FAILURE'))
+        }
+        $expectedState=[pscustomobject][ordered]@{
+            PartialId='CCOD_STATIC_PROBE_FAILED';PartialReceipt=$true;PartialDispose=0;PartialAlive=$true
+            Task4Caught=1;Task4Terminate=2;Task4Dispose=1;Task4Alive=$false;PublicExit=1
+            PartialTask4Caught=1;PartialTask4Terminate=2;PartialTask4Unbound=1;PartialTask4Dispose=1;PartialTask4Alive=$false;PartialPublicExit=1;PublicLeak=$false
+        }
+        Assert-CcodEqual ($expectedState|ConvertTo-Json -Compress) ($actual|ConvertTo-Json -Compress) 'private receipt is retained, final cleanup cannot be swallowed, and public surfaces are sanitized'
+
+        $stickyHandle=[pscustomobject]@{Token='SECRET_STICKY_CLEANUP_HANDLE';Alive=$true}
+        $stickyCalls=[pscustomobject]@{Terminate=0;Unbound=0;Dispose=0;Caught=0}
+        $stickyStartAdapters=@{
+            CreateProcess={param($StartInfo)$stickyHandle}.GetNewClosure();StartProcess={param($Process)$true}
+            GetStartedIdentity={param($Process)[pscustomobject][ordered]@{Pid=801;CreationTimeUtc=$expected}}.GetNewClosure()
+            BeginRead={param($Process)throw 'private sticky read setup failure'}
+            GetProcessIdentity={param($Pid)[pscustomobject][ordered]@{Pid=801;CreationTimeUtc=$expected;SessionId=1;UserSid=$script:WorkerSid}}.GetNewClosure()
+            TerminateStarted={param($Process,$Owned)$stickyCalls.Terminate++;throw 'SECRET_STICKY_BOUND_FAILURE'}.GetNewClosure()
+            TerminateUnbound={param($Process)$stickyCalls.Unbound++;throw 'SECRET_STICKY_UNBOUND_FAILURE'}.GetNewClosure()
+            DisposeProcess={param($Process)$stickyCalls.Dispose++}.GetNewClosure()
+        }
+        $stickyTask4={
+            param($NodeCandidates,$CheckerPath,$TaskAdapters)
+            try{& $TaskAdapters.GetNodeVersion $NodeCandidates[0]|Out-Null}catch{$stickyCalls.Caught++}
+            New-CcodTask4Probe
+        }.GetNewClosure()
+        $stickyReturned=$null;$stickyFailure=$null
+        try{$stickyReturned=Invoke-CcodStaticProbeWithDeadline @('C:\Node\node.exe') 'C:\Runtime\check-package.mjs' (New-CcodStaticDeadline 5000) @{OwnedNodeAdapters=@{NodeStartAdapters=$stickyStartAdapters}} $stickyTask4}catch{$stickyFailure=$_}
+        $stickyReceipt=$null;if($null -ne $stickyFailure){$stickyReceipt=$stickyFailure.TargetObject}
+        $stickyReceiptOk=Test-CcodStaticPrivateNodeCleanupReceipt $stickyReceipt
+        $stickyActual=[pscustomobject][ordered]@{
+            ReturnedCode=$(if($null -eq $stickyReturned){$null}else{$stickyReturned.Code});FailureId=$(if($null -eq $stickyFailure){$null}else{Get-CcodStaticProbeErrorId $stickyFailure})
+            Caught=$stickyCalls.Caught;Terminate=$stickyCalls.Terminate;Unbound=$stickyCalls.Unbound;Dispose=$stickyCalls.Dispose;Alive=$stickyHandle.Alive;PrivateReceipt=$stickyReceiptOk
+        }
+        $stickyExpected=[pscustomobject][ordered]@{ReturnedCode=$null;FailureId='CCOD_STATIC_PROBE_FAILED';Caught=1;Terminate=3;Unbound=3;Dispose=0;Alive=$true;PrivateReceipt=$true}
+        Assert-CcodEqual ($stickyExpected|ConvertTo-Json -Compress) ($stickyActual|ConvertTo-Json -Compress) 'cleanup failure is sticky outside Task4 and receives one final exact-handle recovery attempt'
+
+        $normalStickyHandle=[pscustomobject]@{Token='SECRET_NORMAL_STICKY_HANDLE';Alive=$true}
+        $normalStickyCalls=[pscustomobject]@{Terminate=0;Dispose=0;Caught=0}
+        $normalStickyAdapters=@{
+            StartNode={param($Path,$Arguments)[pscustomobject][ordered]@{Pid=802;CreationTimeUtc=$expected;Handle=$normalStickyHandle;StdoutTask='stdout';StderrTask='stderr'}}.GetNewClosure()
+            WaitNode={param($Owned,$Milliseconds)$false}
+            GetProcessIdentity={param($Pid)[pscustomobject][ordered]@{Pid=802;CreationTimeUtc=$expected;SessionId=1;UserSid=$script:WorkerSid}}.GetNewClosure()
+            TerminateNode={param($Owned)$normalStickyCalls.Terminate++;throw 'SECRET_NORMAL_STICKY_TERMINATION_FAILURE'}.GetNewClosure()
+            FinishNode={param($Owned,$Milliseconds)throw 'timeout cannot finish'}
+            DisposeNode={param($Owned)$normalStickyCalls.Dispose++}.GetNewClosure()
+        }
+        $normalStickyTask4={param($NodeCandidates,$CheckerPath,$TaskAdapters)try{& $TaskAdapters.GetNodeVersion $NodeCandidates[0]|Out-Null}catch{$normalStickyCalls.Caught++};New-CcodTask4Probe}.GetNewClosure()
+        $normalStickyReturned=$null;$normalStickyFailure=$null
+        try{$normalStickyReturned=Invoke-CcodStaticProbeWithDeadline @('C:\Node\node.exe') 'C:\Runtime\check-package.mjs' (New-CcodStaticDeadline 5000) @{OwnedNodeAdapters=$normalStickyAdapters} $normalStickyTask4}catch{$normalStickyFailure=$_}
+        $normalStickyActual=[pscustomobject][ordered]@{
+            ReturnedCode=$(if($null -eq $normalStickyReturned){$null}else{$normalStickyReturned.Code});FailureId=$(if($null -eq $normalStickyFailure){$null}else{Get-CcodStaticProbeErrorId $normalStickyFailure})
+            Caught=$normalStickyCalls.Caught;Terminate=$normalStickyCalls.Terminate;Dispose=$normalStickyCalls.Dispose;Alive=$normalStickyHandle.Alive;PrivateReceipt=$(Test-CcodStaticPrivateNodeCleanupReceipt $(if($null -eq $normalStickyFailure){$null}else{$normalStickyFailure.TargetObject}))
+        }
+        $normalStickyExpected=[pscustomobject][ordered]@{ReturnedCode=$null;FailureId='CCOD_STATIC_PROBE_FAILED';Caught=1;Terminate=3;Dispose=0;Alive=$true;PrivateReceipt=$true}
+        Assert-CcodEqual ($normalStickyExpected|ConvertTo-Json -Compress) ($normalStickyActual|ConvertTo-Json -Compress) 'normal owned cleanup failure is also sticky and receives exactly one final recovery attempt'
+    }
+
+    & $runRound2Red 'round2 normal result publication is no-clobber even with a runtime writer capability' {
+        $caseRoot=Join-Path $root 'round2-publication-race';[IO.Directory]::CreateDirectory($caseRoot)|Out-Null
+        $path=[IO.Path]::GetFullPath((Join-Path $caseRoot 'static-probe-result.json'))
+        $foreign=[Text.Encoding]::ASCII.GetBytes('FOREIGN_RESULT_BYTES_MUST_SURVIVE')
+        [IO.File]::WriteAllBytes($path,$foreign)
+        $runtimeApi=[pscustomobject]@{WriteAtomicJson={param($Path,$Value)[IO.File]::WriteAllText($Path,'runtime-writer-clobbered')}}
+        $writer=(Get-CcodStaticProbeWorkerAdapters $null).WriteResult;$failure=$null
+        try{& $writer $path ([pscustomobject][ordered]@{schemaVersion=1}) $runtimeApi}catch{$failure=$_}
+        $actual=[pscustomobject][ordered]@{Failure=($null -ne $failure);Bytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($path))}
+        $expectedState=[pscustomobject][ordered]@{Failure=$true;Bytes=[Convert]::ToBase64String($foreign)}
+        Assert-CcodEqual ($expectedState|ConvertTo-Json -Compress) ($actual|ConvertTo-Json -Compress) 'late foreign result is preserved exactly and publication fails closed'
+    }
+
+    & $runRound2Red 'round2 missing result leaf is inspected for a dangling reparse point' {
+        $caseRoot=[IO.Path]::GetFullPath((Join-Path $root 'round2-dangling-reparse'));[IO.Directory]::CreateDirectory($caseRoot)|Out-Null
+        $leaf=[IO.Path]::GetFullPath((Join-Path $caseRoot 'missing.result.json'));$leafCalls=[pscustomobject]@{Count=0}
+        $fakeGetItem={param($Path,$AllowMissing)if($Path -ceq $leaf){$leafCalls.Count++;return [pscustomobject]@{Attributes=[IO.FileAttributes]::ReparsePoint}};Get-Item -LiteralPath $Path -Force -ErrorAction Stop}.GetNewClosure()
+        $danglingFailure=$null;try{Assert-CcodStaticProbeNoReparse -Root $caseRoot -Path $leaf -AllowMissingLeaf -Adapters @{GetItem=$fakeGetItem}|Out-Null}catch{$danglingFailure=$_}
+        $realMissing=[IO.Path]::GetFullPath((Join-Path $caseRoot 'genuinely-missing.result.json'));$realFailure=$null
+        try{Assert-CcodStaticProbeNoReparse -Root $caseRoot -Path $realMissing -AllowMissingLeaf|Out-Null}catch{$realFailure=$_}
+        $existingDirectory=[IO.Path]::GetFullPath((Join-Path $caseRoot 'existing-directory.result.json'));[IO.Directory]::CreateDirectory($existingDirectory)|Out-Null;$directoryFailure=$null
+        try{Assert-CcodStaticProbeNoReparse -Root $caseRoot -Path $existingDirectory -AllowMissingLeaf|Out-Null}catch{$directoryFailure=$_}
+        $actual=[pscustomobject][ordered]@{
+            DanglingId=$(if($null -eq $danglingFailure){'<success>'}else{Get-CcodStaticProbeErrorId $danglingFailure});LeafCalls=$leafCalls.Count;RealMissingAllowed=($null -eq $realFailure)
+            ExistingDirectoryId=$(if($null -eq $directoryFailure){'<success>'}else{Get-CcodStaticProbeErrorId $directoryFailure})
+        }
+        $expectedState=[pscustomobject][ordered]@{DanglingId='CCOD_STATIC_PATH_INVALID';LeafCalls=1;RealMissingAllowed=$true;ExistingDirectoryId='CCOD_STATIC_PATH_INVALID'}
+        Assert-CcodEqual ($expectedState|ConvertTo-Json -Compress) ($actual|ConvertTo-Json -Compress) 'allowed missing leaf is still inspected and only a true missing leaf is accepted'
+    }
+
+    if($round2RedFailures.Count -gt 0){throw ("TASK10C1_ROUND2_RED:`n"+($round2RedFailures -join "`n"))}
 
     Invoke-CcodTest 'AST exposes only the two CLI paths and no forbidden mutation surface' {
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($workerScript,[ref]$tokens,[ref]$errors)
