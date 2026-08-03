@@ -367,6 +367,34 @@ function Read-CcodStaticProbeLocalJson {
     return $value
 }
 
+function Write-CcodStaticProbeLocalAtomicJson {
+    param([string]$Path,$Value)
+    $directory=Split-Path $Path -Parent;$leaf=[IO.Path]::GetFileName($Path)
+    $temporary=[IO.Path]::GetFullPath((Join-Path $directory ('.{0}.{1}.tmp' -f $leaf,[guid]::NewGuid().ToString('N'))))
+    $stream=$null
+    try{
+        if([IO.File]::Exists($Path)){throw 'result already exists'}
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Value|ConvertTo-Json -Depth 20)+"`n")
+        $stream=[IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+        $stream.Write($bytes,0,$bytes.Length);$stream.Flush($true);$stream.Dispose();$stream=$null
+        if([IO.File]::Exists($Path)){throw 'result appeared before commit'}
+        [IO.File]::Move($temporary,$Path)
+    }finally{
+        if($null -ne $stream){try{$stream.Dispose()}catch{}}
+        if([IO.File]::Exists($temporary)){try{[IO.File]::Delete($temporary)}catch{}}
+    }
+}
+
+function Test-CcodStaticProbeRequestMatch {
+    param($Left,$Right)
+    try{Assert-CcodStaticProbeRequest $Left|Out-Null;Assert-CcodStaticProbeRequest $Right|Out-Null}catch{return $false}
+    return $Left.schemaVersion -eq $Right.schemaVersion -and $Left.action -ceq $Right.action -and $Left.requestId -ceq $Right.requestId -and
+        $Left.runtimeId -ceq $Right.runtimeId -and $Left.timeoutMilliseconds -eq $Right.timeoutMilliseconds -and
+        $Left.supervisorIdentity.pid -eq $Right.supervisorIdentity.pid -and $Left.supervisorIdentity.creationTimeUtc -ceq $Right.supervisorIdentity.creationTimeUtc -and
+        $Left.supervisorIdentity.sessionId -ceq $Right.supervisorIdentity.sessionId -and $Left.targetIdentity.pid -eq $Right.targetIdentity.pid -and
+        $Left.targetIdentity.creationTimeUtc -ceq $Right.targetIdentity.creationTimeUtc
+}
+
 function Test-CcodStaticManifestPath {
     param($Value)
     return $Value -is [string] -and -not [string]::IsNullOrWhiteSpace($Value) -and -not [IO.Path]::IsPathRooted($Value) -and
@@ -642,11 +670,11 @@ function Start-CcodStaticOwnedNode {
     $adapter=Get-CcodStaticNodeStartAdapters $Adapters
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$Path;$info.Arguments=(($Arguments|ForEach-Object{ConvertTo-CcodStaticProcessArgument $_}) -join ' ')
     $info.UseShellExecute=$false;$info.CreateNoWindow=$true;$info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
-    $process=$null;$started=$false;$owned=$null
+    $process=$null;$startAttempted=$false;$started=$false;$owned=$null
     try{
         $process=Invoke-CcodStaticAdapter $adapter.CreateProcess @($info) Single 'CCOD_STATIC_PROBE_FAILED'
         if($null -eq $process){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The Node process handle is unavailable' $null}
-        $startResult=Invoke-CcodStaticAdapter $adapter.StartProcess @($process) Single 'CCOD_STATIC_PROBE_FAILED'
+        $startAttempted=$true;$startResult=Invoke-CcodStaticAdapter $adapter.StartProcess @($process) Single 'CCOD_STATIC_PROBE_FAILED'
         if($startResult -isnot [bool] -or -not $startResult){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The Node helper could not be started' $null}
         $started=$true
         $identity=Invoke-CcodStaticAdapter $adapter.GetStartedIdentity @($process) Single 'CCOD_STATIC_PROBE_FAILED'
@@ -658,7 +686,12 @@ function Start-CcodStaticOwnedNode {
         $owned.StdoutTask=$reads.StdoutTask;$owned.StderrTask=$reads.StderrTask
         return $owned
     }catch{
-        if($started){
+        if($startAttempted -and -not $started){
+            try{
+                $ambiguous=Invoke-CcodStaticAdapter $adapter.TerminateUnbound @($process) Single 'CCOD_STATIC_PROBE_FAILED'
+                if($ambiguous -isnot [bool] -or -not $ambiguous){throw 'ambiguous helper remains alive'}
+            }catch{}
+        }elseif($started){
             try{
                 if($null -eq $owned){
                     $retry=Invoke-CcodStaticAdapter $adapter.GetStartedIdentity @($process) Single 'CCOD_STATIC_PROBE_FAILED'
@@ -715,7 +748,7 @@ function Invoke-CcodStaticProbeOwnedNode {
         if($waited -isnot [bool]){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The owned Node wait result is invalid' $null}
         if(-not $waited){
             $identity=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
-            if(Test-CcodStaticOwnedNodeIdentityMatch $identity $owned){
+            if($null -eq $identity -or (Test-CcodStaticOwnedNodeIdentityMatch $identity $owned)){
                 $receipt=Invoke-CcodStaticAdapter $adapter.TerminateNode @($owned) Single 'CCOD_STATIC_PROBE_FAILED';Assert-CcodStaticNodeTerminationReceipt $receipt $owned|Out-Null
                 $after=Invoke-CcodStaticAdapter $adapter.GetProcessIdentity @($owned.Pid) OptionalSingle 'CCOD_STATIC_PROBE_FAILED'
                 if(Test-CcodStaticOwnedNodeIdentityMatch $after $owned){Throw-CcodStaticProbeError 'CCOD_STATIC_PROBE_FAILED' 'The owned Node helper is still running after termination' $null}
@@ -787,7 +820,7 @@ function Get-CcodStaticProbeWorkerAdapters {
         GetTargetSnapshot={param($Pid,$Package,$RuntimeApi)$bound=$Package;& $RuntimeApi.GetProcessSnapshot -ProcessId $Pid -Adapters @{GetPackageIdentity={$bound}.GetNewClosure()}}
         StartDeadline={param($Timeout)New-CcodStaticDeadline $Timeout}
         InvokeProbe=$null
-        WriteResult={param($Path,$Value,$RuntimeApi)& $RuntimeApi.WriteAtomicJson -Path $Path -Value $Value}
+        WriteResult={param($Path,$Value,$RuntimeApi)if($null -ne $RuntimeApi -and $null -ne $RuntimeApi.PSObject.Properties['WriteAtomicJson'] -and $RuntimeApi.WriteAtomicJson -is [scriptblock]){& $RuntimeApi.WriteAtomicJson -Path $Path -Value $Value}else{Write-CcodStaticProbeLocalAtomicJson -Path $Path -Value $Value}}
         WriteStdout={param($Line)[Console]::Out.WriteLine($Line)}
         WriteStderr={param($Line)[Console]::Error.WriteLine($Line)}
     }
@@ -816,12 +849,13 @@ function Invoke-CcodStaticProbeWorker {
         $scriptPath=Invoke-CcodStaticAdapter $adapter.GetScriptPath @() Single 'CCOD_STATIC_RUNTIME_UNAUTHORIZED'
         $context=Invoke-CcodStaticAdapter $adapter.AuthorizeRuntime @($scriptPath) Single 'CCOD_STATIC_RUNTIME_UNAUTHORIZED'
         $stage='InputValidation';Assert-CcodStaticProbeFramingPaths $context $RequestPath $ResultPath $null -Adapters $Adapters;$canPublish=$true
+        $request=Read-CcodStaticProbeLocalJson $RequestPath 'CCOD_STATIC_REQUEST_INVALID';Assert-CcodStaticProbeRequest $request|Out-Null;$requestValid=$true
+        $stage='RuntimeAuthorization';if($request.runtimeId -cne $context.RuntimeId){Throw-CcodStaticProbeError 'CCOD_STATIC_RUNTIME_UNAUTHORIZED' 'The request runtime is not the active authorized runtime' $null}
+        $stage='InputValidation';$canPublish=$false;Assert-CcodStaticProbeFramingPaths $context $RequestPath $ResultPath $request -RequireCorrelation -Adapters $Adapters;$canPublish=$true
         $stage='ModuleLoad';$runtimeApi=Invoke-CcodStaticAdapter $adapter.ImportRuntime @($context) Single 'CCOD_STATIC_MODULE_LOAD_FAILED'
         $stage='RuntimeAuthorization';$context=Invoke-CcodStaticAdapter $adapter.CompleteRuntimeAuthorization @($context,$runtimeApi) Single 'CCOD_STATIC_RUNTIME_UNAUTHORIZED'
-        $stage='InputValidation';Read-CcodStaticProbeLocalJson $RequestPath 'CCOD_STATIC_REQUEST_INVALID'|Out-Null;$request=Invoke-CcodStaticAdapter $adapter.ReadRequest @($RequestPath,$runtimeApi) Single 'CCOD_STATIC_REQUEST_INVALID';Assert-CcodStaticProbeRequest $request|Out-Null;$requestValid=$true
-        $stage='RuntimeAuthorization';if($request.runtimeId -cne $context.RuntimeId){Throw-CcodStaticProbeError 'CCOD_STATIC_RUNTIME_UNAUTHORIZED' 'The request runtime is not the active authorized runtime' $null}
-        $stage='InputValidation'
-        $canPublish=$false;Assert-CcodStaticProbeFramingPaths $context $RequestPath $ResultPath $request -RequireCorrelation -Adapters $Adapters;$canPublish=$true
+        $stage='InputValidation';$verifiedRequest=Invoke-CcodStaticAdapter $adapter.ReadRequest @($RequestPath,$runtimeApi) Single 'CCOD_STATIC_REQUEST_INVALID';Assert-CcodStaticProbeRequest $verifiedRequest|Out-Null
+        if(-not(Test-CcodStaticProbeRequestMatch $request $verifiedRequest)){Throw-CcodStaticProbeError 'CCOD_STATIC_REQUEST_INVALID' 'The static probe request changed during authorization' $null};$request=$verifiedRequest
         $stage='StaticProbe';$deadline=Invoke-CcodStaticAdapter $adapter.StartDeadline @($request.timeoutMilliseconds) Single 'CCOD_STATIC_PROBE_FAILED'
         $stage='StateRead';$settings=Invoke-CcodStaticAdapter $adapter.ReadSettings @($context.StateRoot,$runtimeApi) Single 'CCOD_STATIC_STATE_INVALID';Assert-CcodStaticSettings $settings|Out-Null
         $stage='SupervisorPreflight';$current=Invoke-CcodStaticAdapter $adapter.GetCurrentIdentity @() Single 'CCOD_STATIC_SUPERVISOR_CHANGED';Assert-CcodStaticCurrentIdentity $current $request|Out-Null
@@ -847,7 +881,11 @@ function Invoke-CcodStaticProbeWorker {
         $code=Get-CcodStaticFailureForStage $stage $_;$result=New-CcodStaticProbeErrorResult $(if($requestValid){$request}else{$null}) $code $stage
     }
     if(-not $canPublish){return [pscustomobject][ordered]@{Result=$result;ExitCode=1}}
-    try{Assert-CcodStaticProbeResult $result $(if($requestValid){$request}else{$null})|Out-Null;Invoke-CcodStaticAdapter $adapter.WriteResult @($ResultPath,$result,$runtimeApi) None 'CCOD_STATIC_RESULT_INVALID'|Out-Null}catch{
+    try{
+        Assert-CcodStaticProbeResult $result $(if($requestValid){$request}else{$null})|Out-Null
+        $writeArguments=[Collections.Generic.List[object]]::new();$writeArguments.Add($ResultPath);$writeArguments.Add($result);if($null -ne $runtimeApi){$writeArguments.Add($runtimeApi)}
+        Invoke-CcodStaticAdapter -Callback $adapter.WriteResult -ArgumentList $writeArguments.ToArray() -OutputMode None -ErrorId 'CCOD_STATIC_RESULT_INVALID'|Out-Null
+    }catch{
         try{Invoke-CcodStaticAdapter $adapter.WriteStderr @('CCOD_STATIC_RESULT_WRITE_FAILED') None 'CCOD_STATIC_RESULT_INVALID'|Out-Null}catch{}
         return [pscustomobject][ordered]@{Result=(New-CcodStaticProbeErrorResult $(if($requestValid){$request}else{$null}) 'CCOD_STATIC_RESULT_INVALID' 'ResultValidation');ExitCode=1}
     }

@@ -423,6 +423,7 @@ try {
         [IO.File]::WriteAllText($requestHarness.RequestPath,$json,[Text.UTF8Encoding]::new($false))
         $run=Invoke-CcodStaticProbeWorker $requestHarness.RequestPath $requestHarness.ResultPath $requestHarness.Adapters
         Assert-CcodEqual 1 $run.ExitCode 'duplicate request key fails closed'
+        Assert-CcodEqual 1 $requestHarness.Written.Count 'duplicate request publishes one uncorrelated safe failure'
         Assert-CcodEqual $null $requestHarness.Written[0].requestId 'duplicate request never gains correlation'
         Assert-CcodEqual 0 $requestHarness.ProbeCalls.Count 'duplicate request never probes'
     }
@@ -475,6 +476,58 @@ try {
         foreach($forbidden in @('Start-CcodProcess','Stop-CcodProcessIfMatch','Write-CcodSettings','Write-CcodStatus','Write-CcodVerifiedPackages','Set-CcodAutomationEnabled','Set-CcodCandidateCompatibleOptIn')){
             Assert-CcodEqual $null (Get-Command $forbidden -ErrorAction SilentlyContinue) "verified imports do not expose $forbidden"
         }
+    }
+
+    Invoke-CcodTest 'preserves valid correlation and atomically publishes module-boundary failures before runtime APIs exist' {
+        foreach($boundary in @('ImportRuntime','CompleteRuntimeAuthorization')){
+            $harness=New-CcodWorkerHarness -Root (Join-Path $root ('module-failure-'+$boundary.ToLowerInvariant()))
+            $harness.Adapters[$boundary]={throw 'private verified-module boundary failure'}
+            $run=Invoke-CcodStaticProbeWorker $harness.RequestPath $harness.ResultPath $harness.Adapters
+            Assert-CcodEqual 1 $run.ExitCode "$boundary failure exits nonzero"
+            Assert-CcodEqual 1 $harness.Written.Count "$boundary failure publishes one atomic result"
+            Assert-CcodEqual $script:RequestId $harness.Written[0].requestId "$boundary failure preserves valid request correlation"
+            Assert-CcodEqual $script:RuntimeId $harness.Written[0].runtimeId "$boundary failure preserves valid runtime correlation"
+            Assert-CcodEqual 101 $harness.Written[0].targetIdentity.pid "$boundary failure preserves valid target correlation"
+            Assert-CcodEqual $(if($boundary -ceq 'ImportRuntime'){'CCOD_STATIC_MODULE_LOAD_FAILED'}else{'CCOD_STATIC_RUNTIME_UNAUTHORIZED'}) $harness.Written[0].error.code "$boundary failure keeps its fixed code"
+        }
+
+        $fixture=New-CcodAuthorizedRuntimeFixture -Root (Join-Path $root 'production-module-failure-publication')
+        $request=New-CcodWorkerRequest;$request.runtimeId=$fixture.RuntimeId
+        $requestPath=[IO.Path]::GetFullPath((Join-Path $fixture.WorkersRoot ("static-probe-$($request.requestId).request.json")))
+        $resultPath=[IO.Path]::GetFullPath((Join-Path $fixture.WorkersRoot ("static-probe-$($request.requestId).result.json")))
+        [IO.File]::WriteAllText($requestPath,($request|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        $scriptPath=$fixture.WorkerPath;$stdout=[Collections.Generic.List[string]]::new();$stderr=[Collections.Generic.List[string]]::new()
+        $run=Invoke-CcodStaticProbeWorker $requestPath $resultPath @{
+            GetScriptPath={$scriptPath}.GetNewClosure()
+            ImportRuntime={throw 'private import failure before runtime writer exists'}
+            WriteStdout={param($Line)$stdout.Add($Line)}.GetNewClosure()
+            WriteStderr={param($Line)$stderr.Add($Line)}.GetNewClosure()
+        }
+        Assert-CcodEqual 1 $run.ExitCode 'production import failure exits nonzero'
+        Assert-CcodTrue ([IO.File]::Exists($resultPath)) 'self-contained atomic fallback publishes before a runtime writer exists'
+        $durable=[IO.File]::ReadAllText($resultPath,[Text.UTF8Encoding]::new($false))|ConvertFrom-Json
+        Assert-CcodEqual $request.requestId $durable.requestId 'fallback result preserves request correlation'
+        Assert-CcodEqual $request.runtimeId $durable.runtimeId 'fallback result preserves runtime correlation'
+        Assert-CcodEqual 'CCOD_STATIC_MODULE_LOAD_FAILED' $durable.error.code 'fallback result preserves the module-load code'
+        Assert-CcodEqual 1 $stdout.Count 'successful fallback atomic publication emits one stdout frame'
+        Assert-CcodEqual 0 $stderr.Count 'successful fallback atomic publication emits no stderr frame'
+
+        $raceFixture=New-CcodAuthorizedRuntimeFixture -Root (Join-Path $root 'production-module-failure-result-race')
+        $raceRequest=New-CcodWorkerRequest;$raceRequest.runtimeId=$raceFixture.RuntimeId
+        $raceRequestPath=[IO.Path]::GetFullPath((Join-Path $raceFixture.WorkersRoot ("static-probe-$($raceRequest.requestId).request.json")))
+        $raceResultPath=[IO.Path]::GetFullPath((Join-Path $raceFixture.WorkersRoot ("static-probe-$($raceRequest.requestId).result.json")))
+        [IO.File]::WriteAllText($raceRequestPath,($raceRequest|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        $raceScript=$raceFixture.WorkerPath;$raceStdout=[Collections.Generic.List[string]]::new();$raceStderr=[Collections.Generic.List[string]]::new();$foreign=[Text.Encoding]::ASCII.GetBytes('foreign-result-race')
+        $run=Invoke-CcodStaticProbeWorker $raceRequestPath $raceResultPath @{
+            GetScriptPath={$raceScript}.GetNewClosure()
+            ImportRuntime={[IO.File]::WriteAllBytes($raceResultPath,$foreign);throw 'private import failure after result-path race'}.GetNewClosure()
+            WriteStdout={param($Line)$raceStdout.Add($Line)}.GetNewClosure()
+            WriteStderr={param($Line)$raceStderr.Add($Line)}.GetNewClosure()
+        }
+        Assert-CcodEqual 1 $run.ExitCode 'fallback target race exits nonzero'
+        Assert-CcodEqual ([Convert]::ToBase64String($foreign)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($raceResultPath))) 'fallback never overwrites a raced target'
+        Assert-CcodEqual 0 $raceStdout.Count 'fallback atomic failure emits zero stdout frames'
+        Assert-CcodEqual 1 $raceStderr.Count 'fallback atomic failure emits one fixed stderr frame'
     }
 
     Invoke-CcodTest 'accepts all three checker classifications and publishes one atomic correlated frame before stdout' {
@@ -692,21 +745,21 @@ try {
         }
     }
 
-    Invoke-CcodTest 'owned Node timeout terminates only an identity-matched helper' {
-        foreach($matches in @($true,$false)){
+    Invoke-CcodTest 'owned Node timeout terminates an exact match or owned handle fallback but never a reused PID' {
+        foreach($identityMode in @('Match','Unavailable','Mismatch')){
             $terminated=[Collections.Generic.List[int]]::new()
             $identityReads=[pscustomobject]@{Count=0}
             $expected='2030-02-03T03:02:00.0000000Z'
             $adapters=@{
                 StartNode={param($Path,$Arguments)[pscustomobject][ordered]@{Pid=501;CreationTimeUtc=$expected;Handle='fake';StdoutTask='stdout';StderrTask='stderr'}}.GetNewClosure()
                 WaitNode={param($Owned,$Milliseconds)$false}
-                GetProcessIdentity={param($Pid)$identityReads.Count++;if($matches -and $identityReads.Count -gt 1){$null}else{[pscustomobject][ordered]@{Pid=501;CreationTimeUtc=$(if($matches){$expected}else{'2030-02-03T03:02:01.0000000Z'});SessionId=1;UserSid=$script:WorkerSid}}}.GetNewClosure()
+                GetProcessIdentity={param($Pid)$identityReads.Count++;if($identityMode -eq 'Unavailable' -or ($identityMode -eq 'Match' -and $identityReads.Count -gt 1)){$null}else{[pscustomobject][ordered]@{Pid=501;CreationTimeUtc=$(if($identityMode -eq 'Match'){$expected}else{'2030-02-03T03:02:01.0000000Z'});SessionId=1;UserSid=$script:WorkerSid}}}.GetNewClosure()
                 TerminateNode={param($Owned)$terminated.Add($Owned.Pid);[pscustomobject][ordered]@{Pid=$Owned.Pid;CreationTimeUtc=$Owned.CreationTimeUtc;Exited=$true}}.GetNewClosure()
                 FinishNode={param($Owned)[pscustomobject]@{ExitCode=1;Stdout='';Stderr=''}}
                 DisposeNode={param($Owned)}
             }
             Assert-CcodThrows {Invoke-CcodStaticProbeOwnedNode -NodePath 'C:\Node\node.exe' -Arguments @('--version') -TimeoutMilliseconds 500 -Adapters $adapters|Out-Null} 'CCOD_STATIC_PROBE_TIMEOUT'
-            Assert-CcodEqual $(if($matches){1}else{0}) $terminated.Count 'only the exact owned Node identity may be terminated'
+            Assert-CcodEqual $(if($identityMode -eq 'Mismatch'){0}else{1}) $terminated.Count "$identityMode cleanup terminates only the exact identity or exact owned handle"
         }
     }
 
@@ -794,6 +847,21 @@ try {
             Assert-CcodEqual $(if($variant -in @('IdentityReadUnavailable','IdentityUnavailable')){0}else{1}) $calls.Terminate "$variant uses bound cleanup only with an exact identity"
             Assert-CcodEqual $(if($variant -in @('IdentityReadUnavailable','IdentityUnavailable')){1}else{0}) $calls.Unbound "$variant uses exact-handle cleanup when identity binding or recheck is unavailable"
         }
+
+        $calls=[pscustomobject]@{Unbound=0;Dispose=0}
+        $ambiguous=@{
+            CreateProcess={param($StartInfo)'fake-process'}
+            StartProcess={param($Process)throw 'private callback failed after starting its exact handle'}
+            GetStartedIdentity={param($Process)throw 'must not bind after ambiguous start callback failure'}
+            BeginRead={param($Process)throw 'must not begin reads'}
+            GetProcessIdentity={param($Pid)throw 'must not read an unbound PID'}
+            TerminateStarted={param($Process,$Owned)throw 'must not use bound termination'}
+            TerminateUnbound={param($Process)$calls.Unbound++;$true}.GetNewClosure()
+            DisposeProcess={param($Process)$calls.Dispose++}.GetNewClosure()
+        }
+        Assert-CcodThrows {Start-CcodStaticOwnedNode -Path 'C:\Node\node.exe' -Arguments @('--version') -Adapters $ambiguous|Out-Null} 'CCOD_STATIC_PROBE_FAILED'
+        Assert-CcodEqual 1 $calls.Unbound 'ambiguous StartProcess completion cleans the exact process handle'
+        Assert-CcodEqual 1 $calls.Dispose 'ambiguous StartProcess completion disposes the exact handle once'
     }
 
     Invoke-CcodTest 'contains all six diagnostic streams at every owned Node adapter boundary' {
@@ -821,7 +889,7 @@ try {
     Invoke-CcodTest 'contains all six diagnostic streams at every partial-start Node adapter boundary' {
         foreach($boundary in @('CreateProcess','StartProcess','GetStartedIdentity','BeginRead','GetProcessIdentity','TerminateStarted','TerminateUnbound','DisposeProcess')){
             foreach($stream in @('Error','Output','Warning','Verbose','Debug','Information')){
-                $boundaryValue=[string]$boundary;$streamValue=[string]$stream;$expected='2030-02-03T03:02:00.0000000Z';$calls=[pscustomobject]@{Identity=0}
+                $boundaryValue=[string]$boundary;$streamValue=[string]$stream;$expected='2030-02-03T03:02:00.0000000Z';$calls=[pscustomobject]@{Identity=0;Unbound=0}
                 $unbound=$boundaryValue -ceq 'TerminateUnbound';$cleanupPath=$boundaryValue -in @('GetProcessIdentity','TerminateStarted','TerminateUnbound','DisposeProcess')
                 $adapters=@{
                     CreateProcess={param($StartInfo)'fake-process'}
@@ -830,7 +898,7 @@ try {
                     BeginRead={param($Process)if($cleanupPath){throw 'private read setup failure'};[pscustomobject][ordered]@{StdoutTask='stdout';StderrTask='stderr'}}.GetNewClosure()
                     GetProcessIdentity={param($Pid)$calls.Identity++;if($calls.Identity -gt 1){$null}else{[pscustomobject][ordered]@{Pid=501;CreationTimeUtc=$expected;SessionId=1;UserSid=$script:WorkerSid}}}.GetNewClosure()
                     TerminateStarted={param($Process,$Owned)[pscustomobject][ordered]@{Pid=$Owned.Pid;CreationTimeUtc=$Owned.CreationTimeUtc;Exited=$true}}
-                    TerminateUnbound={param($Process)$true}
+                    TerminateUnbound={param($Process)$calls.Unbound++;$true}.GetNewClosure()
                     DisposeProcess={param($Process)}
                 }
                 $secret="SECRET_NODE_START_${boundaryValue}_${streamValue}_C:\private\token.txt";$emit=New-CcodTestStreamEmitter $streamValue $secret;$inner=$adapters[$boundaryValue]
@@ -839,6 +907,7 @@ try {
                 Assert-CcodTrue ($null -ne $failure) "$boundaryValue $streamValue stream fails closed"
                 Assert-CcodTrue ($failure.FullyQualifiedErrorId -like 'CCOD_STATIC_PROBE_FAILED*') "$boundaryValue $streamValue stream maps to a fixed failure"
                 Assert-CcodTrue (-not (($failure|Out-String).Contains($secret))) "$boundaryValue $streamValue stream does not leak"
+                if($boundaryValue -ceq 'StartProcess'){Assert-CcodEqual 1 $calls.Unbound "$boundaryValue $streamValue performs exact-handle ambiguous-start cleanup"}
             }
         }
     }
