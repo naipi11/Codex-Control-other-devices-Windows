@@ -308,10 +308,10 @@ function Test-CcodBootstrapRuntime {
             }
         }
         $computedRuntimeId = Get-CcodBootstrapRuntimeId -ProjectVersion ([string]$manifest.projectVersion) -Files $actualFiles
-        if ($computedRuntimeId -cne $manifestRuntimeId -or -not $manifestPaths.Contains('Supervisor.ps1')) {
+        if ($computedRuntimeId -cne $manifestRuntimeId -or -not $manifestPaths.Contains('src/persistence/Supervisor.ps1')) {
             return New-CcodBootstrapRuntimeValidation -Valid $false -Code 'CCOD_BOOTSTRAP_RUNTIME_ID_MISMATCH' -RuntimeDirectory $runtimeDirectory -SupervisorPath $null
         }
-        $supervisorPath = Assert-CcodBootstrapContained -Root $runtimeDirectory -Path (Join-Path $runtimeDirectory 'Supervisor.ps1')
+        $supervisorPath = Assert-CcodBootstrapContained -Root $runtimeDirectory -Path (Join-Path $runtimeDirectory 'src\persistence\Supervisor.ps1')
         if (-not [IO.File]::Exists($supervisorPath)) {
             return New-CcodBootstrapRuntimeValidation -Valid $false -Code 'CCOD_BOOTSTRAP_SUPERVISOR_MISSING' -RuntimeDirectory $runtimeDirectory -SupervisorPath $null
         }

@@ -100,18 +100,20 @@ function Add-CcodTestRuntime {
         $runtimeDirectory = Join-Path $Root "runtime\$RuntimeId"
     }
     New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
-    $supervisorPath = Join-Path $runtimeDirectory 'Supervisor.ps1'
+    $supervisorDirectory = Join-Path $runtimeDirectory 'src\persistence'
+    New-Item -ItemType Directory -Path $supervisorDirectory -Force | Out-Null
+    $supervisorPath = Join-Path $supervisorDirectory 'Supervisor.ps1'
     [IO.File]::WriteAllText($supervisorPath, $SupervisorScript, [Text.UTF8Encoding]::new($false))
     if ([string]::IsNullOrWhiteSpace($RuntimeId)) {
         $hash = (Get-FileHash -LiteralPath $supervisorPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $length = [int64](Get-Item -LiteralPath $supervisorPath).Length
-        $files = @([pscustomobject]@{ path = 'Supervisor.ps1'; length = $length; sha256 = $hash })
+        $files = @([pscustomobject]@{ path = 'src/persistence/Supervisor.ps1'; length = $length; sha256 = $hash })
         $RuntimeId = Get-CcodRuntimeId -ProjectVersion '0.0.0-bootstrap-test' -Files $files
         $targetDirectory = Join-Path $Root "runtime\$RuntimeId"
         if ($targetDirectory -cne $runtimeDirectory) {
             [IO.Directory]::Move($runtimeDirectory, $targetDirectory)
             $runtimeDirectory = $targetDirectory
-            $supervisorPath = Join-Path $runtimeDirectory 'Supervisor.ps1'
+            $supervisorPath = Join-Path $runtimeDirectory 'src\persistence\Supervisor.ps1'
         }
     }
     $manifest = [ordered]@{
@@ -120,7 +122,7 @@ function Add-CcodTestRuntime {
         runtimeId = $RuntimeId
         files = @(
             [ordered]@{
-                path = 'Supervisor.ps1'
+                path = 'src/persistence/Supervisor.ps1'
                 length = [int64](Get-Item -LiteralPath $supervisorPath).Length
                 sha256 = (Get-FileHash -LiteralPath $supervisorPath -Algorithm SHA256).Hash.ToLowerInvariant()
             }
