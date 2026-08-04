@@ -260,15 +260,16 @@ function Get-CcodSupervisorRemainingBudget {
 function Invoke-CcodSupervisorDrainQueue {
     param($Queue,[hashtable]$Adapters)
     if($null -eq $Queue){return}
-    $count=Invoke-CcodSupervisorAdapter $Adapters.GetQueueCount @($Queue) 1
+    $queueArgument=[object[]]::new(1);$queueArgument[0]=$Queue
+    $count=Invoke-CcodSupervisorAdapter $Adapters.GetQueueCount $queueArgument 1
     if($count -isnot [int] -or $count -lt 0){throw 'queue count is invalid'}
     $limit=[Math]::Min($count,256)
     for($index=0;$index -lt $limit;$index++){
-        $receipt=Invoke-CcodSupervisorAdapter $Adapters.TryDequeue @($Queue) 1
+        $receipt=Invoke-CcodSupervisorAdapter $Adapters.TryDequeue $queueArgument 1
         if(-not (Test-CcodSupervisorExactProperties $receipt @('Succeeded','Value')) -or $receipt.Succeeded -isnot [bool]){throw 'queue receipt is invalid'}
         if(-not $receipt.Succeeded){break}
     }
-    $remaining=Invoke-CcodSupervisorAdapter $Adapters.GetQueueCount @($Queue) 1
+    $remaining=Invoke-CcodSupervisorAdapter $Adapters.GetQueueCount $queueArgument 1
     if($remaining -isnot [int] -or $remaining -ne 0){throw 'queue did not drain'}
 }
 
@@ -480,7 +481,8 @@ function Invoke-CcodSupervisorTick {
     $HostState.Journal=Invoke-CcodSupervisorNullableAdapter $Adapters.ReadJournal @($HostState.Layout.TransitionPath)
     if($null -ne $HostState.Journal){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Recover' $null|Out-Null;return}
     if($HostState.SpecialNeedsInspect){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Inspect' $null|Out-Null;return}
-    $dequeued=Invoke-CcodSupervisorAdapter $Adapters.TryDequeue @($HostState.CommandQueue) 1
+    $queueArgument=[object[]]::new(1);$queueArgument[0]=$HostState.CommandQueue
+    $dequeued=Invoke-CcodSupervisorAdapter $Adapters.TryDequeue $queueArgument 1
     if(-not (Test-CcodSupervisorExactProperties $dequeued @('Succeeded','Value')) -or $dequeued.Succeeded -isnot [bool]){throw 'command queue receipt is invalid'}
     if($dequeued.Succeeded){Invoke-CcodSupervisorCommand $HostState $Adapters $dequeued.Value;return}
     $elapsed=Invoke-CcodSupervisorAdapter $Adapters.GetElapsedMilliseconds @($HostState.Clock) 1
@@ -551,11 +553,13 @@ function Invoke-CcodSupervisorHost {
             $hostState=New-CcodSupervisorHostState -Identity $identity -Layout $layout -Clock $clock -ShutdownEvent $shutdownEvent -CommandQueue $commandQueue -EventQueue $eventQueue -State $state -Journal $journal
             $hostStateRef=$hostState;$adapterRef=$adapter
             $onTick={Invoke-CcodSupervisorTick $hostStateRef $adapterRef}.GetNewClosure()
-            $tray=Invoke-CcodSupervisorAdapter $adapter.NewTray @($commandQueue,$onTick) 1
+            $trayArguments=[object[]]::new(2);$trayArguments[0]=$commandQueue;$trayArguments[1]=$onTick
+            $tray=Invoke-CcodSupervisorAdapter $adapter.NewTray $trayArguments 1
             if($null -eq $tray){throw 'tray contract is invalid'}
             $hostState.Tray=$tray
             $onFull={}.GetNewClosure()
-            $watcher=Invoke-CcodSupervisorAdapter $adapter.NewWatcher @($eventQueue,$onFull) 1
+            $watcherArguments=[object[]]::new(2);$watcherArguments[0]=$eventQueue;$watcherArguments[1]=$onFull
+            $watcher=Invoke-CcodSupervisorAdapter $adapter.NewWatcher $watcherArguments 1
             if($null -eq $watcher){throw 'watcher contract is invalid'}
             $shutdown=Invoke-CcodSupervisorAdapter $adapter.IsEventSignaled @($shutdownEvent) 1
             if($shutdown -isnot [bool]){throw 'Shutdown state is invalid'}

@@ -40,6 +40,7 @@ function New-CcodSupervisorFake {
         FirstLeaseOutcome=$FirstLeaseOutcome;SecondLeaseOutcome=$SecondLeaseOutcome;AccountAbandoned=$AccountAbandoned;LocalAbandoned=$LocalAbandoned
         Elapsed=[Collections.Generic.Queue[long]]::new();ReadySignals=0;StateReads=0;JournalReads=0
         CommandQueue=[Collections.Generic.Queue[object]]::new();EventQueue=[Collections.Generic.Queue[object]]::new();OnTick=$null
+        TryDequeueSawRealQueue=$false;NewTraySawRealQueue=$false;NewWatcherSawRealQueue=$false
         ActiveJournal=$null;Decision=[pscustomobject][ordered]@{Action='KeepOrdinary';Reason='Idle';Target=$null;AttemptKey=$null;SuppressionKey=$null;EffectiveClassification=$null;RequiresController=$false}
         ProcessIds=@();Snapshots=@{};Poll=[pscustomobject][ordered]@{Completed=$false;ExitCode=$null;StdoutText='';StdoutByteCount=0;StdoutOverflow=$false;StderrByteCount=0;StderrOverflow=$false}
         WorkerResult=$null;TickCount=0
@@ -93,13 +94,13 @@ function New-CcodSupervisorFake {
     $adapters.GetTrayPresentation={param($Arguments)[pscustomobject][ordered]@{Color='Gray';Tooltip='Idle';StatusText='Idle';ApplyNowEnabled=$true;ManualRetryEnabled=$false;AutomationToggleEnabled=$true;AutomationChecked=$true;CandidateOptInToggleEnabled=$true;CandidateOptInChecked=$false;OpenLogsEnabled=$true;UninstallEnabled=$false;Busy=$false}}.GetNewClosure()
     $adapters.NewQueue={param($Kind)$world.Calls.Add("Queue:$Kind");if($Kind -ceq 'Command'){Write-Output -NoEnumerate $world.CommandQueue}else{Write-Output -NoEnumerate $world.EventQueue}}.GetNewClosure()
     $adapters.GetQueueCount={param($Queue)[int]$Queue.Count}.GetNewClosure()
-    $adapters.TryDequeue={param($Queue)if($Queue.Count){[pscustomobject][ordered]@{Succeeded=$true;Value=$Queue.Dequeue()}}else{[pscustomobject][ordered]@{Succeeded=$false;Value=$null}}}.GetNewClosure()
-    $adapters.NewTray={param($Queue,$OnTick)$world.Calls.Add('New:Tray');if($world.FailAt -ceq 'NewTray'){throw 'PRIVATE_TRAY_SECRET'};$world.OnTick=$OnTick;[pscustomobject]@{Kind='Tray';Timer=[pscustomobject]@{Kind='Timer'};ApplicationContext=[pscustomobject]@{Kind='App'}}}.GetNewClosure()
+    $adapters.TryDequeue={param($Queue)$world.TryDequeueSawRealQueue=[object]::ReferenceEquals($Queue,$world.CommandQueue);if($Queue.Count){[pscustomobject][ordered]@{Succeeded=$true;Value=$Queue.Dequeue()}}else{[pscustomobject][ordered]@{Succeeded=$false;Value=$null}}}.GetNewClosure()
+    $adapters.NewTray={param($Queue,$OnTick)$world.NewTraySawRealQueue=[object]::ReferenceEquals($Queue,$world.CommandQueue);$world.Calls.Add('New:Tray');if($world.FailAt -ceq 'NewTray'){throw 'PRIVATE_TRAY_SECRET'};$world.OnTick=$OnTick;[pscustomobject]@{Kind='Tray';Timer=[pscustomobject]@{Kind='Timer'};ApplicationContext=[pscustomobject]@{Kind='App'}}}.GetNewClosure()
     $adapters.SetTrayPresentation={param($Tray,$Presentation,$PackageText,$RuntimeText)$world.Calls.Add('Set:Presentation')}.GetNewClosure()
     $adapters.StopTrayTimer={param($Tray)$world.Calls.Add('Stop:Timer');if($world.FailAt -ceq 'StopTimer'){throw 'PRIVATE_TIMER_SECRET'}}.GetNewClosure()
     $adapters.RequestUiExit={param($Tray)$world.Calls.Add('Exit:UI')}.GetNewClosure()
     $adapters.CloseTray={param($Tray)$world.Calls.Add('Close:Tray');if($world.FailAt -ceq 'CloseTray'){throw 'PRIVATE_TRAY_CLOSE_SECRET'};[pscustomobject][ordered]@{SchemaVersion=1;Closed=$true;CleanupCodes=@()}}.GetNewClosure()
-    $adapters.NewWatcher={param($Queue,$OnFull)$world.Calls.Add('New:Watcher');if($world.FailAt -ceq 'NewWatcher'){throw 'PRIVATE_WATCHER_SECRET'};[pscustomobject]@{Kind='Watcher';Mode='ReconciliationOnly'}}.GetNewClosure()
+    $adapters.NewWatcher={param($Queue,$OnFull)$world.NewWatcherSawRealQueue=[object]::ReferenceEquals($Queue,$world.EventQueue);$world.Calls.Add('New:Watcher');if($world.FailAt -ceq 'NewWatcher'){throw 'PRIVATE_WATCHER_SECRET'};[pscustomobject]@{Kind='Watcher';Mode='ReconciliationOnly'}}.GetNewClosure()
     $adapters.StopWatcher={param($Watcher)$world.Calls.Add('Stop:Watcher');if($world.FailAt -ceq 'StopWatcher'){throw 'PRIVATE_WATCHER_STOP_SECRET'};[pscustomobject][ordered]@{SchemaVersion=1;Stopped=$true;CleanupCodes=@()}}.GetNewClosure()
     $adapters.GetWorkerLeafState={param($Path)$world.Calls.Add("Leaf:$([IO.Path]::GetFileName($Path))");[pscustomobject][ordered]@{Exists=$false;IsReparse=$false}}.GetNewClosure()
     $adapters.WriteWorkerRequest={param($Path,$Request)$world.Calls.Add("Write:$($Request.action)")}.GetNewClosure()
@@ -158,6 +159,8 @@ Invoke-CcodTest 'acquires both lifetime leases and signals Ready only after all 
     $receipt=Invoke-CcodSupervisorHost -ReadyToken $readyToken -Adapters $fake.Adapters
     Assert-CcodReceipt $receipt 'Stopped' 0
     Assert-CcodEqual 1 $fake.World.ReadySignals 'Ready signals once'
+    Assert-CcodTrue $fake.World.NewTraySawRealQueue 'tray receives the command queue itself'
+    Assert-CcodTrue $fake.World.NewWatcherSawRealQueue 'watcher receives the event queue itself'
     $calls=@($fake.World.Calls)
     foreach($before in @('Enter:AccountSupervisor:5000','Enter:Supervisor:5000','Open:Ready','Open:Shutdown','Read:State','Read:Journal','Queue:Command','Queue:Event','New:Tray','New:Watcher')){
         Assert-CcodTrue ([Array]::IndexOf($calls,$before) -ge 0) "$before occurs"
@@ -293,8 +296,28 @@ Invoke-CcodTest 'processes at most one command before reducer decisions' {
     foreach($kind in @('OpenLogs','ApplyNow')){$world.CommandQueue.Enqueue([pscustomobject][ordered]@{Kind=$kind;Value=$null;EnqueuedAtUtc='2030-02-03T03:04:05.0000000Z'})}
     Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
     Assert-CcodTrue ($world.Calls.Contains('Open:Logs')) 'first command executes'
+    Assert-CcodTrue $world.TryDequeueSawRealQueue 'command dequeue receives the queue object itself'
     Assert-CcodEqual 1 $world.CommandQueue.Count 'only one command is consumed'
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'decision does not run in command tick'
+}
+
+Invoke-CcodTest 'passes queue objects themselves during host creation with non-empty queues' {
+    $fake=New-CcodSupervisorFake
+    $fake.World.CommandQueue.Enqueue([pscustomobject][ordered]@{Kind='OpenLogs';Value=$null;EnqueuedAtUtc='2030-02-03T03:04:05.0000000Z'})
+    $fake.World.EventQueue.Enqueue([pscustomobject][ordered]@{ProcessId=71;EventKind='Started';ObservedAtUtc='2030-02-03T03:04:05.0000000Z'})
+    $receipt=Invoke-CcodSupervisorHost -ReadyToken $readyToken -Adapters $fake.Adapters
+    Assert-CcodReceipt $receipt 'Stopped' 0
+    Assert-CcodTrue $fake.World.NewTraySawRealQueue 'non-empty command queue is not enumerated into tray arguments'
+    Assert-CcodTrue $fake.World.NewWatcherSawRealQueue 'non-empty event queue is not enumerated into watcher arguments'
+    Assert-CcodTrue ($null -ne $fake.World.OnTick) 'tray callback is the second argument'
+}
+
+Invoke-CcodTest 'drains the command queue through the real queue object' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World
+    foreach($kind in @('OpenLogs','ApplyNow')){$world.CommandQueue.Enqueue([pscustomobject][ordered]@{Kind=$kind;Value=$null;EnqueuedAtUtc='2030-02-03T03:04:05.0000000Z'})}
+    Invoke-CcodSupervisorDrainQueue $world.CommandQueue $fixture.Fake.Adapters
+    Assert-CcodEqual 0 $world.CommandQueue.Count 'drain consumes every queued command'
+    Assert-CcodTrue $world.TryDequeueSawRealQueue 'drain dequeue receives the queue object itself'
 }
 
 Invoke-CcodTest 'routes Repair StaticProbe and Apply through the one worker slot' {
