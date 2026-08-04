@@ -1,41 +1,23 @@
 # Codex Control other devices for Windows
 
-English | [简体中文](README.md)
+[English](README.en.md) | [Simplified Chinese](README.md)
 
-Enable the UI already shipped in Codex Desktop for Windows but blocked by a
-runtime defect:
+Enable the UI already shipped in Codex Desktop for Windows but blocked by a runtime defect:
 
 **Settings → Connections → Control other devices**
 
 This project does not modify `ChatGPT.exe`, `app.asar`, or anything under
-`C:\Program Files\WindowsApps`. The fix exists only in the Codex process started
-by this project. Launch Codex normally to disable it.
+`C:\Program Files\WindowsApps`. The persistent installation is managed by a
+current-user tray supervisor; manual mode remains a conservative fallback.
 
 > [!IMPORTANT]
 > Complete the MFA, SSO, or passkey checks required by the account or workspace.
 > The account used for this test required MFA to be enabled before enrollment.
 
 > [!WARNING]
-> This is an unofficial, version-sensitive runtime compatibility project. It
-> enables Chromium debugging on a random `127.0.0.1` port. Run it only on a
-> trusted Windows machine and repeat the compatibility check after every Codex
-> update.
-
-## Verified environment
-
-| Item | Result |
-|---|---|
-| Windows | Windows 11, passed |
-| Codex Desktop | `26.721.4979.0`, end-to-end verified |
-| Node.js | `22.23.1`, passed |
-| Flow | Tab, controller authorization, device list, and remote project verified |
-| Installed package changes | None |
-
-The original hunterbeach research reported success on `26.715.7063.0`. This
-implementation does not rely only on a version number. It scans the installed
-`app.asar` for four text sentinels associated with the tested code family and
-checks whether the native module exists. This is a heuristic compatibility
-check, not proof that a future build has the same control flow.
+> This is an unofficial, version-sensitive runtime compatibility project. It enables
+> Chromium debugging on a random `127.0.0.1` port. Run it only on a trusted Windows
+> machine and repeat the compatibility check after every Codex update.
 
 ## Root cause
 
@@ -57,173 +39,142 @@ describes the normal pairing, account/workspace, required authentication, and ho
 This project fills only the affected local Windows runtime gap. It does not
 bypass account authorization, MFA/SSO/passkeys, workspace policy, or server permissions.
 
-## What is different in this implementation
+## Persistent tray supervisor (recommended)
 
-- No installed application files are copied, patched, or re-signed.
-- A dependency-free streaming preflight scans the real package for four text
-  sentinels and checks whether OpenAI now ships the native Windows module.
-- Overrides are scoped to one Statsig gate, one native module request, and a
-  best-effort platform check based on the `getAddon` stack name.
-- P-256 private keys are encrypted with Windows DPAPI `CurrentUser` scope before
-  being stored.
-- The legacy key-store layout from the hunterbeach runtime experiment remains
-  readable.
-- Random loopback ports reduce collisions and predictable exposure.
-- A successful launch requires the Electron main-process Inspector to close and
-  verifies that its endpoint is no longer reachable.
-- Any failed probe stops the special process and restores a normal Codex launch.
-- Resetting preserves keys by default; optional cleanup creates a recoverable
-  timestamped backup instead of deleting the file.
+Installation registers a current-user logon task, **Codex Control Other Devices
+Supervisor**, which starts a persistent tray supervisor. It watches ordinary Codex
+launches and, only when the package is eligible, performs and verifies the
+compatibility takeover. Manual mode remains a conservative fallback.
 
-## Requirements
+### Install
 
-- Windows 10 or Windows 11.
-- The Microsoft Store/MSIX `OpenAI.Codex` package.
-- Node.js 22 or later with `node.exe` on `PATH`.
-- Ability to complete the MFA, SSO, or passkey required by the account or
-  workspace; the tested account required MFA.
-- Another online Codex host signed in to the same account and workspace, with
-  Remote Control allowed.
-- A trusted local Windows environment.
+Run this read-only preflight first:
 
-## Quick start
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CodexControlOtherDevices.ps1
+~~~
 
-```powershell
-git clone https://github.com/naipi11/Codex-Control-other-devices-Windows.git
-cd Codex-Control-other-devices-Windows
+Continue only when the check reports `Ready: True`, Node.js 22 or later, and
+`Heuristic match: True`. Install the supervisor and explicitly opt in to
+candidate-compatible update trials:
 
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\Test-CodexControlOtherDevices.ps1
-```
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -EnableCandidateCompatibleUpdates
+~~~
 
-Continue only when the check reports `Ready: True` and `Heuristic match: True`.
-Save current work because the launcher closes and reopens Codex Desktop:
+The install root is `%LOCALAPPDATA%\CodexControlOtherDevices`. A compatible
+first-seen package gets one controlled trial. Unknown, incompatible, and
+native-module-present builds stay ordinary; the supervisor never takes them over.
+Save unfinished work before a trial: a normal Codex launch may close and reopen
+once. Simulated restart/update fixtures are not proof of an actual Windows logon
+or Microsoft Store update; those cycles require real observation.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\Start-CodexControlOtherDevices.ps1
-```
+### Repair state
 
-Then open **Settings → Connections → Control other devices**, select **Add** or
-**Set up**, and complete the authentication required for that account.
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -RepairState
+~~~
 
-The workaround is session-only. Run the launcher again after Codex exits. A
-normal Start menu or taskbar launch disables the workaround.
+Repair recreates schema-1 state with `automationEnabled=false` and
+`candidateCompatibleOptIn=false`. Re-enable automation and the
+candidate-compatible option, if desired, from the tray.
 
-## How it works
+### Uninstall
 
-1. The PowerShell preflight locates the installed Store package and Node.js.
-2. A streaming scanner checks for text sentinels associated with the inverted
-   gate, Windows UI, macOS-only guard, native-module reference, and missing
-   Windows native binary.
-3. Codex restarts with random renderer and main-process debugging ports bound to
-   `127.0.0.1`.
-4. The renderer bridge forces only gate `782640499` to `false` and verifies the
-   result through a probe.
-5. The main bridge uses a best-effort `getAddon` stack-name match for the scoped
-   platform override and intercepts only `remote-control-device-key.node`.
-6. The replacement creates P-256 keys, protects private material with DPAPI, and
-   implements the expected public-key and signing contract.
-7. The launcher verifies that the main Inspector closes; otherwise it rolls back
-   to a normal launch. The renderer debugging endpoint remains until Codex exits.
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-CodexControlOtherDevices.ps1
+~~~
 
-See [docs/TECHNICAL.md](docs/TECHNICAL.md) for the detailed design and
-[docs/CLEANROOM.md](docs/CLEANROOM.md) for the isolated implementation record.
+By default, uninstall normalizes a special session to ordinary, then removes the
+task, tray supervisor, runtime, state, and logs while preserving the DPAPI
+device-key store. `-KeepCurrentSpecialSession` keeps the special session, with
+the warning that renderer CDP remains open without tray monitoring.
+`-BackupDeviceKeyStore` and `-RemoveDeviceKeyStore` are mutually exclusive.
+Moving or deleting the local key does not revoke server authorization; revoke
+the device in Codex first.
+
+### Supervisor behavior
+
+The **Codex Control Other Devices Supervisor** task is limited to the current
+user and uses `InteractiveToken`, `IgnoreNew`, three one-minute retries, `PT0S`
+execution time, and no battery-start or battery-stop restrictions.
+
+The tray icon reports these states:
+
+- Gray: waiting for Codex or paused.
+- Green: special session verified.
+- Yellow: incompatible, native-module-present, or suppressed.
+- Red: takeover failed and an ordinary session was restored.
+
+Use the tray menu to pause, resume, or retry. The supervisor reconciles every
+three seconds and uses a WMI capability fallback when an optional capability is
+unavailable. Project upgrades and Codex restarts do not require rerunning the
+project; the installed supervisor continues to manage the current runtime.
+
+## Manual mode
+
+Manual mode is a per-session, conservative fallback:
+
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-CodexControlOtherDevices.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Reset-CodexControlOtherDevices.ps1
+~~~
 
 ## Security notes
 
-The renderer debugging endpoint can execute code inside the Codex renderer. The
-main-process Inspector can execute main-process Node code during its shorter
-startup window. Both are loopback-only, but an untrusted process running as the
-same Windows user is inside this project's threat boundary. Do not use the
-workaround on a shared or untrusted machine.
+Renderer CDP for a special session remains on `127.0.0.1`. It can execute code
+inside the Codex renderer, so untrusted processes running as the same Windows
+user are inside this project's threat boundary. The task and supervisor are
+unelevated; their current-user files are part of the trust root. Manifest hashes
+detect corruption, not the identity of the user who controls those files. Damaged
+state disables automation rather than guessing how to recover. Default uninstall
+normalizes the special session before removing the tray.
 
-Encrypted device keys are stored at:
-
-```text
-%CODEX_HOME%\remote-control-device-keys.windows.json
-```
-
-When `CODEX_HOME` is unset, the default is
-`%USERPROFILE%\.codex\remote-control-device-keys.windows.json`.
-
+Encrypted device keys are stored at
+`%CODEX_HOME%\remote-control-device-keys.windows.json`. When `CODEX_HOME` is
+unset, the default is `%USERPROFILE%\.codex\remote-control-device-keys.windows.json`.
 The bridge uses the compatibility label `os_protected_nonextractable`, but this
 JavaScript fallback is a DPAPI-protected software key, not a TPM-backed
 non-exportable key. Read [SECURITY.md](SECURITY.md) before use.
 
-## Disable and roll back
-
-The simplest rollback is to exit Codex and launch it normally.
-
-To stop the special instance and restart normally while keeping device keys:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\Reset-CodexControlOtherDevices.ps1
-```
-
-After revoking the controller in Codex, move the encrypted key store to a
-recoverable backup:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\Reset-CodexControlOtherDevices.ps1 `
-  -BackupDeviceKeyStore
-```
-
-Moving the local key does not revoke server-side authorization. Revoke first.
-
 ## Diagnostics
 
-```text
-%TEMP%\CodexControlOtherDevices\runtime-YYYYMMDD-HHMMSS.log
-%TEMP%\CodexControlOtherDevices\last-session.json
-```
-
+Persistent logs are stored in `%LOCALAPPDATA%\CodexControlOtherDevices\logs\`.
+The primary files are `install.log`, `supervisor.log`, and `bootstrap.log`.
 Logs should not contain credentials or private keys, but review local paths and
 environment information before sharing them publicly.
 
-## Troubleshooting
+## Project structure
 
-### The tab is still missing
-
-- Confirm Codex was opened by `Start-CodexControlOtherDevices.ps1`.
-- Repeat the preflight and require `Ready: True`.
-- Inspect the latest runtime log.
-- Check whether endpoint security blocked `node.exe` from loopback access.
-- Exit every Codex process and retry.
-
-### Preflight fails after a Codex update
-
-This is intentional. OpenAI may have fixed the problem or changed an internal
-contract. The sentinel check also cannot prove future compatibility. Do not
-remove it. Open an issue with the Codex package version, boolean sentinel
-results, and a redacted error. Do not upload `app.asar`, tokens, or device keys.
-
-### Authorization fails
-
-- Complete the MFA, SSO, or passkey requested by the account/workspace. If the
-  flow requires MFA to be enabled first, do so before restarting enrollment.
-- Use the same ChatGPT account and workspace in Codex and the browser.
-- Ask the workspace administrator to allow Remote Control where applicable.
-
-### No hosts appear
-
-- Keep the target host online and awake.
-- Use the same account and workspace.
-- Enable **Allow other devices to connect** on the target host.
-- Signing out disables Remote Control; turn it on after signing back in.
+~~~text
+.
++-- Install-CodexControlOtherDevices.ps1
++-- Uninstall-CodexControlOtherDevices.ps1
++-- src/persistence/bootstrap.ps1
++-- src/persistence/Supervisor.ps1
++-- src/persistence/SessionController.ps1
++-- src/persistence/StaticProbeWorker.ps1
++-- src/persistence/modules/
+|   +-- InstallLifecycle.psm1
+|   +-- ScheduledTask.psm1
++-- tests/persistence/
++-- docs/
+|   +-- TECHNICAL.md
+|   +-- CLEANROOM.md
++-- SECURITY.md
++-- NOTICE.md
+~~~
 
 ## Validation
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\tests\Validate.ps1
-```
+~~~powershell
+npm test
+~~~
 
-This validates PowerShell parsing, Node.js syntax, a temporary-directory
-DPAPI/key lifecycle and compatibility suite, renderer/Inspector behavior,
-required repository files, and the installed Codex package sentinels.
+Repository validation covers PowerShell and Node.js syntax checks, clean-room and
+persistence suites, required files, and (unless explicitly skipped) read-only
+installed-package preflight. It does not simulate proof of a real Windows logon
+or Microsoft Store update cycle.
 
 ## Original contributions and provenance
 
@@ -260,3 +211,4 @@ unofficial and is not affiliated with OpenAI.
 [MIT](LICENSE) © 2026 naipi11. The MIT license covers this repository's original
 code and documentation; referenced upstream works remain subject to their own
 rights and license terms. See [NOTICE.md](NOTICE.md).
+

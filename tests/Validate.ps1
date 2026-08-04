@@ -23,6 +23,19 @@ foreach ($script in Get-ChildItem -Recurse -File -LiteralPath $projectRoot -Filt
     }
 }
 
+foreach ($module in Get-ChildItem -Recurse -File -LiteralPath $projectRoot -Filter '*.psm1') {
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        $module.FullName,
+        [ref]$tokens,
+        [ref]$parseErrors
+    ) | Out-Null
+    foreach ($parseError in $parseErrors) {
+        $failures.Add("PowerShell module parse error in $($module.FullName): $($parseError.Message)")
+    }
+}
+
 $node = Get-Command node.exe -ErrorAction SilentlyContinue
 if (-not $node) {
     $failures.Add('node.exe is required for JavaScript syntax checks.')
@@ -61,7 +74,25 @@ if ($failures.Count -eq 0) {
     }
 }
 
-foreach ($required in @('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'SECURITY.md', 'package.json', 'docs\CLEANROOM.md')) {
+foreach ($required in @(
+    'README.md',
+    'README.en.md',
+    'LICENSE',
+    'NOTICE.md',
+    'SECURITY.md',
+    'package.json',
+    'docs\CLEANROOM.md',
+    'docs\TECHNICAL.md',
+    'Install-CodexControlOtherDevices.ps1',
+    'Uninstall-CodexControlOtherDevices.ps1',
+    'src\persistence\bootstrap.ps1',
+    'src\persistence\modules\InstallLifecycle.psm1',
+    'src\persistence\modules\ScheduledTask.psm1',
+    'tests\PersistenceSelfTest.ps1',
+    'tests\persistence\Bootstrap.SelfTest.ps1',
+    'tests\persistence\ScheduledTask.SelfTest.ps1',
+    'tests\persistence\InstallLifecycle.SelfTest.ps1'
+)) {
     if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $required) -PathType Leaf)) {
         $failures.Add("Required repository file is missing: $required")
     }

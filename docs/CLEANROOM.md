@@ -29,3 +29,26 @@ node .\tests\CleanroomSelfTest.js
 ```
 
 The self-test uses a newly created temporary directory and never resolves the real Codex key-store path. It checks every JavaScript file with `node --check`, exact-URL renderer selection when a title-`Codex` avatar overlay is ordered first, rejection when that query-bearing overlay is the only target, the exact filename/algorithm/record fields, absolute SystemRoot/WINDIR PowerShell resolution, protection-mode rejection, DPAPI-backed create/sign/verify/delete for raw Buffer and Uint8Array-view bytes, byte-for-byte preservation of a malformed store, strict legacy PEM loading (including key-ID mismatch and unknown-field rejection) and migration through `encryptedPrivateKeyBase64`, synchronous and Promise-shaped Statsig results for existing and delayed clients, and independent Inspector closure confirmation via `ECONNREFUSED`.
+
+## Persistence and supervisor layer
+
+The persistence layer (`src/persistence/*`, the scheduled task, and the
+install/uninstall lifecycle) is original engineering from this repository's
+own design spec. It was written without consulting the hunterbeach Gist, the
+derived prototype, or any other online workaround source, and it does not
+reuse upstream runtime text. The runtime bridge remains the isolated
+clean-room implementation described above; the supervisor and controller
+invoke it through stable JSON contracts and the documented CLI.
+
+The installed runtime is assembled only from the source checkout allowlist,
+hashed file-by-file against the source, and validated through
+`manifest.json` before it can become active. `active.json` switches are
+atomic, the bootstrap keeps one verified previous runtime for rollback, and
+state files are schema-1 with strict readers that quarantine damaged
+evidence instead of normalizing it.
+
+Automated tests are hermetic: they never install a real scheduled task, never
+start or stop the real Codex application, never write the real device-key
+store, and never resolve the real `CODEX_HOME`. Real-machine acceptance
+(logon observation, Store update observation, and live takeover) is a separate
+explicit gate and is not claimed by the self-tests.

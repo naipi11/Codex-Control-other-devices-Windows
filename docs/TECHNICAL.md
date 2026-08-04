@@ -132,6 +132,167 @@ The protocol compatibility label `os_protected_nonextractable` does not turn a
 DPAPI-protected software key into a hardware-backed non-exportable key. This
 limitation is documented explicitly in `SECURITY.md`.
 
+## Persistent supervisor
+
+The repository now ships a persistent current-user supervisor in addition to
+the manual launcher. The supervisor owns a tray icon, watches the same-Windows-
+session Codex package lifecycle, and reapplies the bridge automatically after
+normal launches, crashes, and compatible updates.
+
+### Source and installed layouts
+
+The source checkout is the only trusted input. The installer copies a fixed
+allowlist into a versioned runtime below `%LOCALAPPDATA%\CodexControlOtherDevices`:
+
+```text
+%LOCALAPPDATA%\CodexControlOtherDevices\
+├── bootstrap.ps1                        # stable self-contained bootstrap
+├── Uninstall-CodexControlOtherDevices.ps1
+├── active.json                          # schema 1 active/previous pointer
+├── runtime\<runtime-id>\                # staged, hashed, immutable runtime
+│   ├── manifest.json                    # schema 1 file records + runtime-id
+│   ├── src\persistence\Supervisor.ps1
+│   ├── src\persistence\SessionController.ps1
+│   ├── src\persistence\StaticProbeWorker.ps1
+│   ├── src\persistence\modules\*.psm1
+│   ├── src\runtime\*                    # clean-room bridge
+│   └── src\check-package.mjs
+├── state\
+│   ├── settings.json                    # schema 1 consent + verified Node paths
+│   ├── status.json                      # schema 1 supervisor/session evidence
+│   ├── verified-packages.json           # schema 1 suppression/verification cache
+│   └── transition.json                  # schema 1 active transaction
+└── logs\                                # 2 MiB rotating, 10 generations
+```
+
+`runtime-id` is derived as `projectVersion-contentHashPrefix` from the sorted
+file records, so identical content has a stable id and tampering changes it.
+The installer never copies `.git`, tests, docs, or the public scripts other
+than the stable bootstrap/uninstaller copies. Every staged file is compared
+against the source SHA-256 before the manifest is trusted.
+
+### Schema versions
+
+- `manifest.json` schema 1: `schemaVersion`, `projectVersion`, `runtimeId`,
+  and a sorted `files` array with `path`, `length`, and lowercase `sha256`;
+  it never lists itself and never accepts absolute, empty, duplicate, or
+  `..`-escaping paths.
+- `active.json` schema 1: `schemaVersion`, `activeRuntime`, nullable
+  `previousRuntime`, and `updatedAtUtc`. The pointer is replaced atomically
+  through a native handle; a failed switch restores the old bytes.
+- `settings.json` schema 1: `automationEnabled` and `candidateCompatibleOptIn`
+  are independent booleans, `nodeCandidates` are absolute installer-verified
+  `node.exe` paths, and `updatedAtUtc` is a canonical UTC string.
+- `status.json` schema 1: nullable `session` with `supervisorPid`,
+  `supervisorCreationTimeUtc`, `sessionId`, `runtimeId`, `sessionState`, and
+  nullable `codex` identity/probe evidence. A non-empty `codex` requires
+  `sessionState=Active` and a matching live probe.
+- `verified-packages.json` schema 1: `packages` keyed by
+  `packageFullName|appAsarSha256|runtimeId` with static classification,
+  dynamic outcome, probe state, and confirmation time.
+- `transition.json` schema 1: `activeTransaction` null or one exact
+  transaction object; damaged or missing transition state disables automation.
+
+### Controller envelope
+
+`SessionController.ps1` is a one-shot JSON CLI. It accepts either a strict
+request file or manual parameters, validates schema 1, acquires the account
+then session transition mutexes, invokes the SessionEngine action, persists
+the result atomically, and writes exactly one compressed JSON line to stdout.
+The envelope always carries `schemaVersion`, `action`, `transactionId`,
+`outcome`, `safeState`, `stage`, `package`, `source`, `special`, `probes`,
+`recovery`, `error`, and `logFile`. Supervisor and worker verify correlation
+by transaction id and exact persisted-vs-stdout equality.
+
+### Journal stages and replay
+
+The transition journal is a crash-consistent state machine. Every mutation is
+atomic, and each durable stage records the source PID/creation time so a
+recovery can verify ownership before acting:
+
+| Stage | Meaning | Replay behavior |
+|---|---|---|
+| `IntentWritten` | manual/apply intent recorded | fresh Recover consumes it |
+| `StopRequested` | verified tree stop commanded | observe ≤5 s; only identical PID |
+| `SpecialLaunchRequested` | special launch commanded | observe ≤5 s; adopt exact package identity |
+| `SpecialStarted` | special PID handed back | adopt or fail closed |
+| `Validated` | probes complete, special proven | adopt, may become `Active` |
+| `Activated` | bridge active and green | mark complete |
+| `RecoveryLaunchRequested` | ordinary restart commanded | adopt new ordinary, never relaunch special |
+| `Recovered` | ordinary proven | complete once, idempotent |
+| `Closed` | close-tree transaction complete | archive once, idempotent |
+
+Completion archives the transaction and clears `activeTransaction`. Each crash
+window replays at most once; deduplication requires the exact rotated-log
+archive record.
+
+### Manifest/active switching and ready fallback
+
+Upgrade stages a new runtime, generates and validates its manifest, moves it
+to `runtime\<id>`, then atomically switches `active.json` so the old runtime
+becomes `previousRuntime`. Only active and previous are retained; older
+contained non-reparse runtime directories are deleted. The installer signals
+the old supervisor through its ACL-protected shutdown event, waits for the
+exact PID/creation time, and only terminates that verified identity on
+timeout. Bootstrap then launches the new supervisor.
+
+Bootstrap is self-contained: it reads the active/previous pointer, validates
+every manifest hash, creates a one-time ready event named
+`Local\CodexControlOtherDevices.Ready.<SID>.<SessionId>.<64-hex>`, and waits up
+to 15 seconds. If the active runtime exits early or times out, bootstrap stops
+that exact child, validates the previous runtime, launches it, and atomically
+switches the pointer on success. If neither runtime signals ready, bootstrap
+fails closed and logs the reason.
+
+### Scheduled task
+
+The fixed task `Codex Control Other Devices Supervisor` is registered for the
+current user only:
+
+- `LogonType=Interactive`, `RunLevel=Limited`, `MultipleInstances=IgnoreNew`;
+- restart on failure: 3 attempts, 1 minute apart;
+- `ExecutionTimeLimit=PT0S`, `DisallowStartIfOnBatteries=false`,
+  `StopIfGoingOnBatteries=false`;
+- action: `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe
+  -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File
+  <bootstrap>`;
+- working directory: the install root.
+
+The supervisor is unelevated and never creates services, firewall rules,
+IFEO, or permanent WMI consumers.
+
+### WMI capability chain and reconciliation authority
+
+The supervisor tries `Win32_ProcessStartTrace` first for low-latency process
+start hints. Access denial falls back to a temporary
+`__InstanceCreationEvent WITHIN 1` subscription; if neither is available it
+records the capability and relies on reconciliation only. It never elevates
+or rewrites WMI ACLs. Reconciliation runs every 3 seconds and is the
+authoritative source for adoption, stop, recovery, and suppression decisions;
+event hints only reduce latency.
+
+### Exact probes
+
+- Renderer target must be exactly `app://-/index.html`; title matches,
+  query-bearing overlays, and arbitrary pages are never accepted.
+- Bridge installation covers the current document and new documents.
+- Gate `782640499` must return `false` with a non-empty Statsig proof.
+- Main Inspector must reach explicit TCP `ECONNREFUSED` after close; an open
+  endpoint or timeout is a failure that restores an ordinary session.
+- Special-process identity requires matching PID, creation time, package
+  family, executable path, session, user, and debug-token tuple; PID reuse is
+  rejected.
+
+### Device-key bridge boundary
+
+The device-key bridge is unchanged by the persistence layer. Keys remain
+P-256 + DPAPI `CurrentUser` at the resolved
+`%CODEX_HOME%\remote-control-device-keys.windows.json` (or `~/.codex`), the
+legacy flat store remains readable and migrates on write, and the supervisor
+never logs key material. Uninstall preserves the store by default; explicit
+backup moves it to a timestamped sibling, and explicit removal deletes it,
+neither of which revokes server-side authorization.
+
 ## Failure and update behavior
 
 Within the tested code family, the project intentionally stops on detected
@@ -146,6 +307,23 @@ mismatches and operational failures:
 - renderer probe failure: restart Codex normally;
 - future build missing any current sentinel: stop pending review.
 
+The persistent supervisor adds these rules:
+
+- a first-seen `CandidateCompatible` package is tried at most once, and only
+  when `automationEnabled` and `candidateCompatibleOptIn` are both true;
+- `UnknownOrIncompatible` and `NativeModulePresent` builds stay ordinary and
+  are never stopped or reopened;
+- a failed dynamic probe records a suppression key for
+  `packageFullName|appAsarSha256|runtimeId`; only manual retry or a new
+  runtime id clears it;
+- damaged or missing state quarantines the evidence and disables automation
+  until explicit `-RepairState`, which resets both consent switches to false;
+- a validated special session survives an upgrade: the new supervisor
+  reconciles and adopts it instead of restarting Codex;
+- default uninstall normalizes a validated special session back to ordinary,
+  verifies both debugger ports closed, and only then removes the task and
+  runtime.
+
 This is safer than relying only on a static version list, but it is not a
 structured control-flow or binary-integrity check. A future build that retains
 all strings while changing behavior could pass the heuristic and still be
@@ -158,6 +336,13 @@ incompatible.
   reaching the renderer CDP endpoint.
 - DPAPI binds ciphertext to the current Windows user profile, not to this one
   Codex process.
+- The scheduled task and tray supervisor run unelevated as the current user;
+  everything they write under the install root is part of the same trust root.
+- Manifest and state hashes detect corruption and tampering, but they do not
+  authenticate the author of a checkout; source trust comes from user review
+  of the repository.
+- Renderer CDP stays available to same-user processes for the whole special
+  session; the main Inspector is limited to the startup window and must close.
 - ChatGPT account authorization, required MFA/SSO/passkey checks, workspace
   policy, and server-side device revocation remain authoritative.
 - Remote hosts retain their own filesystem, credentials, approvals, plugins,
