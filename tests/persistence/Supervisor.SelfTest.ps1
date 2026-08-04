@@ -346,4 +346,22 @@ Invoke-CcodTest 'keeps production defaults lazy and source free of forbidden dir
     Assert-CcodEqual 0 $loadedSystemTypes.Count 'fake tests do not load WinForms'
 }
 
+
+Invoke-CcodTest 'default adapters keep imported modules visible for lease acquisition' {
+    $defaults = Get-CcodSupervisorDefaultAdapters
+    Assert-CcodTrue ($defaults.ContainsKey('EnterLease')) 'default EnterLease exists'
+    $identity = & $defaults.GetIdentity
+    Assert-CcodTrue ($identity.UserSid -is [string] -and $identity.UserSid.Length -gt 0) 'default identity returns current SID'
+    $lease = $null
+    try {
+        $lease = & $defaults.EnterLease 'AccountSupervisor' $identity.UserSid $null 1000
+        Assert-CcodEqual 'AccountSupervisor' $lease.Kind 'default EnterLease returns AccountSupervisor lease'
+        Assert-CcodTrue (@('Acquired','TimedOut') -ccontains $lease.Outcome) 'default EnterLease returns a valid outcome'
+    } finally {
+        if ($null -ne $lease -and $lease.Outcome -ceq 'Acquired') {
+            $released = & $defaults.ExitLease $lease
+            Assert-CcodEqual $true $released 'default ExitLease releases the lease'
+        }
+    }
+}
 Write-Output "Supervisor self-tests passed: $($results.Count)"
