@@ -387,8 +387,8 @@ function Get-CcodLifecycleAdapters {
             $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $validate + '" -SkipInstalledPackageCheck'
             $process = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
             try { return $process.ExitCode -eq 0 } finally { $process.Dispose() }
-        }.GetNewClosure()
-        GetProjectVersion = { param($SourceRoot) Get-CcodLifecycleProjectVersion -SourceRoot $SourceRoot }.GetNewClosure()
+        }
+        GetProjectVersion = { param($SourceRoot) Get-CcodLifecycleProjectVersion -SourceRoot $SourceRoot }
         DiscoverNodeCandidates = {
             $candidates = [System.Collections.Generic.List[string]]::new()
             $node = Get-Command node.exe -ErrorAction SilentlyContinue
@@ -396,14 +396,14 @@ function Get-CcodLifecycleAdapters {
                 $candidates.Add([IO.Path]::GetFullPath($node.Source))
             }
             @($candidates)
-        }.GetNewClosure()
+        }
         ValidateNodeCandidate = {
             param($Path)
             try {
                 $candidate = Resolve-CcodNodeCandidate -NodeCandidates @([string]$Path)
                 return $null -ne $candidate -and $candidate.Found -eq $true
             } catch { return $false }
-        }.GetNewClosure()
+        }
         GetCurrentIdentity = {
             $windowsIdentity = $null
             $process = $null
@@ -420,20 +420,20 @@ function Get-CcodLifecycleAdapters {
                 if ($null -ne $process) { $process.Dispose() }
                 if ($null -ne $windowsIdentity) { $windowsIdentity.Dispose() }
             }
-        }.GetNewClosure()
-        UtcNow = { [DateTime]::UtcNow }.GetNewClosure()
+        }
+        UtcNow = { [DateTime]::UtcNow }
         InstallSupervisorTask = {
             param($InstallRoot, $UserSid)
             $spec = Get-CcodSupervisorTaskSpec -InstallRoot $InstallRoot -UserSid $UserSid
             $definition = New-CcodSupervisorTaskDefinition -Spec $spec
             Install-CcodSupervisorTask -Definition $definition -TaskName $spec.TaskName
-        }.GetNewClosure()
+        }
         RemoveSupervisorTask = {
             Remove-CcodSupervisorTask -TaskName $script:CcodLifecycleTaskName
-        }.GetNewClosure()
+        }
         StartSupervisorTask = {
             Start-ScheduledTask -TaskName $script:CcodLifecycleTaskName -ErrorAction Stop | Out-Null
-        }.GetNewClosure()
+        }
         SignalSupervisorShutdown = {
             param($UserSid, $SessionId)
             try {
@@ -442,7 +442,7 @@ function Get-CcodLifecycleAdapters {
                 return
             }
             try { [void]$event.Handle.Set() } finally { $event.Handle.Dispose() }
-        }.GetNewClosure()
+        }
         WaitSupervisorExit = {
             param($SupervisorIdentity, $TimeoutMilliseconds)
             $stopwatch = [Diagnostics.Stopwatch]::StartNew()
@@ -455,51 +455,51 @@ function Get-CcodLifecycleAdapters {
                 Start-Sleep -Milliseconds 250
             }
             return $false
-        }.GetNewClosure()
+        }
         TerminateSupervisor = {
             param($SupervisorIdentity)
             try { Stop-Process -Id $SupervisorIdentity.Pid -Force -ErrorAction Stop; return $true } catch { return $false }
-        }.GetNewClosure()
+        }
         NormalizeSpecialSession = {
             param($InstallRoot, $RuntimeId, $Identity)
             Invoke-CcodLifecycleControllerRecover -InstallRoot $InstallRoot -RuntimeId $RuntimeId -Identity $Identity
-        }.GetNewClosure()
+        }
         SetAutomationEnabled = {
             param($StateRoot, $Enabled)
             Set-CcodAutomationEnabled -StateRoot $StateRoot -Enabled ([bool]$Enabled)
-        }.GetNewClosure()
+        }
         EnterTransitionLease = {
             param($UserSid, $SessionId)
             Enter-CcodMutex -Kind 'Transition' -UserSid $UserSid -SessionId $SessionId -TimeoutMilliseconds 10000
-        }.GetNewClosure()
+        }
         ExitTransitionLease = {
             param($Lease)
             Exit-CcodMutex -Lease $Lease
-        }.GetNewClosure()
+        }
         ResolveDeviceKeyStore = {
             Resolve-CcodDeviceKeyStorePath
-        }.GetNewClosure()
+        }
         BackupDeviceKeyStore = {
             param($Path, $BackupPath)
             [IO.Directory]::CreateDirectory((Split-Path $BackupPath -Parent)) | Out-Null
             [IO.File]::Move($Path, $BackupPath)
             $BackupPath
-        }.GetNewClosure()
+        }
         RemoveDeviceKeyStore = {
             param($Path)
             if ([IO.File]::Exists($Path)) { [IO.File]::Delete($Path) }
-        }.GetNewClosure()
+        }
         CopyFile = {
             param($Source, $Destination)
             [IO.Directory]::CreateDirectory((Split-Path $Destination -Parent)) | Out-Null
             [IO.File]::Copy($Source, $Destination, $true)
-        }.GetNewClosure()
+        }
         WriteLog = {
             param($InstallRoot, $Record)
             $logDirectory = Join-Path $InstallRoot 'logs'
             [IO.Directory]::CreateDirectory($logDirectory) | Out-Null
             Write-CcodRotatingLog -Path (Join-Path $logDirectory 'install.log') -Message ($Record | ConvertTo-Json -Depth 6 -Compress)
-        }.GetNewClosure()
+        }
     }
     if ($null -eq $Adapters) { return $defaults }
     if ($Adapters -isnot [hashtable]) {

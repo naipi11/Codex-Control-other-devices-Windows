@@ -553,4 +553,24 @@ $results += Invoke-CcodTest 'remove path validation refuses out-of-root and repa
     }
 }
 
+
+$results += Invoke-CcodTest 'default adapters keep module session state for private helpers' {
+    $mod = Get-Module InstallLifecycle
+    Assert-CcodTrue ($null -ne $mod) 'InstallLifecycle module is loaded'
+    $adapters = & $mod { Get-CcodLifecycleAdapters }
+    Assert-CcodTrue ($adapters.ContainsKey('GetProjectVersion')) 'GetProjectVersion adapter exists'
+    Assert-CcodTrue ($adapters.ContainsKey('NormalizeSpecialSession')) 'NormalizeSpecialSession adapter exists'
+
+    $source = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source -Version '2.0.0-default-adapters' | Out-Null
+        $version = & $adapters.GetProjectVersion $source
+        Assert-CcodEqual '2.0.0-default-adapters' $version 'default GetProjectVersion resolves package.json through module-private helper'
+    } finally {
+        if (Test-Path -LiteralPath $source) { Remove-Item -LiteralPath $source -Recurse -Force }
+    }
+
+    $commandNames = @($adapters.GetProjectVersion.Ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+    Assert-CcodTrue ($commandNames -contains 'Get-CcodLifecycleProjectVersion') 'default GetProjectVersion still targets the private helper'
+}
 Write-Output "Install lifecycle self-tests passed: $($results.Count)"
