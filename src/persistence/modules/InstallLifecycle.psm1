@@ -1,0 +1,800 @@
+Set-StrictMode -Version Latest
+
+Import-Module (Join-Path $PSScriptRoot 'PersistenceIO.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'RuntimeManifest.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'StateStore.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ScheduledTask.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'KernelObjects.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'CompatibilityProbe.psm1') -Force
+
+$script:CcodLifecycleTaskName = 'Codex Control Other Devices Supervisor'
+$script:CcodLifecycleDefaultInstallRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'CodexControlOtherDevices'
+
+function Throw-CcodLifecycleError {
+    param(
+        [Parameter(Mandatory)][string]$Id,
+        [Parameter(Mandatory)][string]$Message,
+        $Target
+    )
+
+    throw [Management.Automation.ErrorRecord]::new(
+        [InvalidOperationException]::new($Message),
+        $Id,
+        [Management.Automation.ErrorCategory]::InvalidData,
+        $Target
+    )
+}
+
+function Get-CcodLifecycleCanonicalRoot {
+    param([Parameter(Mandatory)][string]$Path, [string]$Kind)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_INPUT_INVALID' "$Kind must be an absolute path" $Path
+    }
+    try { $root = [IO.Path]::GetFullPath($Path) } catch {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_INPUT_INVALID' "$Kind could not be canonicalized" $Path
+    }
+    if ($root.Length -eq 3 -and $root[1] -eq ':') {
+        return $root
+    }
+    return $root.TrimEnd('\')
+}
+
+function Test-CcodLifecycleReparse {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    return (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
+function Test-CcodLifecycleRemovePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $root = Get-CcodLifecycleCanonicalRoot -Path $Root -Kind 'Install root'
+    $candidate = [IO.Path]::GetFullPath($Path)
+    $prefix = $root.TrimEnd('\') + '\'
+    if (-not $candidate.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_PATH_OUTSIDE_ROOT' 'Refusing to remove a path outside the install root' $candidate
+    }
+    if (Test-CcodLifecycleReparse -Path $root) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_REPARSE_PATH' 'Install root is a reparse point' $root
+    }
+    $relative = $candidate.Substring($prefix.Length)
+    $cursor = $root
+    foreach ($segment in ($relative -split '\\' | Where-Object { $_.Length -gt 0 })) {
+        $cursor = Join-Path $cursor $segment
+        if (-not (Test-Path -LiteralPath $cursor)) { break }
+        if (Test-CcodLifecycleReparse -Path $cursor) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_REPARSE_PATH' 'Refusing to remove a path through a reparse point' $cursor
+        }
+    }
+    return $true
+}
+
+function Get-CcodLifecycleSourceFiles {
+    param([Parameter(Mandatory)][string]$SourceRoot)
+
+    $root = Get-CcodLifecycleCanonicalRoot -Path $SourceRoot -Kind 'Source root'
+    if (-not [IO.Directory]::Exists($root)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_MISSING' 'Source checkout does not exist' $root
+    }
+    if (Test-CcodLifecycleReparse -Path $root) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'Source root is a reparse point' $root
+    }
+    $relative = [System.Collections.Generic.List[string]]::new()
+    $required = @(
+        'src\check-package.mjs',
+        'src\persistence\Supervisor.ps1',
+        'src\persistence\SessionController.ps1',
+        'src\persistence\StaticProbeWorker.ps1',
+        'Test-CodexControlOtherDevices.ps1',
+        'Start-CodexControlOtherDevices.ps1',
+        'Reset-CodexControlOtherDevices.ps1'
+    )
+    foreach ($leaf in $required) { $relative.Add($leaf) }
+    $runtimeRoot = Join-Path $root 'src\runtime'
+    foreach ($item in Get-ChildItem -LiteralPath $runtimeRoot -Force -Recurse -ErrorAction Stop) {
+        if (Test-CcodLifecycleReparse -Path $item.FullName) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'Source runtime contains a reparse point' $item.FullName
+        }
+        if (-not $item.PSIsContainer) {
+            $relative.Add('src\runtime\' + $item.FullName.Substring($runtimeRoot.TrimEnd('\').Length + 1))
+        }
+    }
+    foreach ($module in Get-ChildItem -LiteralPath (Join-Path $root 'src\persistence\modules') -Filter '*.psm1' -File -ErrorAction Stop) {
+        if (Test-CcodLifecycleReparse -Path $module.FullName) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'Source module is a reparse point' $module.FullName
+        }
+        $relative.Add('src\persistence\modules\' + $module.Name)
+    }
+    $uninstaller = Join-Path $root 'Uninstall-CodexControlOtherDevices.ps1'
+    if ([IO.File]::Exists($uninstaller) -and -not (Test-CcodLifecycleReparse -Path $uninstaller)) {
+        $relative.Add('Uninstall-CodexControlOtherDevices.ps1')
+    }
+    $unique = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $files = [System.Collections.Generic.List[object]]::new()
+    foreach ($leaf in $relative) {
+        if (-not $unique.Add($leaf)) { continue }
+        $source = [IO.Path]::GetFullPath((Join-Path $root $leaf))
+        $prefix = $root.TrimEnd('\') + '\'
+        if (-not $source.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or -not [IO.File]::Exists($source)) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' "Required source file is missing: $leaf" $source
+        }
+        if (Test-CcodLifecycleReparse -Path $source) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'Source file is a reparse point' $source
+        }
+        $files.Add([pscustomobject][ordered]@{ Relative = $leaf; Source = $source })
+    }
+    return @($files)
+}
+
+function Copy-CcodLifecycleStaging {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][hashtable]$Adapters,
+        [Parameter(Mandatory)][object[]]$Files
+    )
+
+    $stagingRoot = [IO.Path]::GetFullPath((Join-Path $InstallRoot '.staging'))
+    [IO.Directory]::CreateDirectory($stagingRoot) | Out-Null
+    $stagingDirectory = Join-Path $stagingRoot ([guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($stagingDirectory) | Out-Null
+    $bootstrapPath = Join-Path $InstallRoot 'bootstrap.ps1'
+    $uninstallerPath = Join-Path $InstallRoot 'Uninstall-CodexControlOtherDevices.ps1'
+    $bootstrapExistedBefore = [IO.File]::Exists($bootstrapPath)
+    $uninstallerExistedBefore = [IO.File]::Exists($uninstallerPath)
+    $copiedStableBootstrap = $false
+    $copiedStableUninstaller = $false
+    try {
+        foreach ($file in $Files) {
+            $destination = [IO.Path]::GetFullPath((Join-Path $stagingDirectory $file.Relative))
+            $prefix = $stagingDirectory.TrimEnd('\') + '\'
+            if (-not $destination.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_STAGING_PATH_INVALID' 'Staging path escaped the staging root' $destination
+            }
+            & $Adapters.CopyFile $file.Source $destination
+        }
+        foreach ($file in $Files) {
+            $destination = [IO.Path]::GetFullPath((Join-Path $stagingDirectory $file.Relative))
+            $expected = (Get-FileHash -LiteralPath $file.Source -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+            $actual = (Get-FileHash -LiteralPath $destination -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+            if ($actual -cne $expected) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_FILE_HASH_MISMATCH' 'A staged runtime file failed its source hash comparison' $destination
+            }
+        }
+        $bootstrapSource = [IO.Path]::GetFullPath((Join-Path (Split-Path $PSScriptRoot -Parent) 'bootstrap.ps1'))
+        if (-not [IO.File]::Exists($bootstrapSource)) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'The bootstrap script is missing from the persistence source' $bootstrapSource
+        }
+        & $Adapters.CopyFile $bootstrapSource $bootstrapPath
+        $copiedStableBootstrap = $true
+        $uninstallerSource = Join-Path $SourceRoot 'Uninstall-CodexControlOtherDevices.ps1'
+        if ([IO.File]::Exists($uninstallerSource)) {
+            & $Adapters.CopyFile $uninstallerSource $uninstallerPath
+            $copiedStableUninstaller = $true
+        }
+        return $stagingDirectory
+    } catch {
+        if ([IO.Directory]::Exists($stagingDirectory)) {
+            try { Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction Stop } catch { }
+        }
+        if ($copiedStableBootstrap -and -not $bootstrapExistedBefore -and [IO.File]::Exists($bootstrapPath)) {
+            try { Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction Stop } catch { }
+        }
+        if ($copiedStableUninstaller -and -not $uninstallerExistedBefore -and [IO.File]::Exists($uninstallerPath)) {
+            try { Remove-Item -LiteralPath $uninstallerPath -Force -ErrorAction Stop } catch { }
+        }
+        $candidateId = ([string]$_.FullyQualifiedErrorId -split ',')[0]
+        if ($candidateId -clike 'CCOD_INSTALL_*' -or $candidateId -clike 'CCOD_*') {
+            throw
+        }
+        Throw-CcodLifecycleError 'CCOD_INSTALL_STAGING_FAILED' 'Runtime staging failed safely' $stagingDirectory
+    }
+}
+
+function Get-CcodLifecycleProjectVersion {
+    param([Parameter(Mandatory)][string]$SourceRoot)
+
+    $packagePath = Join-Path $SourceRoot 'package.json'
+    if (-not [IO.File]::Exists($packagePath)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'Source package.json is missing' $packagePath
+    }
+    try {
+        $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INVALID' 'Source package.json is not valid JSON' $packagePath
+    }
+    if ($null -eq $package.PSObject.Properties['version'] -or $package.version -isnot [string] -or [string]::IsNullOrWhiteSpace($package.version)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INVALID' 'Source package.json lacks a version' $packagePath
+    }
+    return [string]$package.version
+}
+
+function Get-CcodLifecycleNodeCandidates {
+    param([Parameter(Mandatory)][hashtable]$Adapters)
+
+    $candidates = @(& $Adapters.DiscoverNodeCandidates)
+    $validated = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in @($candidates)) {
+        if ($candidate -isnot [string] -or [string]::IsNullOrWhiteSpace($candidate) -or -not [IO.Path]::IsPathRooted($candidate)) { continue }
+        try { $canonical = [IO.Path]::GetFullPath($candidate) } catch { continue }
+        if (-not (& $Adapters.ValidateNodeCandidate $canonical)) { continue }
+        if (-not $validated.Contains($canonical)) { $validated.Add($canonical) }
+    }
+    return @($validated)
+}
+
+function Write-CcodLifecycleLog {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][hashtable]$Adapters,
+        [Parameter(Mandatory)][string]$Stage,
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Outcome
+    )
+
+    try {
+        $now = & $Adapters.UtcNow
+        $record = [ordered]@{
+            schemaVersion = 1
+            timestampUtc = $now.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            component = 'Install'
+            stage = $Stage
+            code = $Code
+            outcome = $Outcome
+        }
+        & $Adapters.WriteLog $InstallRoot $record
+    } catch {
+    }
+}
+
+function Get-CcodLifecycleSupervisorIdentity {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        $Identity
+    )
+
+    $stateRoot = Join-Path $InstallRoot 'state'
+    if (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'status.json') -PathType Leaf)) { return $null }
+    try {
+        $status = Read-CcodStatus -StateRoot $stateRoot
+    } catch {
+        return $null
+    }
+    if ($null -eq $status -or $null -eq $status.session -or
+        $status.session.supervisorPid -isnot [int] -or $status.session.supervisorPid -lt 1 -or
+        $status.session.supervisorCreationTimeUtc -isnot [string] -or [string]::IsNullOrWhiteSpace($status.session.supervisorCreationTimeUtc) -or
+        $status.session.sessionId -isnot [string]) {
+        return $null
+    }
+    $sessionId = 0
+    if (-not [int]::TryParse($status.session.sessionId, [ref]$sessionId)) { return $null }
+    return [pscustomobject][ordered]@{
+        Pid = [int]$status.session.supervisorPid
+        CreationTimeUtc = [string]$status.session.supervisorCreationTimeUtc
+        SessionId = [int]$sessionId
+        UserSid = [string]$Identity.UserSid
+    }
+}
+
+function Stop-CcodLifecycleSupervisor {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][hashtable]$Adapters,
+        $Identity
+    )
+
+    if ($null -eq $Identity) { return }
+    & $Adapters.SignalSupervisorShutdown $Identity.UserSid $Identity.SessionId
+    $exited = & $Adapters.WaitSupervisorExit $Identity 10000
+    if (-not $exited) {
+        & $Adapters.TerminateSupervisor $Identity
+    }
+}
+
+function Invoke-CcodLifecycleControllerRecover {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][string]$RuntimeId,
+        [Parameter(Mandatory)]$Identity
+    )
+
+    $runtimeRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $InstallRoot 'runtime') $RuntimeId))
+    $validation = Test-CcodRuntimeManifest -RuntimeDirectory $runtimeRoot -ExpectedRuntimeId $RuntimeId
+    if (-not $validation.Valid) {
+        Throw-CcodLifecycleError 'CCOD_UNINSTALL_RUNTIME_INVALID' 'Active runtime failed manifest validation during uninstall' $runtimeRoot
+    }
+    $controller = [IO.Path]::GetFullPath((Join-Path $runtimeRoot 'src\persistence\SessionController.ps1'))
+    if (-not [IO.File]::Exists($controller)) {
+        Throw-CcodLifecycleError 'CCOD_UNINSTALL_RUNTIME_INVALID' 'Active runtime lacks SessionController.ps1' $controller
+    }
+    $supervisorIdentity = [pscustomobject][ordered]@{
+        pid = [int]$Identity.Pid
+        creationTimeUtc = [string]$Identity.CreationTimeUtc
+        sessionId = [string]$Identity.SessionId
+    }
+    $request = [pscustomobject][ordered]@{
+        schemaVersion = 1
+        action = 'Recover'
+        transactionId = [guid]::NewGuid().ToString('D')
+        runtimeId = $RuntimeId
+        supervisorIdentity = $supervisorIdentity
+        source = $null
+        existingOnly = $true
+        rendererPort = $null
+        mainPort = $null
+        timeoutMilliseconds = 30000
+        restartOrdinary = $true
+    }
+    $requestDirectory = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'CodexControlOtherDevices'))
+    [IO.Directory]::CreateDirectory($requestDirectory) | Out-Null
+    $nonce = [guid]::NewGuid().ToString('N')
+    $requestPath = [IO.Path]::GetFullPath((Join-Path $requestDirectory "uninstall-$nonce-request.json"))
+    $resultPath = [IO.Path]::GetFullPath((Join-Path $requestDirectory "uninstall-$nonce-result.json"))
+    $stderrPath = [IO.Path]::GetFullPath((Join-Path $requestDirectory "uninstall-$nonce.stderr.log"))
+    try {
+        [IO.File]::WriteAllText($requestPath, ($request | ConvertTo-Json -Depth 16 -Compress), [Text.UTF8Encoding]::new($false))
+        $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+        $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $controller, '-RequestPath', $requestPath, '-ResultPath', $resultPath)
+        $stdout = @(& $powershell @arguments 2>$stderrPath)
+        $exitCode = $LASTEXITCODE
+        $lines = @($stdout | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($lines.Count -ne 1 -or -not [IO.File]::Exists($resultPath)) {
+            Throw-CcodLifecycleError 'CCOD_UNINSTALL_NORMALIZATION_FAILED' 'The controller did not return one persisted machine-readable result' $resultPath
+        }
+        try {
+            $fromStdout = $lines[0] | ConvertFrom-Json -ErrorAction Stop
+            $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            Throw-CcodLifecycleError 'CCOD_UNINSTALL_NORMALIZATION_FAILED' 'The controller returned invalid JSON' $resultPath
+        }
+        if (($fromStdout | ConvertTo-Json -Depth 16 -Compress) -cne ($result | ConvertTo-Json -Depth 16 -Compress) -or
+            $result.transactionId -cne $request.transactionId -or $result.action -cne 'Recover' -or
+            $exitCode -ne 0 -or $result.ok -ne $true -or $null -ne $result.error) {
+            Throw-CcodLifecycleError 'CCOD_UNINSTALL_NORMALIZATION_FAILED' 'The controller could not normalize the session safely' $result
+        }
+        $specialPresent = $null -ne $result.special -and
+            $result.special -is [pscustomobject] -and
+            $null -ne $result.special.PSObject.Properties['pid'] -and
+            $result.special.pid -is [int] -and $result.special.pid -gt 0
+        return [pscustomobject][ordered]@{
+            SchemaVersion = 1
+            SpecialPresent = [bool]$specialPresent
+            Normalized = $true
+            Outcome = [string]$result.outcome
+        }
+    } finally {
+        foreach ($path in @($requestPath, $resultPath, $stderrPath)) {
+            if ([IO.File]::Exists($path)) { try { [IO.File]::Delete($path) } catch { } }
+        }
+    }
+}
+
+function Get-CcodLifecycleAdapters {
+    param([hashtable]$Adapters)
+
+    $defaults = @{
+        ValidateSource = {
+            param($SourceRoot)
+            $validate = [IO.Path]::GetFullPath((Join-Path $SourceRoot 'tests\Validate.ps1'))
+            if (-not [IO.File]::Exists($validate)) { return $false }
+            $powershell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
+            $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $validate + '" -SkipInstalledPackageCheck'
+            $process = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+            try { return $process.ExitCode -eq 0 } finally { $process.Dispose() }
+        }.GetNewClosure()
+        GetProjectVersion = { param($SourceRoot) Get-CcodLifecycleProjectVersion -SourceRoot $SourceRoot }.GetNewClosure()
+        DiscoverNodeCandidates = {
+            $candidates = [System.Collections.Generic.List[string]]::new()
+            $node = Get-Command node.exe -ErrorAction SilentlyContinue
+            if ($null -ne $node -and $node.Source -is [string] -and -not [string]::IsNullOrWhiteSpace($node.Source)) {
+                $candidates.Add([IO.Path]::GetFullPath($node.Source))
+            }
+            @($candidates)
+        }.GetNewClosure()
+        ValidateNodeCandidate = {
+            param($Path)
+            try {
+                $candidate = Resolve-CcodNodeCandidate -NodeCandidates @([string]$Path)
+                return $null -ne $candidate -and $candidate.Found -eq $true
+            } catch { return $false }
+        }.GetNewClosure()
+        GetCurrentIdentity = {
+            $windowsIdentity = $null
+            $process = $null
+            try {
+                $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+                $process = [Diagnostics.Process]::GetCurrentProcess()
+                [pscustomobject][ordered]@{
+                    UserSid = $windowsIdentity.User.Value
+                    SessionId = [int]$process.SessionId
+                    Pid = [int]$process.Id
+                    CreationTimeUtc = $process.StartTime.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                }
+            } finally {
+                if ($null -ne $process) { $process.Dispose() }
+                if ($null -ne $windowsIdentity) { $windowsIdentity.Dispose() }
+            }
+        }.GetNewClosure()
+        UtcNow = { [DateTime]::UtcNow }.GetNewClosure()
+        InstallSupervisorTask = {
+            param($InstallRoot, $UserSid)
+            $spec = Get-CcodSupervisorTaskSpec -InstallRoot $InstallRoot -UserSid $UserSid
+            $definition = New-CcodSupervisorTaskDefinition -Spec $spec
+            Install-CcodSupervisorTask -Definition $definition -TaskName $spec.TaskName
+        }.GetNewClosure()
+        RemoveSupervisorTask = {
+            Remove-CcodSupervisorTask -TaskName $script:CcodLifecycleTaskName
+        }.GetNewClosure()
+        StartSupervisorTask = {
+            Start-ScheduledTask -TaskName $script:CcodLifecycleTaskName -ErrorAction Stop | Out-Null
+        }.GetNewClosure()
+        SignalSupervisorShutdown = {
+            param($UserSid, $SessionId)
+            try {
+                $event = Open-CcodEvent -Kind 'Shutdown' -UserSid $UserSid -SessionId $SessionId
+            } catch [Threading.WaitHandleCannotBeOpenedException] {
+                return
+            }
+            try { [void]$event.Handle.Set() } finally { $event.Handle.Dispose() }
+        }.GetNewClosure()
+        WaitSupervisorExit = {
+            param($SupervisorIdentity, $TimeoutMilliseconds)
+            $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+            while ($stopwatch.ElapsedMilliseconds -lt [long]$TimeoutMilliseconds) {
+                $process = Get-Process -Id $SupervisorIdentity.Pid -ErrorAction SilentlyContinue
+                if ($null -eq $process) { return $true }
+                try {
+                    if ($process.StartTime.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture) -cne $SupervisorIdentity.CreationTimeUtc) { return $true }
+                } finally { $process.Dispose() }
+                Start-Sleep -Milliseconds 250
+            }
+            return $false
+        }.GetNewClosure()
+        TerminateSupervisor = {
+            param($SupervisorIdentity)
+            try { Stop-Process -Id $SupervisorIdentity.Pid -Force -ErrorAction Stop; return $true } catch { return $false }
+        }.GetNewClosure()
+        NormalizeSpecialSession = {
+            param($InstallRoot, $RuntimeId, $Identity)
+            Invoke-CcodLifecycleControllerRecover -InstallRoot $InstallRoot -RuntimeId $RuntimeId -Identity $Identity
+        }.GetNewClosure()
+        SetAutomationEnabled = {
+            param($StateRoot, $Enabled)
+            Set-CcodAutomationEnabled -StateRoot $StateRoot -Enabled ([bool]$Enabled)
+        }.GetNewClosure()
+        EnterTransitionLease = {
+            param($UserSid, $SessionId)
+            Enter-CcodMutex -Kind 'Transition' -UserSid $UserSid -SessionId $SessionId -TimeoutMilliseconds 10000
+        }.GetNewClosure()
+        ExitTransitionLease = {
+            param($Lease)
+            Exit-CcodMutex -Lease $Lease
+        }.GetNewClosure()
+        ResolveDeviceKeyStore = {
+            Resolve-CcodDeviceKeyStorePath
+        }.GetNewClosure()
+        BackupDeviceKeyStore = {
+            param($Path, $BackupPath)
+            [IO.Directory]::CreateDirectory((Split-Path $BackupPath -Parent)) | Out-Null
+            [IO.File]::Move($Path, $BackupPath)
+            $BackupPath
+        }.GetNewClosure()
+        RemoveDeviceKeyStore = {
+            param($Path)
+            if ([IO.File]::Exists($Path)) { [IO.File]::Delete($Path) }
+        }.GetNewClosure()
+        CopyFile = {
+            param($Source, $Destination)
+            [IO.Directory]::CreateDirectory((Split-Path $Destination -Parent)) | Out-Null
+            [IO.File]::Copy($Source, $Destination, $true)
+        }.GetNewClosure()
+        WriteLog = {
+            param($InstallRoot, $Record)
+            $logDirectory = Join-Path $InstallRoot 'logs'
+            [IO.Directory]::CreateDirectory($logDirectory) | Out-Null
+            Write-CcodRotatingLog -Path (Join-Path $logDirectory 'install.log') -Message ($Record | ConvertTo-Json -Depth 6 -Compress)
+        }.GetNewClosure()
+    }
+    if ($null -eq $Adapters) { return $defaults }
+    if ($Adapters -isnot [hashtable]) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_ADAPTER_INVALID' 'Lifecycle adapters must be a hashtable' $Adapters
+    }
+    $resolved = @{}
+    foreach ($name in $defaults.Keys) { $resolved[$name] = $defaults[$name] }
+    foreach ($key in $Adapters.Keys) {
+        if ($key -isnot [string] -or -not $resolved.ContainsKey($key) -or $Adapters[$key] -isnot [scriptblock]) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_ADAPTER_INVALID' 'Lifecycle adapter contract is invalid' $key
+        }
+        $resolved[$key] = $Adapters[$key]
+    }
+    return $resolved
+}
+
+function Install-CcodLifecycleTask {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][hashtable]$Adapters,
+        $Identity
+    )
+
+    & $Adapters.InstallSupervisorTask $InstallRoot $Identity.UserSid
+}
+
+function Start-CcodLifecycleTask {
+    param([Parameter(Mandatory)][hashtable]$Adapters)
+    & $Adapters.StartSupervisorTask
+}
+
+function Remove-CcodLifecycleInstallTree {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][hashtable]$Adapters
+    )
+
+    $root = Get-CcodLifecycleCanonicalRoot -Path $InstallRoot -Kind 'Install root'
+    if (-not [IO.Directory]::Exists($root)) { return }
+    if (Test-CcodLifecycleReparse -Path $root) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_REPARSE_PATH' 'Install root is a reparse point' $root
+    }
+    foreach ($item in Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop) {
+        [void](Test-CcodLifecycleRemovePath -Root $root -Path $item.FullName)
+    }
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+}
+
+function Remove-CcodLifecycleOldRuntimes {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][string]$ActiveRuntimeId,
+        [AllowNull()][string]$PreviousRuntimeId
+    )
+
+    $runtimeRoot = Join-Path $InstallRoot 'runtime'
+    if (-not [IO.Directory]::Exists($runtimeRoot)) { return }
+    foreach ($directory in Get-ChildItem -LiteralPath $runtimeRoot -Directory -Force -ErrorAction Stop) {
+        if ($directory.Name -ceq $ActiveRuntimeId -or $directory.Name -ceq $PreviousRuntimeId) { continue }
+        [void](Test-CcodLifecycleRemovePath -Root $InstallRoot -Path $directory.FullName)
+        Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction Stop
+    }
+}
+
+function Invoke-CcodRepairState {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [hashtable]$Adapters
+    )
+
+    $adapters = Get-CcodLifecycleAdapters -Adapters $Adapters
+    $root = Get-CcodLifecycleCanonicalRoot -Path $InstallRoot -Kind 'Install root'
+    if (-not [IO.Directory]::Exists($root)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_REQUIRED' 'Install root does not exist; run a full install first' $root
+    }
+    $should = $PSCmdlet.ShouldProcess($root, 'Repair the Codex Control Other Devices state files')
+    if ($should) {
+        $nodeCandidates = @(Get-CcodLifecycleNodeCandidates -Adapters $adapters)
+        $stateRoot = Join-Path $root 'state'
+        Repair-CcodState -StateRoot $stateRoot | Out-Null
+        $settings = [ordered]@{
+            schemaVersion = 1
+            automationEnabled = $false
+            candidateCompatibleOptIn = $false
+            nodeCandidates = @($nodeCandidates)
+            updatedAtUtc = (& $adapters.UtcNow).ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        }
+        Write-CcodSettings -StateRoot $stateRoot -Settings $settings -Adapters @{
+            TestVerifiedNodeCandidate = { param($Path) & $adapters.ValidateNodeCandidate $Path }.GetNewClosure()
+        }
+        Write-CcodLifecycleLog -InstallRoot $root -Adapters $adapters -Stage 'RepairState' -Code 'CCOD_INSTALL_STATE_REPAIRED' -Outcome 'Repaired'
+    }
+    return [pscustomobject][ordered]@{
+        Outcome = if ($should) { 'Repaired' } else { 'WhatIf' }
+        RepairCompleted = [bool]$should
+    }
+}
+
+function Invoke-CcodInstall {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [string]$InstallRoot,
+        [switch]$EnableCandidateCompatibleUpdates,
+        [switch]$RepairState,
+        [switch]$DoNotStart,
+        [hashtable]$Adapters
+    )
+
+    $adapters = Get-CcodLifecycleAdapters -Adapters $Adapters
+    if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = $script:CcodLifecycleDefaultInstallRoot }
+    $root = Get-CcodLifecycleCanonicalRoot -Path $InstallRoot -Kind 'Install root'
+    $sourceRoot = Get-CcodLifecycleCanonicalRoot -Path $SourceRoot -Kind 'Source root'
+
+    if ($RepairState) {
+        return Invoke-CcodRepairState -InstallRoot $root -Adapters $adapters
+    }
+    if (-not $PSCmdlet.ShouldProcess($root, 'Install, upgrade, or repair the Codex Control Other Devices supervisor')) {
+        return [pscustomobject][ordered]@{
+            Outcome = 'WhatIf'
+            Installed = $false
+            RuntimeId = $null
+            PreviousRuntimeId = $null
+            RepairCompleted = $false
+        }
+    }
+
+    if (-not [IO.Directory]::Exists($sourceRoot)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_MISSING' 'Source checkout does not exist' $sourceRoot
+    }
+    if (-not (& $adapters.ValidateSource $sourceRoot)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INVALID' 'Source checkout failed hermetic validation' $sourceRoot
+    }
+    $identity = & $adapters.GetCurrentIdentity
+    if ($null -eq $identity -or $identity.UserSid -isnot [string] -or $identity.SessionId -isnot [int]) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_IDENTITY_INVALID' 'Current user identity is unavailable' $null
+    }
+    $projectVersion = & $adapters.GetProjectVersion $sourceRoot
+    $nodeCandidates = @(Get-CcodLifecycleNodeCandidates -Adapters $adapters)
+    $files = @(Get-CcodLifecycleSourceFiles -SourceRoot $sourceRoot)
+
+    $existingPointer = $null
+    $activePath = Join-Path $root 'active.json'
+    if ([IO.File]::Exists($activePath)) {
+        $existingPointer = Read-CcodActiveRuntime -InstallRoot $root
+    }
+
+    $stagingDirectory = $null
+    $runtimeId = $null
+    $upgrade = $false
+    try {
+        $stagingDirectory = Copy-CcodLifecycleStaging -SourceRoot $sourceRoot -InstallRoot $root -Adapters $adapters -Files $files
+        $manifest = New-CcodRuntimeManifest -RuntimeDirectory $stagingDirectory -ProjectVersion $projectVersion
+        [IO.File]::WriteAllText(
+            (Join-Path $stagingDirectory 'manifest.json'),
+            ($manifest | ConvertTo-Json -Depth 16),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $runtimeId = [string]$manifest.runtimeId
+        $validation = Test-CcodRuntimeManifest -RuntimeDirectory $stagingDirectory -ExpectedRuntimeId $runtimeId
+        if (-not $validation.Valid) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_MANIFEST_INVALID' ("Staged runtime failed manifest validation: {0}" -f $validation.Code) $stagingDirectory
+        }
+        $runtimeRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $root 'runtime') $runtimeId))
+        if ([IO.Directory]::Exists($runtimeRoot)) {
+            $existingValidation = Test-CcodRuntimeManifest -RuntimeDirectory $runtimeRoot -ExpectedRuntimeId $runtimeId
+            if (-not $existingValidation.Valid) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_RUNTIME_CONFLICT' 'An invalid runtime already occupies the target runtime id' $runtimeRoot
+            }
+            if ([IO.Directory]::Exists($stagingDirectory)) {
+                try { Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction Stop } catch { }
+            }
+        } else {
+            [IO.Directory]::CreateDirectory((Split-Path $runtimeRoot -Parent)) | Out-Null
+            [IO.Directory]::Move($stagingDirectory, $runtimeRoot)
+        }
+        $stagingDirectory = $null
+        $upgrade = $null -ne $existingPointer
+        if (-not $upgrade) {
+            $stateRoot = Join-Path $root 'state'
+            Initialize-CcodState -StateRoot $stateRoot -NodeCandidates $nodeCandidates -CandidateCompatibleOptIn ([bool]$EnableCandidateCompatibleUpdates)
+        }
+        $pointer = Set-CcodActiveRuntime -InstallRoot $root -NewRuntimeId $runtimeId
+        if ($upgrade) {
+            $oldSupervisor = Get-CcodLifecycleSupervisorIdentity -InstallRoot $root -Identity $identity
+            if ($null -ne $oldSupervisor) {
+                Stop-CcodLifecycleSupervisor -InstallRoot $root -Adapters $adapters -Identity $oldSupervisor
+            }
+        }
+        Install-CcodLifecycleTask -InstallRoot $root -Adapters $adapters -Identity $identity
+        if (-not $DoNotStart) {
+            Start-CcodLifecycleTask -Adapters $adapters
+        }
+        if ($upgrade) {
+            Remove-CcodLifecycleOldRuntimes -InstallRoot $root -ActiveRuntimeId $runtimeId -PreviousRuntimeId $pointer.previousRuntime
+        }
+        Write-CcodLifecycleLog -InstallRoot $root -Adapters $adapters -Stage $(if ($upgrade) { 'Upgrade' } else { 'Install' }) -Code 'CCOD_INSTALL_COMPLETED' -Outcome $(if ($upgrade) { 'Upgraded' } else { 'Installed' })
+    } finally {
+        if ($null -ne $stagingDirectory -and [IO.Directory]::Exists($stagingDirectory)) {
+            try { Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction Stop } catch { }
+        }
+        $stagingRoot = [IO.Path]::GetFullPath((Join-Path $root '.staging'))
+        if ([IO.Directory]::Exists($stagingRoot) -and -not (Test-CcodLifecycleReparse -Path $stagingRoot)) {
+            try { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction Stop } catch { }
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        Outcome = if ($upgrade) { 'Upgraded' } else { 'Installed' }
+        Installed = $true
+        RuntimeId = $runtimeId
+        PreviousRuntimeId = $pointer.previousRuntime
+        RepairCompleted = $false
+    }
+}
+
+function Invoke-CcodUninstall {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [string]$InstallRoot,
+        [switch]$KeepCurrentSpecialSession,
+        [switch]$BackupDeviceKeyStore,
+        [switch]$RemoveDeviceKeyStore,
+        [hashtable]$Adapters
+    )
+
+    $adapters = Get-CcodLifecycleAdapters -Adapters $Adapters
+    if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = $script:CcodLifecycleDefaultInstallRoot }
+    $root = Get-CcodLifecycleCanonicalRoot -Path $InstallRoot -Kind 'Install root'
+    if ([bool]$BackupDeviceKeyStore -and [bool]$RemoveDeviceKeyStore) {
+        Throw-CcodLifecycleError 'CCOD_UNINSTALL_KEY_CONFLICT' 'Backup and removal of the device key store are mutually exclusive' $null
+    }
+    if (-not $PSCmdlet.ShouldProcess($root, 'Uninstall the Codex Control Other Devices supervisor')) {
+        return [pscustomobject][ordered]@{
+            Outcome = 'WhatIf'
+            KeptDeviceKeyStore = $true
+            BackupPath = $null
+        }
+    }
+    if (-not [IO.Directory]::Exists($root)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_REQUIRED' 'Install root does not exist' $root
+    }
+    $activePath = Join-Path $root 'active.json'
+    if (-not [IO.File]::Exists($activePath)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_REQUIRED' 'Install root has no active runtime pointer' $root
+    }
+    $pointer = Read-CcodActiveRuntime -InstallRoot $root
+    $identity = & $adapters.GetCurrentIdentity
+    $supervisor = Get-CcodLifecycleSupervisorIdentity -InstallRoot $root -Identity $identity
+    $lease = $null
+    $keptKeyStore = $false
+    $backupPath = $null
+    try {
+        $lease = & $adapters.EnterTransitionLease $identity.UserSid $identity.SessionId
+        & $adapters.SetAutomationEnabled (Join-Path $root 'state') $false
+        if ($KeepCurrentSpecialSession) {
+            Write-CcodLifecycleLog -InstallRoot $root -Adapters $adapters -Stage 'Uninstall' -Code 'CCOD_UNINSTALL_UNMONITORED_CDP' -Outcome 'Warning'
+        } else {
+            $receipt = & $adapters.NormalizeSpecialSession $root $pointer.activeRuntime $identity
+            if ($null -ne $receipt -and $null -ne $receipt.PSObject.Properties['SpecialPresent'] -and [bool]$receipt.SpecialPresent -and
+                ($null -eq $receipt.PSObject.Properties['Normalized'] -or -not [bool]$receipt.Normalized)) {
+                Throw-CcodLifecycleError 'CCOD_UNINSTALL_NORMALIZATION_FAILED' 'A validated special session could not be normalized to an ordinary session' $receipt
+            }
+        }
+        & $adapters.RemoveSupervisorTask
+        if ($null -ne $supervisor) {
+            Stop-CcodLifecycleSupervisor -InstallRoot $root -Adapters $adapters -Identity $supervisor
+        }
+        $keyPath = & $adapters.ResolveDeviceKeyStore
+        if ($BackupDeviceKeyStore -and -not [string]::IsNullOrWhiteSpace($keyPath) -and [IO.File]::Exists($keyPath)) {
+            $now = & $adapters.UtcNow
+            $base = $keyPath + '.backup.' + $now.ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+            $destination = $base
+            $suffix = 0
+            while ([IO.File]::Exists($destination)) { $suffix++; $destination = "$base.$suffix" }
+            $backupPath = & $adapters.BackupDeviceKeyStore $keyPath $destination
+        } elseif ($RemoveDeviceKeyStore -and -not [string]::IsNullOrWhiteSpace($keyPath) -and [IO.File]::Exists($keyPath)) {
+            & $adapters.RemoveDeviceKeyStore $keyPath
+            Write-CcodLifecycleLog -InstallRoot $root -Adapters $adapters -Stage 'Uninstall' -Code 'CCOD_UNINSTALL_REVOKE_REMINDER' -Outcome 'Warning'
+        } else {
+            $keptKeyStore = $true
+        }
+        Write-CcodLifecycleLog -InstallRoot $root -Adapters $adapters -Stage 'Uninstall' -Code 'CCOD_UNINSTALL_COMPLETED' -Outcome 'Uninstalled'
+        Remove-CcodLifecycleInstallTree -InstallRoot $root -Adapters $adapters
+    } finally {
+        if ($null -ne $lease) {
+            try { [void](& $adapters.ExitTransitionLease $lease) } catch { }
+        }
+    }
+    return [pscustomobject][ordered]@{
+        Outcome = 'Uninstalled'
+        KeptDeviceKeyStore = [bool]$keptKeyStore
+        BackupPath = $backupPath
+    }
+}
+
+Export-ModuleMember -Function Invoke-CcodInstall, Invoke-CcodRepairState, Invoke-CcodUninstall, Test-CcodLifecycleRemovePath
