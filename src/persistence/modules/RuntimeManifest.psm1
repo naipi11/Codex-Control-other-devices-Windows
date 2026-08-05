@@ -316,7 +316,12 @@ function Set-CcodActiveRuntime {
     $activePath = Resolve-CcodContainedPath -Root $InstallRoot -RelativePath 'active.json' -AllowMissingLeaf
     $previousRuntime = $null
     if ([IO.File]::Exists($activePath)) {
-        $previousRuntime = (Read-CcodActiveRuntime -InstallRoot $InstallRoot).activeRuntime
+        $current = Read-CcodActiveRuntime -InstallRoot $InstallRoot
+        if ($current.activeRuntime -cne $NewRuntimeId) {
+            $previousRuntime = [string]$current.activeRuntime
+        } elseif ($null -ne $current.previousRuntime -and $current.previousRuntime -cne $NewRuntimeId) {
+            $previousRuntime = [string]$current.previousRuntime
+        }
     }
     $pointer = [ordered]@{
         schemaVersion = 1

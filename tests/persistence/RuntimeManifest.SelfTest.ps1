@@ -97,6 +97,25 @@ try {
         Assert-CcodEqual $second.Manifest.runtimeId $unchanged.activeRuntime 'failed activation must leave the active pointer unchanged'
     }
 
+    Invoke-CcodTest 'never sets previousRuntime to the same runtime id on reactivation' {
+        $installRoot = Join-Path $root 'same-runtime-reactivation'
+        New-Item -ItemType Directory -Path $installRoot | Out-Null
+        $first = New-CcodRuntimeFixture -InstallRoot $installRoot -ProjectVersion '2.0.0' -AContent 'alpha' -BContent 'beta'
+        $second = New-CcodRuntimeFixture -InstallRoot $installRoot -ProjectVersion '2.0.1' -AContent 'alpha two' -BContent 'beta two'
+
+        Set-CcodActiveRuntime -InstallRoot $installRoot -NewRuntimeId $first.Manifest.runtimeId | Out-Null
+        Set-CcodActiveRuntime -InstallRoot $installRoot -NewRuntimeId $first.Manifest.runtimeId | Out-Null
+        $reinstalled = Read-CcodActiveRuntime -InstallRoot $installRoot
+        Assert-CcodEqual $first.Manifest.runtimeId $reinstalled.activeRuntime 'reinstalling the active runtime keeps it active'
+        Assert-CcodEqual $null $reinstalled.previousRuntime 'reactivating the same runtime must not self-reference'
+
+        Set-CcodActiveRuntime -InstallRoot $installRoot -NewRuntimeId $second.Manifest.runtimeId | Out-Null
+        Set-CcodActiveRuntime -InstallRoot $installRoot -NewRuntimeId $second.Manifest.runtimeId | Out-Null
+        $reupgraded = Read-CcodActiveRuntime -InstallRoot $installRoot
+        Assert-CcodEqual $second.Manifest.runtimeId $reupgraded.activeRuntime 'reupgrading keeps the latest runtime active'
+        Assert-CcodEqual $first.Manifest.runtimeId $reupgraded.previousRuntime 'previous must retain the distinct older runtime'
+    }
+
     Invoke-CcodTest 'rejects invalid IDs in an active pointer before resolving runtime paths' {
         $installRoot = Join-Path $root 'invalid-pointer'
         New-Item -ItemType Directory -Path $installRoot | Out-Null
