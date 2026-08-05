@@ -286,6 +286,14 @@ async function electronRestrictedCryptoFallbackTest(root, storePath) {
   assert.equal(typeof crypto.webcrypto.createPrivateKey, "undefined");
   const bridge = loadBridgeInVm(root, { getBuiltinModule: restrictedCryptoBuiltin });
   await vmDeviceKeyLifecycle(bridge, storePath, "electron-restricted-crypto");
+  const report = bridge.installMainBridge({
+    interceptModules: false,
+    scheduleInspectorClose: false,
+    spoofPlatform: false,
+    storePath,
+  });
+  assert.equal(report.installed, true);
+  assert.equal(report.status, "installed");
   return { nativeCryptoLoadedWithCreateRequire: true, signatureVerified: true };
 }
 
@@ -467,9 +475,19 @@ async function orchestratorModesTest(root) {
       if (expression.includes("__CODEX_STATSIG_GATE_BRIDGE__")) {
         return { proof: true, targetGate: "782640499" };
       }
-      return { installed: true };
+      return {
+        allFalse: true,
+        checkMethods: 0,
+        installedClients: 0,
+        installedMethods: 0,
+        passedMethods: 0,
+        proof: true,
+        scans: 1,
+        structuredMethods: 0,
+        targetGate: "782640499",
+      };
     },
-    readPayload: () => "globalThis.__rendererInstalled = true; ({ installed: true })",
+    readPayload: () => "globalThis.__rendererInstalled = true; ({ proof: true, targetGate: '782640499' })",
     waitForTarget: async (port, kind) => {
       calls.push({ method: "waitForTarget", port, kind });
       assert.equal(kind, "renderer");

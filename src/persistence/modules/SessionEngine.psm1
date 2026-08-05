@@ -228,13 +228,6 @@ function Invoke-CcodManagedNode {
         $result=[pscustomobject][ordered]@{ExitCode=-1;Stdout='';Stderr=("MANAGED_NODE_EXCEPTION $($_.Exception.GetType().FullName): $($_.Exception.Message)")}
     }finally{
         $process.Dispose()
-        try{
-            $debugDirectory=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'ccod-debug'))
-            [IO.Directory]::CreateDirectory($debugDirectory)|Out-Null
-            $debugPath=[IO.Path]::GetFullPath((Join-Path $debugDirectory 'node-invoke.jsonl'))
-            $record=[pscustomobject][ordered]@{timestampUtc=[DateTime]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture);node=$NodePath;exitCode=$result.ExitCode;stdout=$result.Stdout;stderr=$result.Stderr}
-            [IO.File]::AppendAllText($debugPath,($record|ConvertTo-Json -Depth 6 -Compress)+"`n",[Text.UTF8Encoding]::new($false))
-        }catch{}
     }
     return $result
 }

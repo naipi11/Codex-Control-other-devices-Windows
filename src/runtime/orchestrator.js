@@ -284,7 +284,7 @@ async function installRendererPayload(options, source, deadline, dependencies = 
     const installReport = await evaluateRenderer(client, source, remaining(deadline));
     const probe = await waitForRendererProof(client, deadline, dependencies);
     return {
-      currentDocument: sanitizeReport(installReport),
+      currentDocument: { installed: installReport?.targetGate === "782640499" },
       newDocumentScriptInstalled: typeof persistent.identifier === "string",
       probe,
       targetUrl: target.url,

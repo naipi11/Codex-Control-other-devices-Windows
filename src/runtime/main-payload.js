@@ -737,6 +737,7 @@
     const report = {
       addonBasename: TARGET_ADDON_BASENAME,
       algorithm: ALGORITHM,
+      installed: true,
       moduleInterception: options.interceptModules === false ? "disabled" : "installed",
       platformShim,
       protectionClass: PROTECTION_CLASS,
