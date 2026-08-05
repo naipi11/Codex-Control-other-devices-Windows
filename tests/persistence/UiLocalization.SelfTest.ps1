@@ -9,9 +9,14 @@ Import-Module $modulePath -Force
 function New-CcodUiFixture {
     $root=Join-Path ([IO.Path]::GetTempPath()) ('ccod-ui-'+[Guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($root)|Out-Null
+    Reset-CcodUiFixture $root
+    return $root
+}
+
+function Reset-CcodUiFixture {
+    param([string]$Root)
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'src\persistence\resources\ui.en-US.json') -Destination (Join-Path $root 'ui.en-US.json') -Force
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'src\persistence\resources\ui.zh-CN.json') -Destination (Join-Path $root 'ui.zh-CN.json') -Force
-    return $root
 }
 
 function Set-CcodUiFixtureText {
@@ -36,6 +41,11 @@ function New-CcodUiReorderedStrings {
     return [pscustomobject]$reordered
 }
 
+function New-CcodUiReorderedCatalog {
+    param($Catalog)
+    return [pscustomobject][ordered]@{locale=$Catalog.locale;schemaVersion=$Catalog.schemaVersion;strings=$Catalog.strings}
+}
+
 $results=[Collections.Generic.List[object]]::new()
 
 $results.Add((Invoke-CcodTest 'resolves exact locales and exposes a fixed catalog shape' {
@@ -56,13 +66,12 @@ $results.Add((Invoke-CcodTest 'resolves exact locales and exposes a fixed catalo
 $results.Add((Invoke-CcodTest 'rejects malformed catalog fixtures and falls back only through validated English' {
     $resources=New-CcodUiFixture
     try {
-        $base=Get-CcodUiFixtureJson $resources 'ui.zh-CN.json'
         $cases=@(
-            @{Name='duplicate';Text=([IO.File]::ReadAllText((Join-Path $resources 'ui.zh-CN.json'),[Text.UTF8Encoding]::new($false)) -replace '"Tray.Title":', '"Tray.Title":"duplicate","Tray.Title":')},
-            @{Name='extra';Value=([pscustomobject][ordered]@{schemaVersion=1;locale='zh-CN';strings=$base.strings;extra=$true})},
-            @{Name='missing';Value=([pscustomobject][ordered]@{schemaVersion=1;locale='zh-CN'})},
-            @{Name='order';Value=([pscustomobject][ordered]@{locale='zh-CN';schemaVersion=1;strings=$base.strings})},
-            @{Name='schema';Value=([pscustomobject][ordered]@{schemaVersion=2;locale='zh-CN';strings=$base.strings})},
+            @{Name='duplicate';TextMutate={param($text)$text -replace '"Tray.Title":', '"Tray.Title":"duplicate","Tray.Title":'}},
+            @{Name='extra';Mutate={param($v)$v|Add-Member -NotePropertyName extra -NotePropertyValue $true}},
+            @{Name='missing';Mutate={param($v)[void]$v.PSObject.Properties.Remove('strings')}},
+            @{Name='order';Replace={param($v)New-CcodUiReorderedCatalog $v}},
+            @{Name='schema';Mutate={param($v)$v.schemaVersion=2}},
             @{Name='nonstring';Mutate={param($v)$v.strings.'Tray.Title'=1}},
             @{Name='strings-extra';Mutate={param($v)$v.strings|Add-Member -NotePropertyName 'Extra.Key' -NotePropertyValue 'extra'}},
             @{Name='strings-missing';Mutate={param($v)[void]$v.strings.PSObject.Properties.Remove('Tray.Title')}},
@@ -72,18 +81,26 @@ $results.Add((Invoke-CcodTest 'rejects malformed catalog fixtures and falls back
             @{Name='malformed';Text='{'}
         )
         foreach($case in $cases){
+            Reset-CcodUiFixture $resources
+            $pristineEnglish=Get-CcodUiCatalog -ResourcesRoot $resources -LanguageMode en-US -SystemCultureName en-US
+            Assert-CcodEqual 'en-US' $pristineEnglish.EffectiveLocale "$($case.Name) starts with a valid English fallback fixture"
+            Assert-CcodEqual 'Codex Device Connection' (Get-CcodUiString -Catalog $pristineEnglish -Key 'Tray.Title') "$($case.Name) English fixture uses the hand-derived title"
+            $pristineChinese=Get-CcodUiCatalog -ResourcesRoot $resources -LanguageMode zh-CN -SystemCultureName en-US
+            Assert-CcodEqual 'zh-CN' $pristineChinese.EffectiveLocale "$($case.Name) starts with a valid selected Chinese fixture"
             if($case.ContainsKey('Text')){Set-CcodUiFixtureText $resources 'ui.zh-CN.json' $case.Text}
-            else {$value=$case.Value;if($null -eq $value){$value=Get-CcodUiFixtureJson $resources 'ui.zh-CN.json';& $case.Mutate $value};Write-CcodUiFixtureJson $resources 'ui.zh-CN.json' $value}
+            elseif($case.ContainsKey('TextMutate')){$text=[IO.File]::ReadAllText((Join-Path $resources 'ui.zh-CN.json'),[Text.UTF8Encoding]::new($false));Set-CcodUiFixtureText $resources 'ui.zh-CN.json' (& $case.TextMutate $text)}
+            else {$value=Get-CcodUiFixtureJson $resources 'ui.zh-CN.json';if($case.ContainsKey('Replace')){$value=& $case.Replace $value}else{& $case.Mutate $value|Out-Null};Write-CcodUiFixtureJson $resources 'ui.zh-CN.json' $value}
             $catalog=Get-CcodUiCatalog -ResourcesRoot $resources -LanguageMode zh-CN -SystemCultureName en-US
             Assert-CcodEqual 'en-US' $catalog.EffectiveLocale "$($case.Name) selected Chinese falls back to English"
             Assert-CcodEqual $false $catalog.UsedEmergencyCatalog "$($case.Name) uses validated English"
-            Copy-Item -LiteralPath (Join-Path $repositoryRoot 'src\persistence\resources\ui.zh-CN.json') -Destination (Join-Path $resources 'ui.zh-CN.json') -Force
+            Assert-CcodEqual 'Codex Device Connection' (Get-CcodUiString -Catalog $catalog -Key 'Tray.Title') "$($case.Name) returns the hand-derived English fallback title"
         }
+        Reset-CcodUiFixture $resources
         $valid=[IO.File]::ReadAllText((Join-Path $resources 'ui.zh-CN.json'),[Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllBytes((Join-Path $resources 'ui.zh-CN.json'),[byte[]](@(0xef,0xbb,0xbf)+[Text.Encoding]::UTF8.GetBytes($valid)))
         $bom=Get-CcodUiCatalog -ResourcesRoot $resources -LanguageMode zh-CN -SystemCultureName en-US
         Assert-CcodEqual 'en-US' $bom.EffectiveLocale 'BOM selected Chinese falls back to English'
-        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'src\persistence\resources\ui.zh-CN.json') -Destination (Join-Path $resources 'ui.zh-CN.json') -Force
+        Reset-CcodUiFixture $resources
         Set-CcodUiFixtureText $resources 'ui.zh-CN.json' '{'
         Set-CcodUiFixtureText $resources 'ui.en-US.json' '{'
         $emergency=Get-CcodUiCatalog -ResourcesRoot $resources -LanguageMode zh-CN -SystemCultureName en-US
