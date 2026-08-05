@@ -464,7 +464,7 @@ function Merge-CcodSessionAdapters($Adapters) {
             }
             return $snapshots.ToArray()
         }
-        GetProcess={ param($Pid,$StatusEvidence) Get-CcodProcessSnapshot -ProcessId $Pid -StatusEvidence $StatusEvidence }
+        GetProcess={ param($ProcessId,$StatusEvidence) Get-CcodProcessSnapshot -ProcessId $ProcessId -StatusEvidence $StatusEvidence }
         ProcessMatch={ param($Expected,$Actual) Test-CcodProcessMatch -Expected $Expected -Actual $Actual }
         NewTransition={ param($Path,$Source,$Package,$RuntimeId,$RendererPort,$MainPort,$TransactionId) New-CcodTransition -Path $Path -Source $Source -Package $Package -RuntimeId $RuntimeId -RendererPort $RendererPort -MainPort $MainPort -TransactionId $TransactionId }
         SetTransition={ param($Path,$TransactionId,$ExpectedStage,$NewStage,$SpecialIdentity,$RecoveryIdentity,$RendererPort,$MainPort)

@@ -578,16 +578,16 @@ function Get-CcodStaticParentProcessId {
 }
 
 function Get-CcodStaticGenericProcessIdentity {
-    param([int]$Pid)
+    param([int]$ProcessId)
     $process=$null
     try{
-        $process=[Diagnostics.Process]::GetProcessById($Pid);$created=$process.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture);$session=[int]$process.SessionId
-        $cim=Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $Pid" -ErrorAction Stop
+        $process=[Diagnostics.Process]::GetProcessById($ProcessId);$created=$process.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture);$session=[int]$process.SessionId
+        $cim=Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
         if($null -eq $cim){return $null};$owner=Invoke-CimMethod -InputObject $cim -MethodName GetOwnerSid -ErrorAction Stop
         if($null -eq $owner -or $owner.ReturnValue -ne 0 -or $owner.Sid -isnot [string]){return $null}
-        $again=[Diagnostics.Process]::GetProcessById($Pid);try{$againCreated=$again.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)}finally{$again.Dispose()}
+        $again=[Diagnostics.Process]::GetProcessById($ProcessId);try{$againCreated=$again.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)}finally{$again.Dispose()}
         if($againCreated -cne $created){return $null}
-        return [pscustomobject][ordered]@{Pid=[int]$Pid;CreationTimeUtc=$created;SessionId=$session;UserSid=$owner.Sid}
+        return [pscustomobject][ordered]@{Pid=[int]$ProcessId;CreationTimeUtc=$created;SessionId=$session;UserSid=$owner.Sid}
     }catch{return $null}finally{if($null -ne $process){$process.Dispose()}}
 }
 
@@ -710,7 +710,7 @@ function Get-CcodStaticNodeStartAdapters {
         StartProcess={param($Process)$Process.Start()}
         GetStartedIdentity={param($Process)[pscustomobject][ordered]@{Pid=[int]$Process.Id;CreationTimeUtc=$Process.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)}}
         BeginRead={param($Process)[pscustomobject][ordered]@{StdoutTask=$Process.StandardOutput.ReadToEndAsync();StderrTask=$Process.StandardError.ReadToEndAsync()}}
-        GetProcessIdentity={param($Pid)Get-CcodStaticGenericProcessIdentity $Pid}
+        GetProcessIdentity={param($ProcessId)Get-CcodStaticGenericProcessIdentity $ProcessId}
         TerminateStarted={param($Process,$Owned)$Process.Kill();$exited=$Process.WaitForExit(5000);[pscustomobject][ordered]@{Pid=$Owned.Pid;CreationTimeUtc=$Owned.CreationTimeUtc;Exited=[bool]$exited}}
         TerminateUnbound={param($Process)if($Process.HasExited){return $true};$Process.Kill();return [bool]$Process.WaitForExit(5000)}
         DisposeProcess={param($Process)if($Process -is [IDisposable]){$Process.Dispose()}}
@@ -832,7 +832,7 @@ function Get-CcodStaticOwnedNodeAdapters {
         StartNode={param($Path,$Arguments)Start-CcodStaticOwnedNode $Path $Arguments $nodeStartAdapters}.GetNewClosure()
         RecoverStartNode={param($Receipt)Invoke-CcodStaticPartialNodeCleanup $Receipt $nodeStartAdapters}.GetNewClosure()
         WaitNode={param($Owned,$Milliseconds)$Owned.Handle.WaitForExit([int]$Milliseconds)}
-        GetProcessIdentity={param($Pid)Get-CcodStaticGenericProcessIdentity $Pid}
+        GetProcessIdentity={param($ProcessId)Get-CcodStaticGenericProcessIdentity $ProcessId}
         TerminateNode={param($Owned)if(-not $Owned.Handle.HasExited){$Owned.Handle.Kill()};$exited=$Owned.Handle.HasExited -or $Owned.Handle.WaitForExit(5000);[pscustomobject][ordered]@{Pid=$Owned.Pid;CreationTimeUtc=$Owned.CreationTimeUtc;Exited=[bool]$exited}}
         FinishNode={
             param($Owned,$Milliseconds)
@@ -975,9 +975,9 @@ function Get-CcodStaticProbeWorkerAdapters {
         ReadSettings={param($StateRoot,$RuntimeApi)& $RuntimeApi.ReadSettings -StateRoot $StateRoot}
         GetCurrentIdentity={Get-CcodStaticCurrentIdentity}
         GetParentProcessId={Get-CcodStaticParentProcessId}
-        GetProcessIdentity={param($Pid)Get-CcodStaticGenericProcessIdentity $Pid}
+        GetProcessIdentity={param($ProcessId)Get-CcodStaticGenericProcessIdentity $ProcessId}
         GetPackageIdentity={param($RuntimeApi)& $RuntimeApi.GetPackageIdentity}
-        GetTargetSnapshot={param($Pid,$Package,$RuntimeApi)$bound=$Package;& $RuntimeApi.GetProcessSnapshot -ProcessId $Pid -Adapters @{GetPackageIdentity={$bound}.GetNewClosure()}}
+        GetTargetSnapshot={param($ProcessId,$Package,$RuntimeApi)$bound=$Package;& $RuntimeApi.GetProcessSnapshot -ProcessId $ProcessId -Adapters @{GetPackageIdentity={$bound}.GetNewClosure()}}
         StartDeadline={param($Timeout)New-CcodStaticDeadline $Timeout}
         InvokeProbe=$null
         WriteResult={param($Path,$Value,$RuntimeApi)Write-CcodStaticProbeLocalAtomicJson -Path $Path -Value $Value}

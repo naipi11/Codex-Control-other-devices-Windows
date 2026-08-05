@@ -1208,11 +1208,23 @@ try {
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($workerScript,[ref]$tokens,[ref]$errors)
         Assert-CcodEqual 0 @($errors).Count 'worker parses without errors'
         Assert-CcodEqual 'RequestPath,ResultPath' (($ast.ParamBlock.Parameters.Name.VariablePath.UserPath)-join ',') 'production CLI exposes only framing paths'
+        $paramNames=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.ParameterAst]},$true)|ForEach-Object{$_.Name.VariablePath.UserPath})
+        Assert-CcodEqual 0 @($paramNames|Where-Object{$_ -ieq 'Pid'}).Count 'worker avoids the read-only automatic PID variable name'
         $forbidden=@('SessionEngine.psm1','TransitionJournal.psm1','SessionController.ps1','Invoke-CcodApplySession','Invoke-CcodRepairRenderer','Invoke-CcodRecoverSession','Start-CcodProcess','Stop-CcodProcessIfMatch','Start-Process','Stop-Process','Write-CcodSettings','Write-CcodStatus','Write-CcodVerifiedPackages','Set-CcodAutomationEnabled','Set-CcodCandidateCompatibleOptIn')
         $commands=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object{$_.GetCommandName()}|Where-Object{$_})
         foreach($name in $forbidden){Assert-CcodTrue ($commands -cnotcontains $name) "worker has no forbidden command $name"}
         $strings=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.StringConstantExpressionAst]},$true)|ForEach-Object{$_.Value})
         foreach($module in @('SessionEngine.psm1','TransitionJournal.psm1','SessionController.ps1')){Assert-CcodTrue ($strings -cnotcontains $module) "worker never imports $module"}
+    }
+
+    Invoke-CcodTest 'production process identity binding avoids the read-only PID variable collision' {
+        $identity=$null
+        try{$identity=Get-CcodStaticGenericProcessIdentity -ProcessId $PID}catch{}
+        Assert-CcodTrue ($null -ne $identity) 'generic process identity must resolve without overwriting the automatic PID variable'
+        Assert-CcodEqual $PID $identity.Pid 'identity resolves the exact current process'
+        Assert-CcodTrue ($identity.CreationTimeUtc -is [string] -and -not [string]::IsNullOrWhiteSpace($identity.CreationTimeUtc)) 'identity creation time is present'
+        Assert-CcodTrue ($identity.UserSid -is [string] -and $identity.UserSid -ceq ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) 'identity owner SID is exact'
+        Assert-CcodEqual ([int](Get-Process -Id $PID).SessionId) $identity.SessionId 'identity session is exact'
     }
 } catch {
     Write-Error $_

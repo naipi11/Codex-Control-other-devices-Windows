@@ -152,7 +152,7 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.EnumerateProcessIds={Get-CcodChatGptProcessIds}
     $defaults.GetProcessSnapshot={param($ProcessId)Get-CcodProcessSnapshot -ProcessId $ProcessId}
     $defaults.GetSupervisorDecision={param($Context)Get-CcodSupervisorDecision -Context $Context}
-    $defaults.AddObservedEvent={param($Observed,$Pid,$Created)Add-CcodObservedEvent -ObservedKeys $Observed -ProcessId $Pid -CreationTimeUtc $Created}
+    $defaults.AddObservedEvent={param($Observed,$ProcessId,$Created)Add-CcodObservedEvent -ObservedKeys $Observed -ProcessId $ProcessId -CreationTimeUtc $Created}
     $defaults.CompleteControllerRun={param($Result,$TransactionId,$Action,$RuntimeId)Complete-CcodControllerRun -Result $Result -ExpectedTransactionId $TransactionId -ExpectedAction $Action -ExpectedRuntimeId $RuntimeId}
     $defaults.GetTrayPresentation={param($Arguments)Get-CcodTrayPresentation @Arguments}
     $defaults.NewQueue={param($Kind)Write-Output -NoEnumerate ([Collections.Concurrent.ConcurrentQueue[object]]::new())}
@@ -171,7 +171,7 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.PollWorker={param($Slot)Get-CcodWorkerPoll -Slot $Slot}
     $defaults.ReadWorkerResult={param($Path)Read-CcodWorkerResult -Path $Path}
     $defaults.WaitWorker={param($Slot,$TimeoutMilliseconds)Wait-CcodWorkerExit -Slot $Slot -TimeoutMilliseconds $TimeoutMilliseconds}
-    $defaults.GetWorkerIdentity={param($Pid)Get-CcodWorkerIdentity -Pid $Pid}
+    $defaults.GetWorkerIdentity={param($ProcessId)Get-CcodWorkerIdentity -Pid $ProcessId}
     $defaults.TerminateWorker={param($Slot)Stop-CcodWorkerProcess -Slot $Slot}
     $defaults.DisposeWorker={param($Slot)Close-CcodWorkerHandle -Slot $Slot}
     $defaults.DeleteWorkerFile={param($Path)Remove-CcodWorkerFile -Path $Path}

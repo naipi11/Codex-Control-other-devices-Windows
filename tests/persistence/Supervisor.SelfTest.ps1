@@ -338,12 +338,23 @@ Invoke-CcodTest 'routes Repair StaticProbe and Apply through the one worker slot
 Invoke-CcodTest 'keeps production defaults lazy and source free of forbidden direct mutations' {
     $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($supervisorPath,[ref]$tokens,[ref]$errors)
     Assert-CcodEqual 0 @($errors).Count 'Supervisor parses cleanly'
+    $paramNames=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.ParameterAst]},$true)|ForEach-Object{$_.Name.VariablePath.UserPath})
+    Assert-CcodEqual 0 @($paramNames|Where-Object{$_ -ieq 'Pid'}).Count 'supervisor adapter callbacks avoid the read-only automatic PID variable name'
     $commands=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object{$_.GetCommandName()}|Where-Object{$_})
     foreach($forbidden in @('Get-AppxPackage','Stop-Process','Start-Process','schtasks.exe','Set-ItemProperty','New-ItemProperty','netsh.exe')){
         Assert-CcodEqual 0 @($commands|Where-Object{$_ -ceq $forbidden}).Count "$forbidden is absent from Supervisor AST"
     }
     $loadedSystemTypes=@('System.Windows.Forms.Application'|Where-Object{$_ -as [type]})
     Assert-CcodEqual 0 $loadedSystemTypes.Count 'fake tests do not load WinForms'
+}
+
+Invoke-CcodTest 'production worker identity adapter avoids the read-only PID variable collision' {
+    $adapters=Get-CcodSupervisorAdapters
+    $identity=$null
+    try{$identity=& $adapters.GetWorkerIdentity $PID}catch{}
+    Assert-CcodTrue ($null -ne $identity) 'worker identity adapter must resolve without overwriting the automatic PID variable'
+    Assert-CcodEqual $PID $identity.Pid 'worker identity resolves the exact current process'
+    Assert-CcodTrue ($identity.CreationTimeUtc -is [string] -and -not [string]::IsNullOrWhiteSpace($identity.CreationTimeUtc)) 'worker identity creation time is present'
 }
 
 
