@@ -29,6 +29,13 @@ function Write-CcodUiFixtureJson {
     Set-CcodUiFixtureText $Root $Name ($Value|ConvertTo-Json -Depth 4)
 }
 
+function New-CcodUiReorderedStrings {
+    param($Strings)
+    $reordered=[ordered]@{'Status.Waiting'=$Strings.'Status.Waiting';'Tray.Title'=$Strings.'Tray.Title'}
+    foreach($property in $Strings.PSObject.Properties){if($property.Name -cne 'Status.Waiting' -and $property.Name -cne 'Tray.Title'){$reordered[$property.Name]=$property.Value}}
+    return [pscustomobject]$reordered
+}
+
 $results=[Collections.Generic.List[object]]::new()
 
 $results.Add((Invoke-CcodTest 'resolves exact locales and exposes a fixed catalog shape' {
@@ -57,6 +64,9 @@ $results.Add((Invoke-CcodTest 'rejects malformed catalog fixtures and falls back
             @{Name='order';Value=([pscustomobject][ordered]@{locale='zh-CN';schemaVersion=1;strings=$base.strings})},
             @{Name='schema';Value=([pscustomobject][ordered]@{schemaVersion=2;locale='zh-CN';strings=$base.strings})},
             @{Name='nonstring';Mutate={param($v)$v.strings.'Tray.Title'=1}},
+            @{Name='strings-extra';Mutate={param($v)$v.strings|Add-Member -NotePropertyName 'Extra.Key' -NotePropertyValue 'extra'}},
+            @{Name='strings-missing';Mutate={param($v)[void]$v.strings.PSObject.Properties.Remove('Tray.Title')}},
+            @{Name='strings-order';Mutate={param($v)$v.strings=New-CcodUiReorderedStrings $v.strings}},
             @{Name='control';Mutate={param($v)$v.strings.'Tray.Title'="bad`nvalue"}},
             @{Name='oversized';Mutate={param($v)$v.strings.'Tray.Title'=('x'*301)}},
             @{Name='malformed';Text='{'}
@@ -96,4 +106,7 @@ $results.Add((Invoke-CcodTest 'rejects reparse and root containment violations' 
     } finally {if([IO.Directory]::Exists($linkRoot)){[IO.Directory]::Delete($linkRoot)};if([IO.Directory]::Exists($resources)){Remove-Item -LiteralPath $resources -Recurse -Force}}
 }))
 
+if($env:CCOD_UI_SELFTEST_FORCE_FAILURE -ceq '1'){$results.Add([pscustomobject]@{Name='forced failed result object';Ok=$false})}
 foreach($result in $results){Write-Host $(if($result.Ok){'PASS '}else{'FAIL '})$result.Name}
+$failed=@($results|Where-Object {-not $_.Ok})
+if($failed.Count -gt 0){throw ('UI_LOCALIZATION_SELF_TEST_FAILED: '+($failed.Name -join ', '))}
