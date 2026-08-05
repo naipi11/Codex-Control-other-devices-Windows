@@ -193,6 +193,52 @@ function Write-CcodSessionDiagnostic {
     try{& $Adapter.WriteLog $Paths.SessionLogPath ($record|ConvertTo-Json -Depth 4 -Compress)|Out-Null;$Result.logFile=$Paths.SessionLogPath}catch{}
 }
 
+function ConvertTo-CcodManagedArgument {
+    param([Parameter(Mandatory)][string]$Argument)
+    $quoted=[Text.StringBuilder]::new();[void]$quoted.Append('"');$backslashes=0
+    foreach($character in $Argument.ToCharArray()){
+        if($character -eq [char]'\'){$backslashes++;continue}
+        if($character -eq [char]'"'){[void]$quoted.Append(('\' * (($backslashes*2)+1)));[void]$quoted.Append('"');$backslashes=0;continue}
+        if($backslashes -gt 0){[void]$quoted.Append(('\' * $backslashes));$backslashes=0}
+        [void]$quoted.Append($character)
+    }
+    if($backslashes -gt 0){[void]$quoted.Append(('\' * ($backslashes*2)))}
+    [void]$quoted.Append('"');return $quoted.ToString()
+}
+
+function Invoke-CcodManagedNode {
+    param([Parameter(Mandatory)][string]$NodePath,[Parameter(Mandatory)][string[]]$Arguments)
+    $startInfo=[Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName=$NodePath
+    $startInfo.Arguments=(($Arguments | ForEach-Object { ConvertTo-CcodManagedArgument -Argument $_ }) -join ' ')
+    $startInfo.UseShellExecute=$false
+    $startInfo.CreateNoWindow=$true
+    $startInfo.RedirectStandardOutput=$true
+    $startInfo.RedirectStandardError=$true
+    $process=[Diagnostics.Process]::new()
+    $result=$null
+    try{
+        $process.StartInfo=$startInfo
+        if(-not $process.Start()){throw 'Could not start Node.js.'}
+        $stdoutTask=$process.StandardOutput.ReadToEndAsync()
+        $stderrTask=$process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $result=[pscustomobject][ordered]@{ExitCode=$process.ExitCode;Stdout=$stdoutTask.Result;Stderr=$stderrTask.Result}
+    }catch{
+        $result=[pscustomobject][ordered]@{ExitCode=-1;Stdout='';Stderr=("MANAGED_NODE_EXCEPTION $($_.Exception.GetType().FullName): $($_.Exception.Message)")}
+    }finally{
+        $process.Dispose()
+        try{
+            $debugDirectory=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'ccod-debug'))
+            [IO.Directory]::CreateDirectory($debugDirectory)|Out-Null
+            $debugPath=[IO.Path]::GetFullPath((Join-Path $debugDirectory 'node-invoke.jsonl'))
+            $record=[pscustomobject][ordered]@{timestampUtc=[DateTime]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture);node=$NodePath;exitCode=$result.ExitCode;stdout=$result.Stdout;stderr=$result.Stderr}
+            [IO.File]::AppendAllText($debugPath,($record|ConvertTo-Json -Depth 6 -Compress)+"`n",[Text.UTF8Encoding]::new($false))
+        }catch{}
+    }
+    return $result
+}
+
 function ConvertTo-CcodSessionPackage($Probe) {
     if ($null -eq $Probe) { return $null }
     [pscustomobject][ordered]@{ fullName=$Probe.PackageFullName; familyName=$Probe.PackageFamilyName; version=$Probe.PackageVersion; appAsarSha256=$Probe.AppAsarSha256 }
@@ -475,12 +521,7 @@ function Merge-CcodSessionAdapters($Adapters) {
         StopProcess={ param($Expected,$StatusEvidence,$TimeoutMilliseconds) Stop-CcodProcessIfMatch -Expected $Expected -StatusEvidence $StatusEvidence -TimeoutMilliseconds $TimeoutMilliseconds }
         GetPort={ param($Excluded) Get-CcodAvailableLoopbackPort -ExcludedPorts $Excluded }
         StartSpecial={ param($RendererPort,$MainPort,$TimeoutMilliseconds) Start-CcodProcess -Mode Special -RendererPort $RendererPort -MainPort $MainPort -StartupTimeoutMilliseconds $TimeoutMilliseconds }
-        InvokeNode={ param($NodePath,$Arguments)
-            $stderrPath=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("ccod-node-$([guid]::NewGuid().ToString('N')).err")))
-            try{$output=@(& $NodePath @Arguments 2>$stderrPath);$exitCode=$LASTEXITCODE;$stderr=if([IO.File]::Exists($stderrPath)){[IO.File]::ReadAllText($stderrPath)}else{''}}
-            finally{if([IO.File]::Exists($stderrPath)){[IO.File]::Delete($stderrPath)}}
-            [pscustomobject][ordered]@{ExitCode=$exitCode;Stdout=($output -join "`n");Stderr=$stderr}
-        }
+        InvokeNode={ param($NodePath,$Arguments) Invoke-CcodManagedNode -NodePath $NodePath -Arguments @($Arguments) }
         WriteStatus={ param($StateRoot,$Status,$LiveProbe) Write-CcodStatus -StateRoot $StateRoot -Status $Status -LiveProbeResult $LiveProbe }
         ReadVerified={ param($StateRoot) Read-CcodVerifiedPackages -StateRoot $StateRoot }
         WriteVerified={ param($StateRoot,$Verified) Write-CcodVerifiedPackages -StateRoot $StateRoot -VerifiedPackages $Verified }
@@ -568,12 +609,7 @@ function Merge-CcodInspectionAdapters($Adapters) {
             if($null -ne $Status -and $null -ne $Status.session -and $Status.session.sessionState -ceq 'Active'){return $Status.session.codex}
             return $null
         }
-        InvokeNode={param($NodePath,$Arguments)
-            $stderrPath=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("ccod-inspect-node-$([guid]::NewGuid().ToString('N')).err")))
-            try{$output=@(& $NodePath @Arguments 2>$stderrPath);$exitCode=$LASTEXITCODE;$stderr=if([IO.File]::Exists($stderrPath)){[IO.File]::ReadAllText($stderrPath)}else{''}}
-            finally{if([IO.File]::Exists($stderrPath)){[IO.File]::Delete($stderrPath)}}
-            [pscustomobject][ordered]@{ExitCode=$exitCode;Stdout=($output -join "`n");Stderr=$stderr}
-        }
+        InvokeNode={param($NodePath,$Arguments) Invoke-CcodManagedNode -NodePath $NodePath -Arguments @($Arguments)}
         CurrentIdentity={
             $current=[Diagnostics.Process]::GetCurrentProcess();try{$sessionId=[string]$current.SessionId}finally{$current.Dispose()}
             $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$identity.User.Value}finally{$identity.Dispose()}
