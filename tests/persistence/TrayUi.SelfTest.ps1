@@ -755,4 +755,13 @@ $results.Add((Invoke-CcodTest 'executes only extracted production WMI action AST
     Assert-CcodTrue ($text.Contains('$watcherAttemptJobs[$SourceIdentifier]')) 'attempt cleanup retains source-bound job identity for retry'
 }))
 
+
+$results += Invoke-CcodTest 'production tray icon paths dispose temporary handles and use OrderedDictionary Contains' {
+    $text = Get-Content -LiteralPath $modulePath -Raw
+    Assert-CcodTrue ($text.Contains('$temporary.Dispose()')) 'CloneIcon disposes the temporary FromHandle icon'
+    Assert-CcodTrue ($text.Contains('Icons.Contains($color')) 'icon map uses OrderedDictionary Contains, not ContainsKey'
+    Assert-CcodTrue (-not $text.Contains('Icons.ContainsKey(')) 'no OrderedDictionary ContainsKey misuse remains'
+    Assert-CcodTrue ($text.Contains('$iconCleanupFailed -and -not $context.Icons.Contains($color')) 'icon cleanup failure is non-fatal after a successful clone'
+}
+
 $results|ForEach-Object{"PASS $($_.Name)"}

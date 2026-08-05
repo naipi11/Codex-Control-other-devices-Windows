@@ -72,13 +72,8 @@ function Invoke-CcodSupervisorAdapterCapture {
         }
     }catch{$threw=$true}
     finally{
-        $historyChanged=$global:Error.Count -ne $startingErrors.Count
-        if(-not $historyChanged){
-            for($index=0;$index -lt $startingErrors.Count;$index++){
-                if(-not [object]::ReferenceEquals($startingErrors[$index],$global:Error[$index])){$historyChanged=$true;break}
-            }
-        }
-        if($historyChanged){$threw=$true}
+        # WinForms/WMI adapters can append non-terminating records to $Error without failing.
+        # Preserve caller history; only stream items and terminating throws count as adapter failure.
         $global:Error.Clear();foreach($entry in $startingErrors){[void]$global:Error.Add($entry)}
     }
     return [pscustomobject]@{Threw=[bool]$threw;Items=@($items)}

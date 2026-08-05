@@ -354,5 +354,25 @@ $results += Invoke-CcodTest 'bootstrap contains no Codex process, package, or ta
     }
 }
 
+
+$results += Invoke-CcodTest 'launches the supervisor child with an explicit STA apartment' {
+    $source = Get-Content -LiteralPath $bootstrapScript -Raw
+    Assert-CcodTrue ($source.Contains('-STA -File')) 'bootstrap supervisor launch arguments include -STA before -File'
+    Assert-CcodTrue ($source.Contains('-NoProfile -ExecutionPolicy Bypass -STA -File')) 'bootstrap uses the exact STA launch argument prefix'
+    Assert-CcodTrue (-not $source.Contains('-NoProfile -ExecutionPolicy Bypass -File "')) 'bootstrap no longer launches the supervisor without -STA'
+}
+
+
+$results += Invoke-CcodTest 'defaults InstallRoot to the bootstrap script directory for task launches' {
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($bootstrapScript, [ref]$tokens, [ref]$parseErrors)
+    Assert-CcodExactEqual 0 @($parseErrors).Count 'bootstrap parses before InstallRoot default audit'
+    $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'InstallRoot' } | Select-Object -First 1
+    Assert-CcodTrue ($null -ne $param) 'InstallRoot parameter exists'
+    Assert-CcodTrue (-not $param.Attributes.Where({ $_.TypeName.Name -ceq 'Parameter' -and $_.NamedArguments.Where({ $_.ArgumentName -ceq 'Mandatory' -and $_.Argument.Extent.Text -match 'true' }) }).Count) 'InstallRoot is not mandatory'
+    Assert-CcodTrue ($param.DefaultValue.Extent.Text -match 'PSScriptRoot') 'InstallRoot defaults to PSScriptRoot for scheduled-task launches'
+}
+
 $results | Format-Table -AutoSize
 Write-Host ("Bootstrap self-test passed: {0}" -f $results.Count)

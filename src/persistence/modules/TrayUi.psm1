@@ -188,7 +188,16 @@ function Get-CcodTrayDefaultAdapters {
         }
     }
     $defaults.GetHicon={param($Bitmap)$Bitmap.GetHicon()}
-    $defaults.CloneIcon={param($Hicon,$Color,$Size)$temporary=[Drawing.Icon]::FromHandle($Hicon);$temporary.Clone()}
+    $defaults.CloneIcon={
+        param($Hicon,$Color,$Size)
+        $temporary=$null
+        try{
+            $temporary=[Drawing.Icon]::FromHandle($Hicon)
+            $temporary.Clone()
+        }finally{
+            if($null -ne $temporary){$temporary.Dispose()}
+        }
+    }
     $defaults.DestroyIcon={
         param($Hicon)
         if(-not ('CcodTrayNativeMethods' -as [type])){Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CcodTrayNativeMethods { [DllImport("user32.dll", SetLastError=true)] public static extern bool DestroyIcon(IntPtr hIcon); }' -ErrorAction Stop}
@@ -524,7 +533,8 @@ function New-CcodTrayContext {
                     $iconCleanupFailed=$false
                     if($hicon -ne [IntPtr]::Zero){try{Invoke-CcodTrayAdapter $adapter.DestroyIcon @($hicon) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'}catch{$iconCleanupFailed=$true}}
                     if($null -ne $bitmap){try{Invoke-CcodTrayAdapter $adapter.DisposeIconResource @($bitmap) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'}catch{$iconCleanupFailed=$true}}
-                    if($iconCleanupFailed){Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
+                    # Temporary GDI cleanup must not abort tray creation after a successful clone.
+                    if($iconCleanupFailed -and -not $context.Icons.Contains($color+':'+$size)){Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
                 }
             }
         }
@@ -563,7 +573,11 @@ function New-CcodTrayContext {
         try{$context.State='Open'}finally{[Threading.Monitor]::Exit($context.QueueGate)}
         return $context
     }catch{
+        $createError = $_
         try{Close-CcodTrayContext -Context $context|Out-Null}catch{}
+        if ($createError.FullyQualifiedErrorId -and ($createError.FullyQualifiedErrorId -split ',')[0] -cmatch '^CCOD_') {
+            throw $createError
+        }
         Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'
     }
 }

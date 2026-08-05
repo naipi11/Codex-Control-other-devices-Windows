@@ -364,4 +364,25 @@ Invoke-CcodTest 'default adapters keep imported modules visible for lease acquis
         }
     }
 }
+
+Invoke-CcodTest 'adapter capture ignores nonterminating $Error pollution from successful adapters' {
+    $adapters = Get-CcodSupervisorDefaultAdapters
+    $adapters.Polluted = {
+        $global:Error.Insert(0, [Management.Automation.ErrorRecord]::new(
+            [InvalidOperationException]::new('noise'),
+            'CCOD_TEST_NOISE',
+            [Management.Automation.ErrorCategory]::NotSpecified,
+            $null
+        ))
+        [pscustomobject][ordered]@{SchemaVersion=1;Value='ok'}
+    }
+    $before = @($global:Error)
+    $result = Invoke-CcodSupervisorAdapter $adapters.Polluted @() 1
+    Assert-CcodEqual 'ok' $result.Value 'successful polluted adapter still returns its object'
+    Assert-CcodEqual $before.Count $global:Error.Count 'caller error history count is restored'
+    if ($before.Count -gt 0) {
+        Assert-CcodTrue ([object]::ReferenceEquals($before[0], $global:Error[0])) 'caller error history head is restored'
+    }
+}
+
 Write-Output "Supervisor self-tests passed: $($results.Count)"
