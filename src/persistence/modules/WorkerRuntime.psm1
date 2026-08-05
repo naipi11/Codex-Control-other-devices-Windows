@@ -73,15 +73,14 @@ function Start-CcodWorkerProcess {
         Throw-CcodWorkerRuntimeError 'CCOD_WORKER_SCRIPT_MISSING' 'Worker script does not exist' $ScriptPath
     }
     $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + [string]$ScriptPath + '" -RequestPath "' + [string]$RequestPath + '" -ResultPath "' + [string]$ResultPath + '"'
-    $parameters = @{
-        FilePath = [string]$PowerShellPath
-        ArgumentList = $arguments
-        WindowStyle = 'Hidden'
-        PassThru = $true
-        ErrorAction = 'Stop'
-    }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [string]$PowerShellPath
+    $startInfo.Arguments = $arguments
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.CreateNoWindow = $true
+    $startInfo.UseShellExecute = $false
     try {
-        $process = Start-Process @parameters
+        $process = [Diagnostics.Process]::Start($startInfo)
     } catch {
         Throw-CcodWorkerRuntimeError 'CCOD_WORKER_START_FAILED' 'The supervisor worker could not be launched' $ScriptPath
     }

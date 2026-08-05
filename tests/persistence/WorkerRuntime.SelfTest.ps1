@@ -114,6 +114,8 @@ $results += Invoke-CcodTest 'worker process lifecycle starts polls waits and ter
             '[CmdletBinding()]',
             'param([string]$RequestPath,[string]$ResultPath)',
             '$value = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json',
+            '$cim = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $PID) -ErrorAction Stop',
+            '[IO.File]::WriteAllText((Join-Path $env:TEMP "ccod-worker-parent.txt"), [string]$cim.ParentProcessId, [Text.UTF8Encoding]::new($false))',
             ('$payloadText = ' + "'" + $json + "'"),
             '[IO.File]::WriteAllText($ResultPath, $payloadText, [Text.UTF8Encoding]::new($false))',
             '[Console]::Out.WriteLine($payloadText)',
@@ -126,10 +128,21 @@ $results += Invoke-CcodTest 'worker process lifecycle starts polls waits and ter
         Assert-CcodTrue ($receipt.ProcessId -is [int] -and $receipt.ProcessId -ge 1) 'worker start returns a real pid'
         Assert-CcodTrue ($receipt.CreationTimeUtc -cmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$') 'worker start returns canonical creation time'
         Assert-CcodTrue ($null -ne $receipt.Handle) 'worker start returns a process handle'
+        $parentFile = Join-Path $env:TEMP 'ccod-worker-parent.txt'
+        if (Test-Path $parentFile) {
+            Remove-Item $parentFile -Force
+        }
 
         $slot = New-CcodWorkerSlot -Receipt $receipt -RequestPath $requestPath -ResultPath $resultPath -StderrPath $stderrPath
         $completed = Wait-CcodWorkerExit -Slot $slot -TimeoutMilliseconds 20000
         Assert-CcodEqual $true $completed 'worker exits within the wait window'
+        if (Test-Path $parentFile) {
+            $workerParent = [int](Get-Content $parentFile -Raw)
+            Assert-CcodEqual $PID $workerParent 'worker process is a direct child of the calling supervisor'
+            Remove-Item $parentFile -Force
+        } else {
+            throw 'ASSERT_TRUE_FAILED: worker parent identity file was not written'
+        }
         $poll = Get-CcodWorkerPoll -Slot $slot
         Assert-CcodEqual $true $poll.Completed 'poll reports completion'
         Assert-CcodEqual 0 $poll.ExitCode 'worker exits zero'
