@@ -764,4 +764,14 @@ $results += Invoke-CcodTest 'production tray icon paths dispose temporary handle
     Assert-CcodTrue ($text.Contains('$iconCleanupFailed -and -not $context.Icons.Contains($color')) 'icon cleanup failure is non-fatal after a successful clone'
 }
 
+$results += Invoke-CcodTest 'production AttachUiCallback handlers capture the callback scriptblock' {
+    $text = Get-Content -LiteralPath $modulePath -Raw
+    Assert-CcodTrue ($text.Contains('[EventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure()')) 'event handler wraps the callback in a closure so Timer ticks survive the adapter scope'
+    $needle = '[EventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}'
+    $index = $text.IndexOf($needle)
+    Assert-CcodTrue ($index -ge 0) 'event handler needle is present'
+    $tail = $text.Substring($index + $needle.Length, [Math]::Min(24, $text.Length - $index - $needle.Length))
+    Assert-CcodTrue ($tail.StartsWith('.GetNewClosure()')) 'every event handler needle is immediately closed over'
+}
+
 $results|ForEach-Object{"PASS $($_.Name)"}

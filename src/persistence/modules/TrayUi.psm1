@@ -163,7 +163,7 @@ function Get-CcodTrayDefaultAdapters {
     $defaults.StopUiTimer={param($Timer)$Timer.Stop()}
     $defaults.AttachUiCallback={
         param($Object,$EventName,$Callback)
-        $handler=[EventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}
+        $handler=[EventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure()
         if($EventName -ceq 'Tick'){$Object.add_Tick($handler)}else{$Object.add_Click($handler)}
         [pscustomobject][ordered]@{Target=$Object;EventName=$EventName;Handler=$handler}
     }
