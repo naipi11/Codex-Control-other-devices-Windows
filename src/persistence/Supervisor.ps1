@@ -343,8 +343,18 @@ function New-CcodSupervisorControllerRequest {
     if($transactionId -isnot [string] -or $transactionId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'){throw 'transaction identity is invalid'}
     $source=$null
     if($Action -ceq 'Apply'){
-        if($null -eq $Target -or $Target.Pid -isnot [int] -or $Target.Pid -lt 1 -or -not (Test-CcodSupervisorCanonicalUtc $Target.CreationTimeUtc)){throw 'Apply target is invalid'}
-        $source=[pscustomobject][ordered]@{pid=[int]$Target.Pid;creationTimeUtc=[string]$Target.CreationTimeUtc}
+        $sourceFields=@('Pid','CreationTimeUtc','SessionId','UserSid','Path','PackageFamilyName','CommandLine','ParentPid','IsTopLevel','Mode','RendererPort','MainPort')
+        $actual=@($Target.PSObject.Properties.Name)
+        if($null -eq $Target -or ($Target -isnot [pscustomobject]) -or $actual.Count -ne $sourceFields.Count){throw 'Apply target is invalid'}
+        foreach($name in $sourceFields){if($actual -cnotcontains $name){throw 'Apply target is invalid'}}
+        if($Target.Pid -isnot [int] -or $Target.Pid -lt 1 -or -not (Test-CcodSupervisorCanonicalUtc $Target.CreationTimeUtc) -or
+           $Target.SessionId -isnot [int] -or $Target.SessionId -lt 0 -or $Target.UserSid -isnot [string] -or [string]::IsNullOrWhiteSpace($Target.UserSid) -or
+           $Target.Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Target.Path) -or $Target.PackageFamilyName -isnot [string] -or [string]::IsNullOrWhiteSpace($Target.PackageFamilyName) -or
+           $Target.CommandLine -isnot [string] -or
+           ($null -ne $Target.ParentPid -and ($Target.ParentPid -isnot [int] -or $Target.ParentPid -lt 0)) -or
+           $Target.IsTopLevel -isnot [bool] -or -not $Target.IsTopLevel -or $Target.Mode -cne 'Ordinary' -or
+           $null -ne $Target.RendererPort -or $null -ne $Target.MainPort){throw 'Apply target is invalid'}
+        $source=$Target
     }
     [pscustomobject][ordered]@{
         schemaVersion=1;action=$Action;transactionId=$transactionId;runtimeId=$HostState.Layout.RuntimeId

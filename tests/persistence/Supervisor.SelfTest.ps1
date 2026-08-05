@@ -138,6 +138,24 @@ function New-CcodTestTransition {
     }
 }
 
+function New-CcodSupervisorTestSnapshot {
+    param([int]$ProcessId=71,[string]$CreationTimeUtc='2030-02-03T03:01:00.0000000Z')
+    [pscustomobject][ordered]@{
+        Pid=[int]$ProcessId
+        CreationTimeUtc=[string]$CreationTimeUtc
+        SessionId=[int]1
+        UserSid='S-1-5-21-111-222-333-1001'
+        Path='C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0\ChatGPT.exe'
+        PackageFamilyName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0'
+        CommandLine='"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0\ChatGPT.exe"'
+        ParentPid=[int]0
+        IsTopLevel=$true
+        Mode='Ordinary'
+        RendererPort=$null
+        MainPort=$null
+    }
+}
+
 $results=[Collections.Generic.List[string]]::new()
 function Invoke-CcodTest {
     param([string]$Name,[scriptblock]$Body)
@@ -249,7 +267,7 @@ Invoke-CcodTest 'rejects malformed or partial adapter sets before any lifecycle 
 Invoke-CcodTest 'gives Shutdown absolute priority over a slot journal command and decision' {
     $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
     $world.ShutdownSignaled=$true;$world.ActiveJournal=New-CcodTestTransition
-    $world.Decision=[pscustomobject][ordered]@{Action='ApplyOrdinary';Reason='Ready';Target=[pscustomobject]@{Pid=71;CreationTimeUtc='2030-02-03T03:01:00.0000000Z'};AttemptKey='71|2030-02-03T03:01:00.0000000Z';SuppressionKey=$null;EffectiveClassification='CandidateCompatible';RequiresController=$true}
+    $world.Decision=[pscustomobject][ordered]@{Action='ApplyOrdinary';Reason='Ready';Target=(New-CcodSupervisorTestSnapshot);AttemptKey='71|2030-02-03T03:01:00.0000000Z';SuppressionKey=$null;EffectiveClassification='CandidateCompatible';RequiresController=$true}
     $world.CommandQueue.Enqueue([pscustomobject][ordered]@{Kind='ApplyNow';Value=$null;EnqueuedAtUtc='2030-02-03T03:04:05.0000000Z'})
     $hostState.WorkerSlot=[pscustomobject]@{Kind='Controller';ProcessId=501}
     Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
@@ -323,8 +341,8 @@ Invoke-CcodTest 'drains the command queue through the real queue object' {
 Invoke-CcodTest 'routes Repair StaticProbe and Apply through the one worker slot' {
     $cases=@(
         [pscustomobject]@{Decision='RepairRenderer';Kind='Controller';Action='RepairRenderer';Target=$null},
-        [pscustomobject]@{Decision='InspectOrdinary';Kind='StaticProbe';Action='StaticProbe';Target=[pscustomobject]@{Pid=71;CreationTimeUtc='2030-02-03T03:01:00.0000000Z'}},
-        [pscustomobject]@{Decision='ApplyOrdinary';Kind='Controller';Action='Apply';Target=[pscustomobject]@{Pid=71;CreationTimeUtc='2030-02-03T03:01:00.0000000Z'}}
+        [pscustomobject]@{Decision='InspectOrdinary';Kind='StaticProbe';Action='StaticProbe';Target=(New-CcodSupervisorTestSnapshot)},
+        [pscustomobject]@{Decision='ApplyOrdinary';Kind='Controller';Action='Apply';Target=(New-CcodSupervisorTestSnapshot)}
     )
     foreach($case in $cases){
         $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
@@ -333,6 +351,27 @@ Invoke-CcodTest 'routes Repair StaticProbe and Apply through the one worker slot
         Assert-CcodTrue ($world.Calls.Contains("Start:$($case.Kind):$($case.Action)")) "$($case.Decision) maps to exact worker"
         Assert-CcodEqual $case.Kind $hostState.WorkerSlot.Kind "$($case.Decision) owns one slot"
     }
+}
+
+Invoke-CcodTest 'Apply controller request carries the full process snapshot source' {
+    $fixture=New-CcodTickFixture
+    $target=New-CcodSupervisorTestSnapshot
+    $request=New-CcodSupervisorControllerRequest -HostState $fixture.Host -Action 'Apply' -Target $target
+    Assert-CcodEqual 'schemaVersion,action,transactionId,runtimeId,supervisorIdentity,source,existingOnly,rendererPort,mainPort,timeoutMilliseconds,restartOrdinary' (@($request.PSObject.Properties.Name)-join ',') 'Apply request keeps the controller schema'
+    $expected=@('Pid','CreationTimeUtc','SessionId','UserSid','Path','PackageFamilyName','CommandLine','ParentPid','IsTopLevel','Mode','RendererPort','MainPort')
+    Assert-CcodEqual ($expected-join ',') (@($request.source.PSObject.Properties.Name)-join ',') 'Apply source is the full process snapshot'
+    Assert-CcodEqual $target.Pid $request.source.Pid 'source Pid survives'
+    Assert-CcodEqual $target.CreationTimeUtc $request.source.CreationTimeUtc 'source creation time survives'
+    Assert-CcodEqual $target.Path $request.source.Path 'source executable path survives'
+    Assert-CcodTrue ($request.existingOnly -and $request.restartOrdinary -and $null -eq $request.rendererPort -and $null -eq $request.mainPort) 'Apply flags stay consistent'
+}
+
+Invoke-CcodTest 'Apply rejects a partial source target before a worker request is written' {
+    $fixture=New-CcodTickFixture
+    $partial=[pscustomobject][ordered]@{Pid=71;CreationTimeUtc='2030-02-03T03:01:00.0000000Z'}
+    $threw=$false
+    try{New-CcodSupervisorControllerRequest -HostState $fixture.Host -Action 'Apply' -Target $partial|Out-Null}catch{$threw=$true}
+    Assert-CcodTrue $threw 'partial Apply target is rejected'
 }
 
 Invoke-CcodTest 'keeps production defaults lazy and source free of forbidden direct mutations' {
@@ -398,7 +437,7 @@ Invoke-CcodTest 'adapter capture ignores nonterminating $Error pollution from su
 
 Invoke-CcodTest 'worker request ids are canonical D-format GUIDs for probe framing' {
     $fixture = New-CcodTickFixture
-    $target = [pscustomobject][ordered]@{ Pid = 71; CreationTimeUtc = '2030-02-03T03:01:00.0000000Z' }
+    $target = New-CcodSupervisorTestSnapshot
     $slot = Start-CcodSupervisorWorkerSlot -HostState $fixture.Host -Adapters $fixture.Fake.Adapters -Kind 'StaticProbe' -Action 'StaticProbe' -Target $target
     Assert-CcodTrue ($slot.RequestId -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') 'worker request id is a canonical D-format GUID'
     Assert-CcodEqual $slot.RequestId $slot.Request.requestId 'static probe request carries the same request id'
