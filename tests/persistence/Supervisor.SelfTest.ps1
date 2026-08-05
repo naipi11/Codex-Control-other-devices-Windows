@@ -385,4 +385,13 @@ Invoke-CcodTest 'adapter capture ignores nonterminating $Error pollution from su
     }
 }
 
+Invoke-CcodTest 'worker request ids are canonical D-format GUIDs for probe framing' {
+    $fixture = New-CcodTickFixture
+    $target = [pscustomobject][ordered]@{ Pid = 71; CreationTimeUtc = '2030-02-03T03:01:00.0000000Z' }
+    $slot = Start-CcodSupervisorWorkerSlot -HostState $fixture.Host -Adapters $fixture.Fake.Adapters -Kind 'StaticProbe' -Action 'StaticProbe' -Target $target
+    Assert-CcodTrue ($slot.RequestId -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') 'worker request id is a canonical D-format GUID'
+    Assert-CcodEqual $slot.RequestId $slot.Request.requestId 'static probe request carries the same request id'
+    Assert-CcodTrue ($slot.RequestPath.EndsWith("static-probe-$($slot.RequestId).request.json")) 'request path matches StaticProbeWorker framing'
+}
+
 Write-Output "Supervisor self-tests passed: $($results.Count)"

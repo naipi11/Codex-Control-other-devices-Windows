@@ -307,7 +307,7 @@ function New-CcodSupervisorHostState {
 
 function Test-CcodSupervisorWorkerPaths {
     param($Paths,$WorkersRoot,[string]$Kind,[string]$RequestId)
-    if(-not (Test-CcodSupervisorExactProperties $Paths @('RequestPath','ResultPath','StderrPath')) -or $RequestId -cnotmatch '^[0-9a-f]{32}$'){return $false}
+    if(-not (Test-CcodSupervisorExactProperties $Paths @('RequestPath','ResultPath','StderrPath')) -or $RequestId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'){return $false}
     $prefix=if($Kind -ceq 'Controller'){'controller'}elseif($Kind -ceq 'StaticProbe'){'static-probe'}else{return $false}
     $expected=@(
         "$prefix-$RequestId.request.json",
@@ -366,7 +366,7 @@ function New-CcodSupervisorStaticRequest {
 function Start-CcodSupervisorWorkerSlot {
     param($HostState,[hashtable]$Adapters,[ValidateSet('Controller','StaticProbe')][string]$Kind,[string]$Action,$Target)
     if($null -ne $HostState.WorkerSlot){throw 'worker slot is occupied'}
-    $requestId=[guid]::NewGuid().ToString('N')
+    $requestId=[guid]::NewGuid().ToString('D')
     $paths=New-CcodSupervisorWorkerPaths $HostState $Kind $requestId
     $request=if($Kind -ceq 'StaticProbe'){New-CcodSupervisorStaticRequest $HostState $Target $requestId}else{New-CcodSupervisorControllerRequest $HostState $Action $Target}
     $ownedFiles=[Collections.Generic.List[string]]::new()
