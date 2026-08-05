@@ -100,7 +100,7 @@ function Invoke-CcodSupervisorNullableAdapter {
 function Import-CcodSupervisorModules {
     if($null -eq $script:CcodSupervisorScriptPath){throw 'supervisor script path is unavailable'}
     $moduleRoot=Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'modules'
-    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','SupervisorEngine.psm1','TrayUi.psm1')){
+    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','SupervisorEngine.psm1','TrayUi.psm1','WorkerRuntime.psm1')){
         Import-Module -Name (Join-Path $moduleRoot $leaf) -Force -ErrorAction Stop
     }
 }
@@ -147,9 +147,9 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.IsEventSignaled={param($Event)[bool]$Event.Handle.WaitOne(0)}
     $defaults.SignalEvent={param($Event)[void]$Event.Handle.Set()}
     $defaults.CloseEvent={param($Event)$Event.Handle.Dispose();$Event.Disposed=$true}
-    $defaults.ReadState={param($StateRoot)Read-CcodState -StateRoot $StateRoot}
+    $defaults.ReadState={param($StateRoot,$SuppressionKey)if([string]::IsNullOrWhiteSpace($SuppressionKey)){Read-CcodState -StateRoot $StateRoot}else{Read-CcodState -StateRoot $StateRoot -CurrentSuppressionKey $SuppressionKey}}
     $defaults.ReadJournal={param($Path)Read-CcodTransition -Path $Path}
-    $defaults.EnumerateProcessIds={@(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue|ForEach-Object{try{[int]$_.Id}finally{$_.Dispose()}})}
+    $defaults.EnumerateProcessIds={Get-CcodChatGptProcessIds}
     $defaults.GetProcessSnapshot={param($ProcessId)Get-CcodProcessSnapshot -ProcessId $ProcessId}
     $defaults.GetSupervisorDecision={param($Context)Get-CcodSupervisorDecision -Context $Context}
     $defaults.AddObservedEvent={param($Observed,$Pid,$Created)Add-CcodObservedEvent -ObservedKeys $Observed -ProcessId $Pid -CreationTimeUtc $Created}
@@ -165,9 +165,29 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.CloseTray={param($Tray)Close-CcodTrayContext -Context $Tray}
     $defaults.NewWatcher={param($Queue,$OnFull)Start-CcodProcessWatcher -Queue $Queue -OnFullReconciliationRequired $OnFull}
     $defaults.StopWatcher={param($Watcher)Stop-CcodProcessWatcher -Watcher $Watcher}
-    foreach($name in @('GetWorkerLeafState','WriteWorkerRequest','StartWorker','PollWorker','ReadWorkerResult','WaitWorker','GetWorkerIdentity','TerminateWorker','DisposeWorker','DeleteWorkerFile','ClearFailedAttempt','SetAutomationEnabled','SetCandidateOptIn','OpenLogs')){
-        $operation=$name;$defaults[$name]={throw "Supervisor operation is not initialized: $operation"}.GetNewClosure()
+    $defaults.GetWorkerLeafState={param($Path)Get-CcodWorkerLeafState -Path $Path}
+    $defaults.WriteWorkerRequest={param($Path,$Request)Write-CcodWorkerRequest -Path $Path -Request $Request}
+    $defaults.StartWorker={param($Kind,$ScriptPath,$RequestPath,$ResultPath,$StderrPath,$Request,$PowerShellPath)Start-CcodWorkerProcess -Kind $Kind -ScriptPath $ScriptPath -RequestPath $RequestPath -ResultPath $ResultPath -StderrPath $StderrPath -PowerShellPath $PowerShellPath}
+    $defaults.PollWorker={param($Slot)Get-CcodWorkerPoll -Slot $Slot}
+    $defaults.ReadWorkerResult={param($Path)Read-CcodWorkerResult -Path $Path}
+    $defaults.WaitWorker={param($Slot,$TimeoutMilliseconds)Wait-CcodWorkerExit -Slot $Slot -TimeoutMilliseconds $TimeoutMilliseconds}
+    $defaults.GetWorkerIdentity={param($Pid)Get-CcodWorkerIdentity -Pid $Pid}
+    $defaults.TerminateWorker={param($Slot)Stop-CcodWorkerProcess -Slot $Slot}
+    $defaults.DisposeWorker={param($Slot)Close-CcodWorkerHandle -Slot $Slot}
+    $defaults.DeleteWorkerFile={param($Path)Remove-CcodWorkerFile -Path $Path}
+    $defaults.ClearFailedAttempt={
+        param($StateRoot,$Package,$Hash,$Runtime,$Timestamp)
+        Clear-CcodFailedPackageAttempt -StateRoot $StateRoot -PackageFullName $Package -AppAsarSha256 $Hash -RuntimeId $Runtime -ExpectedConfirmedAtUtc $Timestamp
     }
+    $defaults.SetAutomationEnabled={
+        param($StateRoot,$Enabled)
+        Set-CcodAutomationEnabled -StateRoot $StateRoot -Enabled ([bool]$Enabled)
+    }
+    $defaults.SetCandidateOptIn={
+        param($StateRoot,$Enabled)
+        Set-CcodCandidateCompatibleOptIn -StateRoot $StateRoot -Enabled ([bool]$Enabled)
+    }
+    $defaults.OpenLogs={param($Path)Open-CcodLogDirectory -Path $Path}
     $defaults.WriteLog={param($Record)if($null -ne $script:CcodSupervisorLogPath){Write-CcodRotatingLog -Path $script:CcodSupervisorLogPath -Message ($Record|ConvertTo-Json -Depth 4 -Compress)}}
     $defaults.RunUiContext={param($Tray)Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop;[Windows.Forms.Application]::Run($Tray.ApplicationContext)}
     return $defaults
@@ -278,6 +298,7 @@ function New-CcodSupervisorHostState {
         Identity=$Identity;Layout=$Layout;CommandQueue=$CommandQueue;EventQueue=$EventQueue;Clock=$Clock
         ObservedKeys=[ordered]@{};AttemptKeys=[ordered]@{};RecoveryIgnoreKeys=[ordered]@{};SuppressionKeys=[ordered]@{}
         StaticCache=[ordered]@{};TransportRetries=[ordered]@{};TerminalRecoveries=[ordered]@{}
+        PackageFullName=$null;AppAsarSha256=$null;Classification=$null
         Ordinary=[object[]]@();Special=[object[]]@();SpecialNeedsInspect=$false;SpecialProof=$null
         SessionState='Idle';BlockAutomaticActions=$false;Reason='Idle';ForceReconcile=$true;NextReconcileMilliseconds=[long]0;LastDecision=$null
         RuntimeCleanupCodes=[Collections.Generic.List[string]]::new()
@@ -402,7 +423,26 @@ function Invoke-CcodSupervisorPollSlot {
             if(($fromStdout|ConvertTo-Json -Depth 20 -Compress) -cne ($result|ConvertTo-Json -Depth 20 -Compress)){throw 'worker frames differ'}
             if($slot.Kind -ceq 'Controller'){
                 $reduced=Invoke-CcodSupervisorAdapter $Adapters.CompleteControllerRun @($result,$slot.Request.transactionId,$slot.Action,$slot.RuntimeId) 1
-                if($null -ne $reduced){$HostState.SessionState=[string]$reduced.SessionState;$HostState.BlockAutomaticActions=[bool]$reduced.BlockAutomaticActions;$HostState.Reason=[string]$reduced.Reason}
+                if($null -ne $reduced){
+                    $HostState.SessionState=[string]$reduced.SessionState
+                    $HostState.BlockAutomaticActions=[bool]$reduced.BlockAutomaticActions
+                    $HostState.Reason=[string]$reduced.Reason
+                    if(-not [string]::IsNullOrWhiteSpace([string]$reduced.AttemptKey)){$HostState.AttemptKeys[[string]$reduced.AttemptKey]=$true}
+                    if(-not [string]::IsNullOrWhiteSpace([string]$reduced.RecoveryIgnoreKey)){$HostState.RecoveryIgnoreKeys[[string]$reduced.RecoveryIgnoreKey]=$true}
+                    if(-not [string]::IsNullOrWhiteSpace([string]$reduced.SuppressionKey)){$HostState.SuppressionKeys[[string]$reduced.SuppressionKey]=$true}
+                }
+            }elseif($slot.Kind -ceq 'StaticProbe'){
+                if($result.ok -and $null -ne $result.probe){
+                    $HostState.PackageFullName=[string]$result.probe.packageFullName
+                    $HostState.AppAsarSha256=[string]$result.probe.appAsarSha256
+                    $HostState.Classification=[string]$result.probe.staticClassification
+                    if($null -ne $slot.Request.targetIdentity){
+                        $attemptKey=('{0}|{1}' -f $slot.Request.targetIdentity.pid,$slot.Request.targetIdentity.creationTimeUtc)
+                        $HostState.StaticCache[$attemptKey]=$result
+                    }
+                }else{
+                    $HostState.Classification='UnknownOrIncompatible'
+                }
             }
         }
     }catch{$HostState.SessionState='Error';$HostState.BlockAutomaticActions=$true;$HostState.Reason='WorkerFramingFailed'}
@@ -419,7 +459,32 @@ function Invoke-CcodSupervisorCommand {
         'SetAutomationEnabled' {if($Command.Value -is [bool]){Invoke-CcodSupervisorAdapter $Adapters.SetAutomationEnabled @($HostState.Layout.StateRoot,[bool]$Command.Value) 0;$HostState.ForceReconcile=$true}}
         'SetCandidateCompatibleOptIn' {if($Command.Value -is [bool]){Invoke-CcodSupervisorAdapter $Adapters.SetCandidateOptIn @($HostState.Layout.StateRoot,[bool]$Command.Value) 0;$HostState.ForceReconcile=$true}}
         'OpenLogs' {Invoke-CcodSupervisorAdapter $Adapters.OpenLogs @($HostState.Layout.LogDirectory) 0}
-        'ManualRetry' {$HostState.ForceReconcile=$true}
+        'ManualRetry' {
+            $retryKey=$null
+            if(-not [string]::IsNullOrWhiteSpace([string]$HostState.PackageFullName) -and
+               -not [string]::IsNullOrWhiteSpace([string]$HostState.AppAsarSha256)){
+                $retryKey=('{0}|{1}|{2}' -f $HostState.PackageFullName,$HostState.AppAsarSha256,$HostState.Layout.RuntimeId)
+                $verified=$HostState.State.VerifiedPackages
+                $record=$null
+                if($null -ne $verified -and $null -ne $verified.packages){
+                    $property=$verified.packages.PSObject.Properties[$retryKey]
+                    if($null -ne $property -and $null -ne $property.Value){$record=$property.Value}
+                }
+                if($null -ne $record -and $record.dynamicOutcome -ceq 'Failed'){
+                    try{
+                        Invoke-CcodSupervisorAdapter $Adapters.ClearFailedAttempt @(
+                            $HostState.Layout.StateRoot,$HostState.PackageFullName,$HostState.AppAsarSha256,
+                            $HostState.Layout.RuntimeId,[string]$record.confirmedAtUtc
+                        ) 1|Out-Null
+                    }catch{}
+                }
+                if($HostState.SuppressionKeys.Contains($retryKey)){[void]$HostState.SuppressionKeys.Remove($retryKey)}
+                $HostState.Classification=$null
+                $HostState.ForceReconcile=$true
+            }else{
+                $HostState.ForceReconcile=$true
+            }
+        }
         'Uninstall' {return}
     }
 }
@@ -437,7 +502,7 @@ function New-CcodSupervisorEngineContext {
         AutomaticCandidateTrialsAllowed=$(if($null -ne $state.PSObject.Properties['AutomaticCandidateTrialsAllowed']){[bool]$state.AutomaticCandidateTrialsAllowed}else{$false})
         StateDamageBlocksActions=[bool]$damaged;ControllerRunning=[bool]($null -ne $HostState.WorkerSlot);ActiveTransaction=$HostState.Journal
         CurrentUserSid=$HostState.Identity.UserSid;CurrentSessionId=[int]$HostState.Identity.SessionId;RuntimeId=$HostState.Layout.RuntimeId
-        PackageFullName=$null;AppAsarSha256=$null;Classification=$null;VerifiedPackages=$verified
+        PackageFullName=$HostState.PackageFullName;AppAsarSha256=$HostState.AppAsarSha256;Classification=$HostState.Classification;VerifiedPackages=$verified
         Ordinary=[object[]]@($HostState.Ordinary);Special=[object[]]@($HostState.Special)
         AttemptKeys=$HostState.AttemptKeys;RecoveryIgnoreKeys=$HostState.RecoveryIgnoreKeys;SuppressionKeys=$HostState.SuppressionKeys
     }
@@ -471,7 +536,15 @@ function Invoke-CcodSupervisorTick {
         return
     }
     if($null -ne $HostState.WorkerSlot){Invoke-CcodSupervisorPollSlot $HostState $Adapters;return}
-    $HostState.State=Invoke-CcodSupervisorAdapter $Adapters.ReadState @($HostState.Layout.StateRoot) 1
+    $readStateArguments=[object[]]::new(2)
+    $readStateArguments[0]=$HostState.Layout.StateRoot
+    if(-not [string]::IsNullOrWhiteSpace([string]$HostState.PackageFullName) -and
+       -not [string]::IsNullOrWhiteSpace([string]$HostState.AppAsarSha256)){
+        $readStateArguments[1]=('{0}|{1}|{2}' -f $HostState.PackageFullName,$HostState.AppAsarSha256,$HostState.Layout.RuntimeId)
+    }else{
+        $readStateArguments[1]=$null
+    }
+    $HostState.State=Invoke-CcodSupervisorAdapter $Adapters.ReadState $readStateArguments 1
     if($null -eq $HostState.State){throw 'state read is invalid'}
     $HostState.Journal=Invoke-CcodSupervisorNullableAdapter $Adapters.ReadJournal @($HostState.Layout.TransitionPath)
     if($null -ne $HostState.Journal){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Recover' $null|Out-Null;return}

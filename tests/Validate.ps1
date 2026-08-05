@@ -88,10 +88,12 @@ foreach ($required in @(
     'src\persistence\bootstrap.ps1',
     'src\persistence\modules\InstallLifecycle.psm1',
     'src\persistence\modules\ScheduledTask.psm1',
+    'src\persistence\modules\WorkerRuntime.psm1',
     'tests\PersistenceSelfTest.ps1',
     'tests\persistence\Bootstrap.SelfTest.ps1',
     'tests\persistence\ScheduledTask.SelfTest.ps1',
-    'tests\persistence\InstallLifecycle.SelfTest.ps1'
+    'tests\persistence\InstallLifecycle.SelfTest.ps1',
+    'tests\persistence\WorkerRuntime.SelfTest.ps1'
 )) {
     if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $required) -PathType Leaf)) {
         $failures.Add("Required repository file is missing: $required")
