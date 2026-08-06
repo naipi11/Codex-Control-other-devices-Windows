@@ -11,7 +11,7 @@ $script:CcodSupervisorLogPath=$null
 $script:CcodSupervisorAdapterNames=@(
     'GetIdentity','ResolveLayout','StartClock','GetElapsedMilliseconds','GetUtcNow',
     'EnterLease','ExitLease','OpenReadyEvent','OpenShutdownEvent','IsEventSignaled','SignalEvent','CloseEvent',
-    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','EnumerateProcessIds','GetProcessSnapshot','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','GetTrayPresentation',
+    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','StartUninstall','EnumerateProcessIds','GetProcessSnapshot','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','GetTrayPresentation',
     'NewQueue','GetQueueCount','TryDequeue','NewTray','SetTrayPresentation','StopTrayTimer','RequestUiExit','CloseTray','NewWatcher','StopWatcher',
     'GetWorkerLeafState','WriteWorkerRequest','StartWorker','PollWorker','ReadWorkerResult','WaitWorker','GetWorkerIdentity','TerminateWorker','DisposeWorker','DeleteWorkerFile',
     'ClearFailedAttempt','SetAutomationEnabled','SetCandidateOptIn','OpenLogs','WriteLog','RunUiContext'
@@ -61,6 +61,13 @@ function Test-CcodSupervisorDiagnosticRecord {
     return $Value -is [Management.Automation.ErrorRecord] -or $Value -is [Management.Automation.WarningRecord] -or
         $Value -is [Management.Automation.VerboseRecord] -or $Value -is [Management.Automation.DebugRecord] -or
         $Value -is [Management.Automation.InformationRecord]
+}
+
+function Test-CcodSupervisorUninstallReceipt {
+    param($Receipt)
+    return (Test-CcodSupervisorExactProperties $Receipt @('Started','Pid','CreationTimeUtc')) -and
+        $Receipt.Started -is [bool] -and $Receipt.Started -and $Receipt.Pid -is [int] -and $Receipt.Pid -gt 0 -and
+        (Test-CcodSupervisorCanonicalUtc $Receipt.CreationTimeUtc)
 }
 
 function Test-CcodSupervisorUiText {
@@ -143,7 +150,7 @@ function Invoke-CcodSupervisorNullableAdapter {
 function Import-CcodSupervisorModules {
     if($null -eq $script:CcodSupervisorScriptPath){throw 'supervisor script path is unavailable'}
     $moduleRoot=Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'modules'
-    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','SupervisorEngine.psm1','UiLocalization.psm1','UiPreferences.psm1','TrayUi.psm1','WorkerRuntime.psm1')){
+    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','SupervisorEngine.psm1','UiLocalization.psm1','UiPreferences.psm1','TrayUi.psm1','UiActions.psm1','WorkerRuntime.psm1')){
         Import-Module -Name (Join-Path $moduleRoot $leaf) -Force -ErrorAction Stop
     }
 }
@@ -197,6 +204,7 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.GetSystemCultureName={[Globalization.CultureInfo]::CurrentUICulture.Name}
     $defaults.GetUiCatalog={param($ResourcesRoot,$LanguageMode,$SystemCultureName)Get-CcodUiCatalog -ResourcesRoot $ResourcesRoot -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
     $defaults.ShowTrayError={param($Tray,$Catalog,$Key)Show-CcodTrayError -Context $Tray -Catalog $Catalog -Key $Key}
+    $defaults.StartUninstall={param($InstallRoot,$RuntimeRoot,$PowerShellPath)Start-CcodTrayUninstall -InstallRoot $InstallRoot -RuntimeRoot $RuntimeRoot -PowerShellPath $PowerShellPath}
     $defaults.EnumerateProcessIds={Get-CcodChatGptProcessIds}
     $defaults.GetProcessSnapshot={param($ProcessId)Get-CcodProcessSnapshot -ProcessId $ProcessId}
     $defaults.GetSupervisorDecision={param($Context)Get-CcodSupervisorDecision -Context $Context}
@@ -515,7 +523,7 @@ function Get-CcodSupervisorResourcesRoot {
 }
 
 function Write-CcodSupervisorUiFailure {
-    param($HostState,[hashtable]$Adapters,[ValidateSet('LanguageChange','LanguagePreferenceRollback','LanguageTrayRollback','ErrorDialog')][string]$Stage,[string]$Code)
+    param($HostState,[hashtable]$Adapters,[ValidateSet('LanguageChange','LanguagePreferenceRollback','LanguageTrayRollback','UninstallStart','ErrorDialog')][string]$Stage,[string]$Code)
     try{
         $now=Invoke-CcodSupervisorAdapter $Adapters.GetUtcNow @() 1
         if($now -is [DateTimeOffset]){$timestamp=$now.UtcDateTime.ToString('o',[Globalization.CultureInfo]::InvariantCulture)}
@@ -622,7 +630,16 @@ function Invoke-CcodSupervisorCommand {
                 $HostState.ForceReconcile=$true
             }
         }
-        'Uninstall' {return}
+        'Uninstall' {
+            try{
+                $receipt=Invoke-CcodSupervisorAdapter $Adapters.StartUninstall @($HostState.Layout.InstallRoot,$HostState.Layout.RuntimeRoot,$HostState.Layout.PowerShellPath) 1
+                if(-not (Test-CcodSupervisorUninstallReceipt $receipt)){throw 'uninstall receipt is invalid'}
+            }catch{
+                Write-CcodSupervisorUiFailure $HostState $Adapters 'UninstallStart' 'CCOD_UNINSTALL_START_FAILED'
+                try{Invoke-CcodSupervisorAdapter $Adapters.ShowTrayError @($HostState.Tray,$HostState.UiCatalog,'Error.UninstallStart') 0}catch{Write-CcodSupervisorUiFailure $HostState $Adapters 'ErrorDialog' 'CCOD_UI_ERROR_DIALOG_FAILED'}
+            }
+            return
+        }
     }
 }
 

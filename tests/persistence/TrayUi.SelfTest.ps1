@@ -119,6 +119,7 @@ function New-CcodTrayFakeAdapters {
             $state.BoldFonts.Add($font);$font
         }.GetNewClosure()
         ShowErrorDialog={param($Title,$Message)$state.Dialogs.Add([pscustomobject][ordered]@{Title=$Title;Message=$Message})}.GetNewClosure()
+        ConfirmUninstall={param($Title,$Message)$true}
         DestroyIcon={param($Hicon)$state.Calls.Add("DestroyIcon:$([long]$Hicon)")}.GetNewClosure()
         DisposeIconResource={param($Resource)if($Resource.PSObject.Properties['Kind']){$state.Calls.Add("DisposeResource:$($Resource.Kind):$($Resource.Name)")}else{$state.Calls.Add("DisposeIcon:$($Resource.Color):$($Resource.Size)")};$Resource.Disposed=$true;$Resource.DisposeCount++}.GetNewClosure()
         NewSourceIdentifier={$state.SourceSeed++;'ccod-process-'+('{0:x32}' -f $state.SourceSeed)}.GetNewClosure()
@@ -262,6 +263,47 @@ $results.Add((Invoke-CcodTest 'production adapters create the required native me
         Assert-CcodEqual 'System.Windows.Forms.ToolStripMenuItem' $objects[2].GetType().FullName 'command is native ToolStripMenuItem'
         Assert-CcodEqual 'System.Windows.Forms.ToolStripSeparator' $objects[3].GetType().FullName 'separator is native ToolStripSeparator'
     }finally{foreach($object in $objects){& $production.DisposeUiObject $object}}
+}))
+
+$results.Add((Invoke-CcodTest 'confirms localized uninstall with native warning defaults and queues only the accepted click with no callback output' {
+    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
+    $confirm=[pscustomobject]@{Results=[Collections.Generic.Queue[bool]]::new();Calls=[Collections.Generic.List[object]]::new()}
+    $confirm.Results.Enqueue($false);$confirm.Results.Enqueue($true)
+    $fake.Adapters.ConfirmUninstall={
+        param($Title,$Message)
+        $confirm.Calls.Add([pscustomobject][ordered]@{Title=$Title;Message=$Message})
+        [bool]$confirm.Results.Dequeue()
+    }.GetNewClosure()
+    try{
+        $context=TrayUi\New-CcodTrayContext -CommandQueue $queue -OnTick {} -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US -Adapters $fake.Adapters
+        TrayUi\Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation) -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        Assert-CcodEqual 0 @(& $context.Items.Uninstall.Events.Click $context.Items.Uninstall $null).Count 'cancel callback emits no output'
+        Assert-CcodEqual 0 $queue.Count 'cancel queues nothing'
+        Assert-CcodEqual 0 @(& $context.Items.Uninstall.Events.Click $context.Items.Uninstall $null).Count 'confirmed callback emits no output'
+        Assert-CcodEqual 1 $queue.Count 'confirmation queues exactly once'
+        Assert-CcodEqual 2 $confirm.Calls.Count 'both clicks ask for confirmation once'
+        foreach($call in $confirm.Calls){
+            Assert-CcodEqual 'Uninstall Codex connection supervisor?' $call.Title 'localized confirmation title is exact'
+            Assert-CcodEqual 'This stops the supervisor. A managed Codex session will restart normally. Device keys are kept by default.' $call.Message 'localized confirmation message is exact'
+        }
+        $command=$queue.Dequeue()
+        Assert-CcodEqual 'Kind,Value,EnqueuedAtUtc' (($command.PSObject.Properties.Name)-join ',') 'confirmed command shape is exact and ordered'
+        Assert-CcodEqual 'Uninstall' $command.Kind 'confirmed command kind'
+        Assert-CcodEqual $null $command.Value 'confirmed command has no value'
+        Assert-CcodEqual '2030-02-03T04:05:06.0000000Z' $command.EnqueuedAtUtc 'confirmed command timestamp is canonical UTC'
+
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $native=[pscustomobject]@{Calls=[Collections.Generic.List[object]]::new()}
+        $show={
+            param($Message,$Title,$Buttons,$Icon,$DefaultButton)
+            $native.Calls.Add([pscustomobject][ordered]@{Message=$Message;Title=$Title;Buttons=$Buttons;Icon=$Icon;DefaultButton=$DefaultButton})
+            [Windows.Forms.DialogResult]::Yes
+        }.GetNewClosure()
+        $accepted=& (Get-Module TrayUi) {param($Show)Invoke-CcodTrayUninstallConfirmation -Title 'title' -Message 'message' -ShowDialog $Show} $show
+        Assert-CcodEqual $true $accepted 'native Yes result confirms'
+        Assert-CcodEqual 1 $native.Calls.Count 'native dialog is invoked once'
+        Assert-CcodEqual 'message,title,YesNo,Warning,Button2' "$($native.Calls[0].Message),$($native.Calls[0].Title),$($native.Calls[0].Buttons),$($native.Calls[0].Icon),$($native.Calls[0].DefaultButton)" 'native dialog is YesNo Warning default No'
+    }finally{if($null -ne $context){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
 $results.Add((Invoke-CcodTest 'builds the exact grouped bilingual menu and applies semantic visibility and truth state' {

@@ -322,11 +322,55 @@ Invoke-CcodTest 'rejects malformed or partial adapter sets before any lifecycle 
     Assert-CcodEqual 0 $fake2.World.Calls.Count 'extra adapter set invokes nothing'
 }
 
+Invoke-CcodTest 'routes one uninstall launch and contains launch receipt and dialog failures without stopping Supervisor or Codex' {
+    $success=New-CcodTickFixture;$successWorld=$success.Fake.World;$successHost=$success.Host
+    $successState=$successHost.State;$successQueue=$successHost.CommandQueue;$successTray=$successHost.Tray;$successSession=$successHost.SessionState
+    $starts=[Collections.Generic.List[object]]::new()
+    $success.Fake.Adapters.StartUninstall={
+        param($InstallRoot,$RuntimeRoot,$PowerShellPath)
+        $starts.Add([pscustomobject][ordered]@{InstallRoot=$InstallRoot;RuntimeRoot=$RuntimeRoot;PowerShellPath=$PowerShellPath})
+        [pscustomobject][ordered]@{Started=$true;Pid=[int]5050;CreationTimeUtc='2030-02-03T03:06:00.0000000Z'}
+    }.GetNewClosure()
+    $command=[pscustomobject][ordered]@{Kind='Uninstall';Value=$null;EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
+    Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $successHost -Adapters $success.Fake.Adapters).Count 'successful uninstall routing emits no output'
+    Assert-CcodEqual 1 $starts.Count 'one verified launcher call occurs'
+    Assert-CcodEqual $success.Fake.Layout.InstallRoot $starts[0].InstallRoot 'launcher receives exact install root'
+    Assert-CcodEqual $success.Fake.Layout.RuntimeRoot $starts[0].RuntimeRoot 'launcher receives exact runtime root'
+    Assert-CcodEqual $success.Fake.Layout.PowerShellPath $starts[0].PowerShellPath 'launcher receives exact PowerShell host'
+    Assert-CcodEqual $false $successHost.ShutdownRequested 'successful launch does not request direct shutdown'
+    Assert-CcodEqual 0 @($successWorld.Calls|Where-Object{$_ -ceq 'Exit:UI'}).Count 'successful launch does not request direct UI exit'
+    Assert-CcodTrue ([object]::ReferenceEquals($successState,$successHost.State) -and [object]::ReferenceEquals($successQueue,$successHost.CommandQueue) -and [object]::ReferenceEquals($successTray,$successHost.Tray) -and $successHost.SessionState -ceq $successSession) 'successful launch leaves Supervisor and current Codex state running'
+
+    foreach($mode in @('Throw','Malformed')){
+        $failure=New-CcodTickFixture;$world=$failure.Fake.World;$failureHost=$failure.Host
+        $oldState=$failureHost.State;$oldQueue=$failureHost.CommandQueue;$oldTray=$failureHost.Tray;$oldSession=$failureHost.SessionState;$oldBlock=$failureHost.BlockAutomaticActions
+        if($mode -ceq 'Throw'){$failure.Fake.Adapters.StartUninstall={param($InstallRoot,$RuntimeRoot,$PowerShellPath)throw 'PRIVATE_UNINSTALL_PATH_OR_TOKEN'}}
+        else{$failure.Fake.Adapters.StartUninstall={param($InstallRoot,$RuntimeRoot,$PowerShellPath)[pscustomobject][ordered]@{Started='true';Pid=0;CreationTimeUtc='bad';Extra='secret'}}}
+        Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $failureHost -Adapters $failure.Fake.Adapters).Count "$mode launcher failure emits no output"
+        Assert-CcodEqual 'UninstallStart|CCOD_UNINSTALL_START_FAILED' (($world.UiFailureRecords|ForEach-Object{"$($_.stage)|$($_.code)"})-join ',') "$mode launcher failure logs one stable record"
+        Assert-CcodTrue (($world.UiFailureRecords|ConvertTo-Json -Compress) -cnotmatch 'PRIVATE|Fake|CodexControlOtherDevices|secret|token') "$mode log contains no exception path or input"
+        Assert-CcodEqual 1 $world.TrayErrors.Count "$mode launcher failure shows one localized error"
+        Assert-CcodEqual 'Error.UninstallStart' $world.TrayErrors[0].Key "$mode error key is exact"
+        Assert-CcodTrue ([object]::ReferenceEquals($failureHost.UiCatalog,$world.TrayErrors[0].Catalog)) "$mode dialog uses the existing validated catalog"
+        Assert-CcodEqual $false $failureHost.ShutdownRequested "$mode failure does not request direct shutdown"
+        Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -ceq 'Exit:UI'}).Count "$mode failure does not request UI exit"
+        Assert-CcodTrue ([object]::ReferenceEquals($oldState,$failureHost.State) -and [object]::ReferenceEquals($oldQueue,$failureHost.CommandQueue) -and [object]::ReferenceEquals($oldTray,$failureHost.Tray) -and $failureHost.SessionState -ceq $oldSession -and $failureHost.BlockAutomaticActions -eq $oldBlock) "$mode failure leaves Supervisor and current Codex state running"
+    }
+
+    $dialog=New-CcodTickFixture;$dialogWorld=$dialog.Fake.World;$dialogHost=$dialog.Host
+    $dialog.Fake.Adapters.StartUninstall={param($InstallRoot,$RuntimeRoot,$PowerShellPath)throw 'PRIVATE_START_SECRET'}
+    $dialog.Fake.Adapters.ShowTrayError={param($Tray,$Catalog,$Key)throw 'PRIVATE_DIALOG_SECRET'}
+    Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $dialogHost -Adapters $dialog.Fake.Adapters).Count 'dialog failure is contained with no output'
+    Assert-CcodEqual 'CCOD_UNINSTALL_START_FAILED,CCOD_UI_ERROR_DIALOG_FAILED' (@($dialogWorld.UiFailureRecords.code)-join ',') 'dialog failure is logged separately after launch failure'
+    Assert-CcodEqual $false $dialogHost.ShutdownRequested 'dialog failure leaves Supervisor running'
+    Assert-CcodEqual 0 @($dialogWorld.Calls|Where-Object{$_ -ceq 'Exit:UI'}).Count 'dialog failure leaves tray loop running'
+}
+
 Invoke-CcodTest 'adds the exact localization adapters and host fields at the frozen boundaries' {
     $names=Get-CcodSupervisorAdapterNames
     $first=[Array]::IndexOf($names,'ReadUiPreference')
     Assert-CcodTrue ($first -ge 0) 'ReadUiPreference adapter exists'
-    Assert-CcodEqual 'ReadUiPreference,SetUiLanguageMode,GetSystemCultureName,GetUiCatalog,ShowTrayError' (@($names[$first..($first+4)])-join ',') 'localization adapter order is exact'
+    Assert-CcodEqual 'ReadUiPreference,SetUiLanguageMode,GetSystemCultureName,GetUiCatalog,ShowTrayError,StartUninstall' (@($names[$first..($first+5)])-join ',') 'localization and uninstall adapter order is exact'
     $fixture=New-CcodTickFixture
     $hostNames=@($fixture.Host.PSObject.Properties.Name)
     $trayIndex=[Array]::IndexOf($hostNames,'Tray')

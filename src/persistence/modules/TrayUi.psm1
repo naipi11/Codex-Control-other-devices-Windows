@@ -5,7 +5,7 @@ Import-Module (Join-Path $PSScriptRoot 'UiLocalization.psm1') -ErrorAction Stop
 $script:TrayAdapterNames=@(
     'GetUtcNow','GetQueueCount','TryEnqueue','TryDequeue','GetManagedThreadId','GetApartmentState',
     'CreateUiObject','AddUiChild','SetUiProperty','GetUiProperty','SetUiVisible','StartUiTimer','StopUiTimer',
-    'AttachUiCallback','DetachUiCallback','DisposeUiObject','ExitUiContext','ShowErrorDialog',
+    'AttachUiCallback','DetachUiCallback','DisposeUiObject','ExitUiContext','ShowErrorDialog','ConfirmUninstall',
     'CreateBitmap','DrawBridgeIcon','GetHicon','CloneIcon','CloneIconBitmap','CreateBoldFont','DestroyIcon','DisposeIconResource',
     'NewSourceIdentifier','RegisterTrace','RegisterIntrinsic','CleanupWatcherAttempt','DetachWatcherCallback','UnregisterWatcher',
     'RemoveWatcherJob','DisposeWatcherResource'
@@ -133,6 +133,24 @@ function Invoke-CcodTraySideEffectAdapter {
     return [pscustomobject][ordered]@{Completed=[bool](-not $capture.Threw);Succeeded=[bool]$succeeded}
 }
 
+function Invoke-CcodTrayUninstallConfirmation {
+    param(
+        [Parameter(Mandatory)][string]$Title,[Parameter(Mandatory)][string]$Message,
+        [AllowNull()][scriptblock]$ShowDialog=$null
+    )
+    if($null -eq $ShowDialog){
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        return [bool]([Windows.Forms.MessageBox]::Show(
+            $Message,$Title,
+            [Windows.Forms.MessageBoxButtons]::YesNo,
+            [Windows.Forms.MessageBoxIcon]::Warning,
+            [Windows.Forms.MessageBoxDefaultButton]::Button2
+        ) -eq [Windows.Forms.DialogResult]::Yes)
+    }
+    $result=& $ShowDialog $Message $Title ([Windows.Forms.MessageBoxButtons]::YesNo) ([Windows.Forms.MessageBoxIcon]::Warning) ([Windows.Forms.MessageBoxDefaultButton]::Button2)
+    return [bool]($result -eq [Windows.Forms.DialogResult]::Yes)
+}
+
 function Invoke-CcodOwnedTrayAdapter {
     param([scriptblock]$Callback,[object[]]$Arguments,[scriptblock]$CleanupCallback,[scriptblock]$Validator,[string]$FailureCode,[string]$Surface='Tray')
     $capture=Invoke-CcodTrayAdapterCapture $Callback $Arguments
@@ -220,6 +238,7 @@ function Get-CcodTrayDefaultAdapters {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         [Windows.Forms.MessageBox]::Show($Message,$Title,[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null
     }
+    $defaults.ConfirmUninstall={param($Title,$Message)Invoke-CcodTrayUninstallConfirmation -Title $Title -Message $Message}
     $defaults.CreateBitmap={param($Color,$Size)Add-Type -AssemblyName System.Drawing -ErrorAction Stop;New-Object Drawing.Bitmap($Size,$Size)}
     $defaults.DrawBridgeIcon={
         param($Bitmap,$Color,$Size)
@@ -452,8 +471,11 @@ function Test-CcodContextObject {
             $Context.Separators -isnot [Collections.Specialized.OrderedDictionary] -or $Context.UnownedControls -isnot [Collections.Generic.List[object]] -or
            $Context.Icons -isnot [Collections.Specialized.OrderedDictionary] -or $Context.Callbacks -isnot [Collections.Generic.List[object]] -or
            $Context.CleanupCodes -isnot [Collections.Generic.List[string]] -or
-           -not (Test-CcodOrderedKeys $Context.CommandValues @('AutomationChecked','CandidateOptInChecked')) -or
+           -not (Test-CcodOrderedKeys $Context.CommandValues @('AutomationChecked','CandidateOptInChecked','UninstallTitle','UninstallMessage')) -or
            $Context.CommandValues.AutomationChecked -isnot [bool] -or $Context.CommandValues.CandidateOptInChecked -isnot [bool] -or
+           $Context.CommandValues.UninstallTitle -isnot [string] -or $Context.CommandValues.UninstallTitle.Length -lt 1 -or $Context.CommandValues.UninstallTitle.Length -gt 300 -or
+           $Context.CommandValues.UninstallMessage -isnot [string] -or $Context.CommandValues.UninstallMessage.Length -lt 1 -or $Context.CommandValues.UninstallMessage.Length -gt 300 -or
+           (Test-CcodControlCharacter $Context.CommandValues.UninstallTitle) -or (Test-CcodControlCharacter $Context.CommandValues.UninstallMessage) -or
            -not (Test-CcodCleanupReceipt $Context.CloseReceipt 'Closed' $script:TrayCleanupCodeAllowlist)){return $false}
         if($Context.State -ceq 'Closed'){
             if($null -ne $Context.OnTick -or $null -eq $Context.CloseReceipt){return $false}
@@ -557,6 +579,9 @@ function Invoke-CcodTrayCommandCallback {
         }elseif($Kind -ceq 'SetUiLanguage'){
             if($ExplicitValue -isnot [string] -or $script:TrayUiLanguageModes -cnotcontains $ExplicitValue){return}
             $value=$ExplicitValue
+        }elseif($Kind -ceq 'Uninstall'){
+            $confirmed=Invoke-CcodTrayAdapter $Context.Adapters.ConfirmUninstall @($Context.CommandValues.UninstallTitle,$Context.CommandValues.UninstallMessage) 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
+            if($confirmed -isnot [bool] -or -not $confirmed){return}
         }
         $timestamp=Get-CcodCanonicalUtc $Context.Adapters 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $command=[pscustomobject][ordered]@{Kind=$Kind;Value=$value;EnqueuedAtUtc=$timestamp}
@@ -585,6 +610,8 @@ function Set-CcodTrayLocalizedControlText {
     Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.LanguageItems.System,'Text',$Strings['Menu.FollowSystem']) 0 $FailureCode 'Tray'
     Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.LanguageItems['zh-CN'],'Text',$Strings['Menu.Chinese']) 0 $FailureCode 'Tray'
     Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.LanguageItems['en-US'],'Text',$Strings['Menu.English']) 0 $FailureCode 'Tray'
+    $Context.CommandValues.UninstallTitle=$Strings['Dialog.UninstallTitle']
+    $Context.CommandValues.UninstallMessage=$Strings['Dialog.UninstallMessage']
 }
 
 function Set-CcodTrayLanguageChecks {
@@ -615,7 +642,10 @@ function New-CcodTrayContext {
         CommandOverflowed=$false;CallbackFailure=$false;QueueGate=New-Object object;CloseGate=New-Object object;OnTick=$OnTick;Adapters=$adapter
         ApplicationContext=$null;Timer=$null;NotifyIcon=$null;Menu=$null;Rows=[ordered]@{};Items=[ordered]@{};LanguageItems=[ordered]@{};Separators=[ordered]@{}
         UnownedControls=[Collections.Generic.List[object]]::new();Icons=[ordered]@{};TitleImage=$null;TitleFont=$null
-        Callbacks=[Collections.Generic.List[object]]::new();CommandValues=[ordered]@{AutomationChecked=$false;CandidateOptInChecked=$false}
+        Callbacks=[Collections.Generic.List[object]]::new();CommandValues=[ordered]@{
+            AutomationChecked=$false;CandidateOptInChecked=$false
+            UninstallTitle=$localized['Dialog.UninstallTitle'];UninstallMessage=$localized['Dialog.UninstallMessage']
+        }
         CleanupCodes=[Collections.Generic.List[string]]::new();CloseReceipt=$null
     }
     $context.PSObject.TypeNames.Insert(0,'Ccod.TrayContext')
