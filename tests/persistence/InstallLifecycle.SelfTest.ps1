@@ -8,6 +8,8 @@ if (-not (Test-Path -LiteralPath $installLifecycleModule -PathType Leaf)) {
 }
 Import-Module $installLifecycleModule -Force
 Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\StateStore.psm1') -Force
+Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\UiPreferences.psm1') -Force
+Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\RuntimeManifest.psm1') -Force
 
 function New-CcodLifecycleTempRoot {
     return (Join-Path ([IO.Path]::GetTempPath()) ("ccod-lifecycle-" + [guid]::NewGuid().ToString('N')))
@@ -21,6 +23,7 @@ function New-CcodLifecycleSourceFixture {
 
     New-Item -ItemType Directory -Path (Join-Path $Root 'src\runtime') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $Root 'src\persistence\modules') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $Root 'src\persistence\resources') -Force | Out-Null
     [IO.File]::WriteAllText(
         (Join-Path $Root 'package.json'),
         (@{ name = 'codex-control-other-devices-windows'; version = $Version; private = $true } | ConvertTo-Json -Depth 4),
@@ -37,9 +40,11 @@ function New-CcodLifecycleSourceFixture {
     [IO.File]::WriteAllText((Join-Path $Root 'src\persistence\Supervisor.ps1'), "# Supervisor fixture $Version`r`n", [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $Root 'src\persistence\SessionController.ps1'), "# Controller fixture`r`n", [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $Root 'src\persistence\StaticProbeWorker.ps1'), "# Worker fixture`r`n", [Text.UTF8Encoding]::new($false))
-    foreach ($module in @('PersistenceIO.psm1', 'RuntimeManifest.psm1', 'CompatibilityProbe.psm1', 'ProcessControl.psm1', 'StateStore.psm1', 'TransitionJournal.psm1', 'SessionEngine.psm1', 'SupervisorEngine.psm1', 'KernelObjects.psm1', 'TrayUi.psm1', 'ScheduledTask.psm1')) {
+    foreach ($module in @('PersistenceIO.psm1', 'RuntimeManifest.psm1', 'CompatibilityProbe.psm1', 'ProcessControl.psm1', 'StateStore.psm1', 'TransitionJournal.psm1', 'SessionEngine.psm1', 'SupervisorEngine.psm1', 'KernelObjects.psm1', 'TrayUi.psm1', 'UiLocalization.psm1', 'UiPreferences.psm1', 'ScheduledTask.psm1')) {
         [IO.File]::WriteAllText((Join-Path $Root "src\persistence\modules\$module"), "# $module`r`n", [Text.UTF8Encoding]::new($false))
     }
+    [IO.File]::WriteAllText((Join-Path $Root 'src\persistence\resources\ui.en-US.json'), '{"schemaVersion":1,"language":"en-US"}', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $Root 'src\persistence\resources\ui.zh-CN.json'), '{"schemaVersion":1,"language":"zh-CN"}', [Text.UTF8Encoding]::new($false))
     return $Root
 }
 
@@ -178,6 +183,21 @@ $results += Invoke-CcodTest 'first install stages verifies activates task and pe
         Assert-CcodEqual $true $state.Settings.candidateCompatibleOptIn 'explicit consent persisted'
         Assert-CcodEqual $true $state.Settings.automationEnabled 'automation enabled on first install'
         Assert-CcodEqual $nodePath $state.Settings.nodeCandidates[0] 'verified node candidate persisted'
+        $stateRoot = Join-Path $install 'state'
+        $preference = Read-CcodUiPreference -StateRoot $stateRoot
+        Assert-CcodEqual 'System' $preference.LanguageMode 'first install follows Windows'
+        Assert-CcodEqual $false $preference.FallbackUsed 'first install persisted preference'
+        $runtimeRoot = Join-Path $install "runtime\$($receipt.RuntimeId)"
+        Assert-CcodTrue (Test-Path -LiteralPath (Join-Path $runtimeRoot 'src\persistence\resources\ui.en-US.json') -PathType Leaf) 'English catalog staged'
+        Assert-CcodTrue (Test-Path -LiteralPath (Join-Path $runtimeRoot 'src\persistence\resources\ui.zh-CN.json') -PathType Leaf) 'Chinese catalog staged'
+        $manifest = Test-CcodRuntimeManifest -RuntimeDirectory $runtimeRoot -ExpectedRuntimeId $receipt.RuntimeId
+        Assert-CcodEqual $true $manifest.Valid 'runtime manifest validates staged resources'
+        $english = @($manifest.Manifest.files | Where-Object { $_.path -ceq 'src/persistence/resources/ui.en-US.json' })
+        $chinese = @($manifest.Manifest.files | Where-Object { $_.path -ceq 'src/persistence/resources/ui.zh-CN.json' })
+        Assert-CcodEqual 1 $english.Count 'manifest contains English catalog exactly once'
+        Assert-CcodEqual 1 $chinese.Count 'manifest contains Chinese catalog exactly once'
+        Assert-CcodEqual '662b6067a48cfaeb481ae1a35e02f09fa799fa6386d0f4d2c61c19874a152713' $english[0].sha256 'manifest hashes English catalog'
+        Assert-CcodEqual '5770fe0f20f1623648a185cc7a0a99ff37b6aef6c07426ffc8a984493e0f2a2f' $chinese[0].sha256 'manifest hashes Chinese catalog'
     } finally {
         foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
     }
@@ -193,6 +213,10 @@ $results += Invoke-CcodTest 'upgrade retains one previous runtime and starts the
         $fake = New-CcodLifecycleFake -NodePath $nodePath
         $first = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters
         Set-CcodLifecycleTestStatus -InstallRoot $install -RuntimeId $first.RuntimeId
+        $stateRoot = Join-Path $install 'state'
+        Set-CcodUiLanguageMode -StateRoot $stateRoot -LanguageMode 'en-US' -Adapters @{ UtcNow = { [DateTimeOffset]::Parse('2030-02-03T03:04:06.0000000Z') } } | Out-Null
+        $preferencePath = Join-Path $stateRoot 'ui-preferences.json'
+        $preferenceBytes = [IO.File]::ReadAllBytes($preferencePath)
         [IO.File]::WriteAllText((Join-Path $source 'src\runtime\main-payload.js'), "module.exports = 'fixture-v2';`n", [Text.UTF8Encoding]::new($false))
         $fake2 = New-CcodLifecycleFake -NodePath $nodePath
         $second = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake2.Adapters
@@ -205,6 +229,8 @@ $results += Invoke-CcodTest 'upgrade retains one previous runtime and starts the
         $pointer = Read-CcodLifecycleActivePointer -Root $install
         Assert-CcodEqual $second.RuntimeId $pointer.activeRuntime 'active points at new runtime'
         Assert-CcodEqual $first.RuntimeId $pointer.previousRuntime 'previous points at old runtime'
+        Assert-CcodEqual (($preferenceBytes | ForEach-Object { $_.ToString('x2') }) -join '') (([IO.File]::ReadAllBytes($preferencePath) | ForEach-Object { $_.ToString('x2') }) -join '') 'upgrade preserves valid UI preference bytes'
+        Assert-CcodEqual 'en-US' (Read-CcodUiPreference -StateRoot $stateRoot).LanguageMode 'upgrade retains selected UI language'
         $runtimeRoot = Join-Path $install 'runtime'
         $ids = @(Get-ChildItem -LiteralPath $runtimeRoot -Directory | ForEach-Object { $_.Name } | Sort-Object)
         Assert-CcodEqual (($ids -join '|')) ((@($first.RuntimeId, $second.RuntimeId) | Sort-Object) -join '|') 'only active and previous runtime remain'
@@ -265,6 +291,109 @@ $results += Invoke-CcodTest 'source reparse point fails closed before staging' {
         Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'source reparse never activates'
     } finally {
         foreach ($path in @($source, $install, $nodeRoot, $junctionTarget)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'missing UI catalog fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        [IO.File]::Delete((Join-Path $source 'src\persistence\resources\ui.zh-CN.json'))
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_INCOMPLETE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'missing catalog never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'unknown UI catalog fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        [IO.File]::WriteAllText((Join-Path $source 'src\persistence\resources\ui.fr-FR.json'), '{"schemaVersion":1,"language":"fr-FR"}', [Text.UTF8Encoding]::new($false))
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_INCOMPLETE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'unknown catalog never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'non-catalog resource file fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        [IO.File]::WriteAllText((Join-Path $source 'src\persistence\resources\README.txt'), 'not a catalog', [Text.UTF8Encoding]::new($false))
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_INCOMPLETE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'non-catalog resource file never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'ordinary resource subdirectory fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $source 'src\persistence\resources\locales') -Force | Out-Null
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_INCOMPLETE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'ordinary resource subdirectory never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'UI resource directory reparse fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    $target = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        $resources = Join-Path $source 'src\persistence\resources'
+        [IO.Directory]::Move($resources, $target)
+        cmd /c mklink /J "`"$resources`"" "`"$target`"" | Out-Null
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_REPARSE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'resource directory reparse never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot, $target)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'UI resource file reparse fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    $target = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        $resource = Join-Path $source 'src\persistence\resources\ui.en-US.json'
+        [IO.Directory]::CreateDirectory($target) | Out-Null
+        [IO.File]::Delete($resource)
+        cmd /c mklink /J "`"$resource`"" "`"$target`"" | Out-Null
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_REPARSE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'resource file reparse never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot, $target)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
     }
 }
 
@@ -329,6 +458,63 @@ $results += Invoke-CcodTest 'repair state quarantines damage and resets consent 
         Assert-CcodEqual $false $state.Settings.candidateCompatibleOptIn 'repair resets consent'
         Assert-CcodEqual $nodePath $state.Settings.nodeCandidates[0] 'repair preserves revalidated node candidate'
         Assert-CcodTrue (@(Get-ChildItem -LiteralPath (Join-Path $install 'state') -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.corrupt.*' }).Count -ge 1) 'damaged settings quarantined'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'upgrade and repair preserve malformed UI preference without safety damage' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source -Version '2.0.0-ui-malformed' | Out-Null
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        $first = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters
+        Set-CcodLifecycleTestStatus -InstallRoot $install -RuntimeId $first.RuntimeId
+        $stateRoot = Join-Path $install 'state'
+        $preferencePath = Join-Path $stateRoot 'ui-preferences.json'
+        [byte[]]$malformed = 0x00,0x7b,0xff,0x13,0x0a
+        [IO.File]::WriteAllBytes($preferencePath, $malformed)
+        [IO.File]::WriteAllText((Join-Path $source 'src\runtime\main-payload.js'), "module.exports = 'fixture-ui-malformed-v2';`n", [Text.UTF8Encoding]::new($false))
+        $upgrade = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters (New-CcodLifecycleFake -NodePath $nodePath).Adapters
+        Assert-CcodEqual 'Upgraded' $upgrade.Outcome 'malformed preference does not block ordinary upgrade'
+        Assert-CcodEqual '007bff130a' (([IO.File]::ReadAllBytes($preferencePath) | ForEach-Object { $_.ToString('x2') }) -join '') 'ordinary upgrade preserves malformed UI preference bytes'
+        $repairFake = New-CcodLifecycleFake -NodePath $nodePath
+        $repair = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -RepairState -Adapters $repairFake.Adapters
+        Assert-CcodEqual 'Repaired' $repair.Outcome 'malformed preference does not block repair'
+        Assert-CcodEqual '007bff130a' (([IO.File]::ReadAllBytes($preferencePath) | ForEach-Object { $_.ToString('x2') }) -join '') 'repair preserves malformed UI preference bytes'
+        $state = Read-CcodState -StateRoot $stateRoot
+        Assert-CcodEqual $false $state.Settings.automationEnabled 'repair applies its ordinary safety reset'
+        Assert-CcodEqual 4 (@(Get-ChildItem -LiteralPath $stateRoot -File -ErrorAction Stop | Where-Object { $_.Name -like '*.corrupt.*' })).Count 'repair quarantines only its four safety-state files'
+        Assert-CcodEqual 0 (@(Get-ChildItem -LiteralPath $stateRoot -File -ErrorAction Stop | Where-Object { $_.Name -like 'ui-preferences.json.corrupt.*' })).Count 'repair does not quarantine malformed UI preference'
+        Assert-CcodEqual 0 $repairFake.World.TaskInstalled 'repair does not reinstall task for malformed preference'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'legacy missing UI preference remains absent across upgrade and follows Windows' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source -Version '2.0.0-ui-legacy' | Out-Null
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        $first = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters
+        Set-CcodLifecycleTestStatus -InstallRoot $install -RuntimeId $first.RuntimeId
+        $stateRoot = Join-Path $install 'state'
+        $preferencePath = Join-Path $stateRoot 'ui-preferences.json'
+        [IO.File]::Delete($preferencePath)
+        [IO.File]::WriteAllText((Join-Path $source 'src\runtime\main-payload.js'), "module.exports = 'fixture-ui-legacy-v2';`n", [Text.UTF8Encoding]::new($false))
+        $upgrade = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters (New-CcodLifecycleFake -NodePath $nodePath).Adapters
+        Assert-CcodEqual 'Upgraded' $upgrade.Outcome 'legacy preference absence does not block upgrade'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath $preferencePath)) 'legacy missing preference remains absent after upgrade'
+        $preference = Read-CcodUiPreference -StateRoot $stateRoot
+        Assert-CcodEqual 'System' $preference.LanguageMode 'legacy missing preference follows Windows'
+        Assert-CcodEqual $true $preference.FallbackUsed 'legacy missing preference uses safe fallback'
     } finally {
         foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
     }

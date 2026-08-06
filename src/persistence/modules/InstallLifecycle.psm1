@@ -6,6 +6,7 @@ Import-Module (Join-Path $PSScriptRoot 'StateStore.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ScheduledTask.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'KernelObjects.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'CompatibilityProbe.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'UiPreferences.psm1') -Force
 
 $script:CcodLifecycleTaskName = 'Codex Control Other Devices Supervisor'
 $script:CcodLifecycleDefaultInstallRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'CodexControlOtherDevices'
@@ -110,6 +111,33 @@ function Get-CcodLifecycleSourceFiles {
             Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'Source module is a reparse point' $module.FullName
         }
         $relative.Add('src\persistence\modules\' + $module.Name)
+    }
+    $resourcesRoot = Join-Path $root 'src\persistence\resources'
+    if (-not [IO.Directory]::Exists($resourcesRoot)) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'UI resource directory is missing.' $resourcesRoot
+    }
+    if (Test-CcodLifecycleReparse -Path $resourcesRoot) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'UI resource directory is a reparse point.' $resourcesRoot
+    }
+    $expectedResources = @('ui.en-US.json', 'ui.zh-CN.json')
+    foreach ($resourceEntry in Get-ChildItem -LiteralPath $resourcesRoot -Force -ErrorAction Stop) {
+        if (Test-CcodLifecycleReparse -Path $resourceEntry.FullName) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'UI resource is a reparse point.' $resourceEntry.FullName
+        }
+        if ($resourceEntry.PSIsContainer -or $expectedResources -cnotcontains $resourceEntry.Name) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'The UI resource set is incomplete or contains unknown files.' $resourceEntry.FullName
+        }
+    }
+    $resourceNames = [Collections.Generic.List[string]]::new()
+    foreach ($resource in Get-ChildItem -LiteralPath $resourcesRoot -Filter 'ui.*.json' -File -ErrorAction Stop) {
+        if (Test-CcodLifecycleReparse -Path $resource.FullName) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'UI resource is a reparse point.' $resource.FullName
+        }
+        $resourceNames.Add($resource.Name)
+        $relative.Add(('src\persistence\resources\' + $resource.Name))
+    }
+    if ((@($resourceNames | Sort-Object) -join ',') -cne (@($expectedResources | Sort-Object) -join ',')) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'The UI resource set is incomplete or contains unknown files.' $resourcesRoot
     }
     $uninstaller = Join-Path $root 'Uninstall-CodexControlOtherDevices.ps1'
     if ([IO.File]::Exists($uninstaller) -and -not (Test-CcodLifecycleReparse -Path $uninstaller)) {
@@ -682,6 +710,7 @@ function Invoke-CcodInstall {
         if (-not $upgrade) {
             $stateRoot = Join-Path $root 'state'
             Initialize-CcodState -StateRoot $stateRoot -NodeCandidates $nodeCandidates -CandidateCompatibleOptIn ([bool]$EnableCandidateCompatibleUpdates)
+            Initialize-CcodUiPreference -StateRoot $stateRoot | Out-Null
         }
         $pointer = Set-CcodActiveRuntime -InstallRoot $root -NewRuntimeId $runtimeId
         if ($upgrade) {
