@@ -209,6 +209,32 @@ try {
         }
     }
 
+    Invoke-CcodTest 'classifies the current renderer-only CDP launch as an ordinary root' {
+        $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001'
+        $arguments = @('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001')
+        $ordinary = Get-CcodProcessSnapshot -ProcessId 100 -Adapters (New-CcodSnapshotAdapters -CommandLine $command -ParsedArguments $arguments)
+        Assert-CcodEqual 'Ordinary' $ordinary.Mode 'renderer-only CDP root is an ordinary Codex launch'
+        Assert-CcodEqual $true $ordinary.IsTopLevel 'renderer-only CDP root is top level'
+        Assert-CcodEqual $null $ordinary.RendererPort 'renderer-only CDP port is not special evidence'
+        Assert-CcodEqual $null $ordinary.MainPort 'renderer-only CDP root has no main inspector'
+
+        $quotedCommand = '"C:\Codex\ChatGPT.exe" "--remote-debugging-address=127.0.0.1" "--remote-debugging-port=41001"'
+        $quoted = Get-CcodProcessSnapshot -ProcessId 100 -Adapters (New-CcodSnapshotAdapters -CommandLine $quotedCommand -ParsedArguments $arguments)
+        Assert-CcodEqual 'Ordinary' $quoted.Mode 'quoted whole renderer-only debug tokens stay ordinary'
+
+        foreach ($case in @(
+            @{ Name='missing loopback address'; Args=@('C:\Codex\ChatGPT.exe','--remote-debugging-port=41001') },
+            @{ Name='non-loopback address'; Args=@('C:\Codex\ChatGPT.exe','--remote-debugging-address=0.0.0.0','--remote-debugging-port=41001') },
+            @{ Name='duplicate renderer port'; Args=@('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--remote-debugging-port=41002') },
+            @{ Name='malformed renderer port'; Args=@('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=abc') },
+            @{ Name='inspector-only debug'; Args=@('C:\Codex\ChatGPT.exe','--inspect=127.0.0.1:41002') }
+        )) {
+            $caseCommand = '"C:\Codex\ChatGPT.exe" ' + (($case.Args | Select-Object -Skip 1) -join ' ')
+            $snapshot = Get-CcodProcessSnapshot -ProcessId 100 -Adapters (New-CcodSnapshotAdapters -CommandLine $caseCommand -ParsedArguments $case.Args)
+            Assert-CcodEqual 'Unrelated' $snapshot.Mode "$($case.Name) is never ordinary"
+        }
+    }
+
     Invoke-CcodTest 'uses parsed Windows argv tokens and rejects malformed process metadata' {
         $quotedChild = Get-CcodProcessSnapshot -ProcessId 100 -Adapters (New-CcodSnapshotAdapters `
             -CommandLine '"C:\Codex\ChatGPT.exe" "--type=renderer"' `

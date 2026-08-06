@@ -463,6 +463,7 @@ function Get-CcodParsedLaunchArguments {
         Valid = $false
         IsTopLevel = $false
         HasDebugSwitch = $false
+        RendererDebugOnlyValid = $false
         SpecialArgumentsValid = $false
         RendererPort = $null
         MainPort = $null
@@ -480,9 +481,10 @@ function Get-CcodParsedLaunchArguments {
     $addressCount = 0
     $rendererCount = 0
     $mainCount = 0
+    $inspectorCount = 0
+    $unrecognizedDebug = $false
     $rendererPort = $null
     $mainPort = $null
-    $unrecognizedDebug = $false
     foreach ($argument in @($arguments | Select-Object -Skip 1)) {
         if ($argument -imatch '^(?:--|-|/)type(?:=|$)') { $hasType = $true }
         $isDebug = $argument -imatch '^(?:--|-|/)(?:remote-debugging|inspect)'
@@ -504,6 +506,7 @@ function Get-CcodParsedLaunchArguments {
             $parsedPort = 0
             if ([int]::TryParse($Matches.port, [ref]$parsedPort) -and $parsedPort -ge 1 -and $parsedPort -le 65535) {
                 $mainCount++
+                $inspectorCount++
                 $mainPort = $parsedPort
                 continue
             }
@@ -511,6 +514,9 @@ function Get-CcodParsedLaunchArguments {
         $unrecognizedDebug = $true
     }
 
+    $rendererDebugOnlyValid = -not $hasType -and -not $unrecognizedDebug -and
+        $debugCount -eq 2 -and $addressCount -eq 1 -and $rendererCount -eq 1 -and
+        $mainCount -eq 0 -and $rendererPort -ge 1
     $specialValid = -not $hasType -and -not $unrecognizedDebug -and $debugCount -eq 3 -and
         $addressCount -eq 1 -and $rendererCount -eq 1 -and $mainCount -eq 1 -and
         $rendererPort -ne $mainPort
@@ -518,6 +524,7 @@ function Get-CcodParsedLaunchArguments {
         Valid = $true
         IsTopLevel = -not $hasType
         HasDebugSwitch = $debugCount -gt 0
+        RendererDebugOnlyValid = $rendererDebugOnlyValid
         SpecialArgumentsValid = $specialValid
         RendererPort = if ($null -eq $rendererPort) { $null } else { [int]$rendererPort }
         MainPort = if ($null -eq $mainPort) { $null } else { [int]$mainPort }
@@ -591,12 +598,18 @@ function Get-CcodProcessSnapshot {
     $mode = 'Unrelated'
     if ($eligibleRoot -and -not $launchArguments.HasDebugSwitch) {
         $mode = 'Ordinary'
+    } elseif ($eligibleRoot -and $launchArguments.RendererDebugOnlyValid) {
+        $mode = 'Ordinary'
     } elseif ($eligibleRoot -and $launchArguments.SpecialArgumentsValid) {
         $status = Get-CcodStatusEvidence -StatusEvidence $StatusEvidence
         if (Test-CcodSpecialStatusProof -Status $status -Package $package -SnapshotIdentity $before -RendererPort $rendererPort -MainPort $mainPort) {
             $probe = & $adapter.ProbeSpecial $ProcessId $rendererPort $mainPort
             if (Test-CcodSpecialProbeProof -Probe $probe) { $mode = 'Special' }
         }
+    }
+    if ($mode -ceq 'Ordinary') {
+        $rendererPort = $null
+        $mainPort = $null
     }
 
     return [pscustomobject][ordered]@{
