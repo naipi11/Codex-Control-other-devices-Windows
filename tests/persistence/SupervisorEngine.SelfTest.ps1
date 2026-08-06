@@ -579,6 +579,14 @@ $results += Invoke-CcodTest 'projects the complete semantic tray state matrix wi
     Assert-CcodExactEqual $false $paused.ApplyNowVisible 'paused active hides irrelevant apply action'
     Assert-CcodExactEqual $false $paused.AutomationChecked 'paused active mirrors automation input'
     Assert-CcodExactEqual $true $paused.CandidateOptInChecked 'paused active keeps candidate opt-in independent'
+
+    $waiting=Get-CcodTrayPresentation -SessionState Waiting -AutomationEnabled $true -CandidateCompatibleOptIn $false -HasOrdinary $true -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $false
+    Assert-CcodExactEqual $true $waiting.ApplyNowEnabled 'waiting enables an available explicit check'
+
+    foreach($state in @('Suppressed','Recovered','Error')){
+        $retry=Get-CcodTrayPresentation -SessionState $state -AutomationEnabled $true -CandidateCompatibleOptIn $false -HasOrdinary $true -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $false
+        Assert-CcodExactEqual $true $retry.ManualRetryEnabled "$state enables an available manual retry"
+    }
 }
 
 $results += Invoke-CcodTest 'keeps tray action presentation safe through busy transitions and suppression' {
