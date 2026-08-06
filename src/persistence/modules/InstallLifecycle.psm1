@@ -48,6 +48,64 @@ function Test-CcodLifecycleReparse {
     return (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
+function Test-CcodLifecycleAlternateDataStreams {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        if ($null -eq ('CcodLifecycleStreamNative' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class CcodLifecycleStreamNative
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct WIN32_FIND_STREAM_DATA
+    {
+        public long StreamSize;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)]
+        public string StreamName;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr FindFirstStreamW(string path, int infoLevel, out WIN32_FIND_STREAM_DATA streamData, int flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FindNextStreamW(IntPtr handle, out WIN32_FIND_STREAM_DATA streamData);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FindClose(IntPtr handle);
+}
+'@
+        }
+        $streamData = New-Object CcodLifecycleStreamNative+WIN32_FIND_STREAM_DATA
+        $handle = [CcodLifecycleStreamNative]::FindFirstStreamW($Path, 0, [ref]$streamData, 0)
+        if ($handle -eq [IntPtr](-1)) {
+            $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            if ($errorCode -eq 38) { return $false }
+            throw [ComponentModel.Win32Exception]::new($errorCode)
+        }
+        try {
+            while ($true) {
+                if ($streamData.StreamName -cne '::$DATA') { return $true }
+                $streamData = New-Object CcodLifecycleStreamNative+WIN32_FIND_STREAM_DATA
+                if (-not [CcodLifecycleStreamNative]::FindNextStreamW($handle, [ref]$streamData)) {
+                    $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                    if ($errorCode -eq 38) { break }
+                    throw [ComponentModel.Win32Exception]::new($errorCode)
+                }
+            }
+        } finally {
+            [CcodLifecycleStreamNative]::FindClose($handle) | Out-Null
+        }
+    } catch {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'Unable to inspect source alternate data streams.' $Path
+    }
+    return $false
+}
+
 function Test-CcodLifecycleRemovePath {
     [CmdletBinding()]
     param(
@@ -106,7 +164,7 @@ function Get-CcodLifecycleSourceFiles {
             $relative.Add('src\runtime\' + $item.FullName.Substring($runtimeRoot.TrimEnd('\').Length + 1))
         }
     }
-    foreach ($module in Get-ChildItem -LiteralPath (Join-Path $root 'src\persistence\modules') -Filter '*.psm1' -File -ErrorAction Stop) {
+    foreach ($module in Get-ChildItem -LiteralPath (Join-Path $root 'src\persistence\modules') -Filter '*.psm1' -File -Force -ErrorAction Stop) {
         if (Test-CcodLifecycleReparse -Path $module.FullName) {
             Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'Source module is a reparse point' $module.FullName
         }
@@ -119,22 +177,24 @@ function Get-CcodLifecycleSourceFiles {
     if (Test-CcodLifecycleReparse -Path $resourcesRoot) {
         Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'UI resource directory is a reparse point.' $resourcesRoot
     }
+    if (Test-CcodLifecycleAlternateDataStreams -Path $resourcesRoot) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'UI resource directory contains alternate data streams.' $resourcesRoot
+    }
     $expectedResources = @('ui.en-US.json', 'ui.zh-CN.json')
-    foreach ($resourceEntry in Get-ChildItem -LiteralPath $resourcesRoot -Force -ErrorAction Stop) {
-        if (Test-CcodLifecycleReparse -Path $resourceEntry.FullName) {
+    $resourceEntries = @(Get-ChildItem -LiteralPath $resourcesRoot -Force -ErrorAction Stop)
+    $resourceNames = [Collections.Generic.List[string]]::new()
+    foreach ($resourceEntry in $resourceEntries) {
+        if (($resourceEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'UI resource is a reparse point.' $resourceEntry.FullName
         }
         if ($resourceEntry.PSIsContainer -or $expectedResources -cnotcontains $resourceEntry.Name) {
             Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'The UI resource set is incomplete or contains unknown files.' $resourceEntry.FullName
         }
-    }
-    $resourceNames = [Collections.Generic.List[string]]::new()
-    foreach ($resource in Get-ChildItem -LiteralPath $resourcesRoot -Filter 'ui.*.json' -File -ErrorAction Stop) {
-        if (Test-CcodLifecycleReparse -Path $resource.FullName) {
-            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'UI resource is a reparse point.' $resource.FullName
+        if (Test-CcodLifecycleAlternateDataStreams -Path $resourceEntry.FullName) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'UI resource contains alternate data streams.' $resourceEntry.FullName
         }
-        $resourceNames.Add($resource.Name)
-        $relative.Add(('src\persistence\resources\' + $resource.Name))
+        $resourceNames.Add($resourceEntry.Name)
+        $relative.Add(('src\persistence\resources\' + $resourceEntry.Name))
     }
     if ((@($resourceNames | Sort-Object) -join ',') -cne (@($expectedResources | Sort-Object) -join ',')) {
         Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'The UI resource set is incomplete or contains unknown files.' $resourcesRoot
@@ -179,6 +239,21 @@ function Copy-CcodLifecycleStaging {
     $copiedStableBootstrap = $false
     $copiedStableUninstaller = $false
     try {
+        $resourcesRoot = Join-Path $SourceRoot 'src\persistence\resources'
+        if (Test-CcodLifecycleReparse -Path $resourcesRoot) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'UI resource directory became a reparse point before staging.' $resourcesRoot
+        }
+        if (Test-CcodLifecycleAlternateDataStreams -Path $resourcesRoot) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'UI resource directory contains alternate data streams before staging.' $resourcesRoot
+        }
+        foreach ($resourceFile in @($Files | Where-Object { $_.Relative -like 'src\persistence\resources\*' })) {
+            if (Test-CcodLifecycleReparse -Path $resourceFile.Source) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'UI resource became a reparse point before staging.' $resourceFile.Source
+            }
+            if (Test-CcodLifecycleAlternateDataStreams -Path $resourceFile.Source) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'UI resource contains alternate data streams before staging.' $resourceFile.Source
+            }
+        }
         foreach ($file in $Files) {
             $destination = [IO.Path]::GetFullPath((Join-Path $stagingDirectory $file.Relative))
             $prefix = $stagingDirectory.TrimEnd('\') + '\'

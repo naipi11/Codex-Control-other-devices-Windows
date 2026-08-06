@@ -203,6 +203,31 @@ $results += Invoke-CcodTest 'first install stages verifies activates task and pe
     }
 }
 
+$results += Invoke-CcodTest 'hidden persistence module is staged and manifest-hashed' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        $hiddenModule = Join-Path $source 'src\persistence\modules\HiddenRuntime.psm1'
+        [IO.File]::WriteAllText($hiddenModule, "Set-StrictMode -Version Latest`r`n# hidden fixture`r`n", [Text.UTF8Encoding]::new($false))
+        $hiddenItem = Get-Item -LiteralPath $hiddenModule -Force
+        $hiddenItem.Attributes = $hiddenItem.Attributes -bor [IO.FileAttributes]::Hidden
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $receipt = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters (New-CcodLifecycleFake -NodePath $nodePath).Adapters
+        $runtimeRoot = Join-Path $install "runtime\$($receipt.RuntimeId)"
+        $stagedModule = Join-Path $runtimeRoot 'src\persistence\modules\HiddenRuntime.psm1'
+        Assert-CcodTrue (Test-Path -LiteralPath $stagedModule -PathType Leaf) 'hidden module is staged'
+        $manifest = Test-CcodRuntimeManifest -RuntimeDirectory $runtimeRoot -ExpectedRuntimeId $receipt.RuntimeId
+        Assert-CcodEqual $true $manifest.Valid 'hidden module runtime manifest validates'
+        $record = @($manifest.Manifest.files | Where-Object { $_.path -ceq 'src/persistence/modules/HiddenRuntime.psm1' })
+        Assert-CcodEqual 1 $record.Count 'manifest contains hidden module exactly once'
+        Assert-CcodEqual '19fe966336cb8900576716b6518dcddac052405ec6b59eacb9eac149e4ee8f71' $record[0].sha256 'manifest hashes hidden module bytes'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
 $results += Invoke-CcodTest 'upgrade retains one previous runtime and starts the new task' {
     $source = New-CcodLifecycleTempRoot
     $install = New-CcodLifecycleTempRoot
@@ -274,6 +299,30 @@ $results += Invoke-CcodTest 'manifest hash mismatch fails closed and cleans stag
     }
 }
 
+$results += Invoke-CcodTest 'selected UI catalog mutation after inventory fails hash verification before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        $fake.World.CopyOverride = [pscustomobject]@{
+            Match = '*ui.en-US.json'
+            Action = {
+                param($Source, $Destination)
+                [IO.Directory]::CreateDirectory((Split-Path $Destination -Parent)) | Out-Null
+                [IO.File]::Copy($Source, $Destination, $true)
+                [IO.File]::WriteAllText($Source, '{"schemaVersion":1,"language":"tampered-after-inventory"}', [Text.UTF8Encoding]::new($false))
+            }
+        }
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_FILE_HASH_MISMATCH'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'post-inventory catalog mutation never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
 $results += Invoke-CcodTest 'source reparse point fails closed before staging' {
     $source = New-CcodLifecycleTempRoot
     $install = New-CcodLifecycleTempRoot
@@ -321,6 +370,60 @@ $results += Invoke-CcodTest 'unknown UI catalog fails closed before activation' 
         $fake = New-CcodLifecycleFake -NodePath $nodePath
         Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_INCOMPLETE'
         Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'unknown catalog never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'case-variant UI catalog fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        $catalog = Join-Path $source 'src\persistence\resources\ui.en-US.json'
+        $temporary = Join-Path $source 'src\persistence\resources\catalog-temporary.json'
+        [IO.File]::Move($catalog, $temporary)
+        [IO.File]::Move($temporary, (Join-Path $source 'src\persistence\resources\ui.EN-us.json'))
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_INCOMPLETE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'case-variant catalog never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'named UI catalog alternate data stream fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        $catalog = Join-Path $source 'src\persistence\resources\ui.en-US.json'
+        Set-Content -LiteralPath $catalog -Stream 'ccod-test' -Value 'unmanifested stream' -NoNewline
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_INCOMPLETE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'named catalog stream never activates'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'named UI resource directory alternate data stream fails closed before activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        $resources = Join-Path $source 'src\persistence\resources'
+        Set-Content -LiteralPath ($resources + ':ccod-test') -Value 'unmanifested directory stream' -NoNewline
+        Assert-CcodEqual 'unmanifested directory stream' (Get-Content -LiteralPath ($resources + ':ccod-test') -Raw) 'provider creates resource directory alternate data stream'
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SOURCE_INCOMPLETE'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath (Join-Path $install 'active.json'))) 'named resource directory stream never activates'
     } finally {
         foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
     }
