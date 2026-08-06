@@ -120,33 +120,35 @@ function New-CcodValidPresentation {
 
 function Test-CcodOpaquePixels {
     param([Drawing.Bitmap]$Bitmap,[ValidateSet('base')][string]$Region)
-    $scale=[double]$Bitmap.Width/32.0
-    $left=[Math]::Max(0,[int][Math]::Floor(2*$scale));$right=[Math]::Min($Bitmap.Width-1,[int][Math]::Ceiling(11*$scale))
-    $top=[Math]::Max(0,[int][Math]::Floor(8*$scale));$bottom=[Math]::Min($Bitmap.Height-1,[int][Math]::Ceiling(25*$scale))
-    for($y=$top;$y -le $bottom;$y++){
-        for($x=$left;$x -le $right;$x++){
-            $pixel=$Bitmap.GetPixel($x,$y)
-            if($pixel.A -eq 255 -and $pixel.R -eq 32 -and $pixel.G -eq 37 -and $pixel.B -eq 45){return $true}
-        }
+    $samples=if($Bitmap.Width -eq 16){
+        [pscustomobject]@{Outside=@(@(1,1),@(14,1),@(1,14));Inside=@(@(2,2),@(13,2),@(2,13))}
+    }elseif($Bitmap.Width -eq 32){
+        [pscustomobject]@{Outside=@(@(2,2),@(29,2),@(2,29));Inside=@(@(4,4),@(27,4),@(4,27))}
+    }else{return $false}
+    foreach($point in $samples.Outside){
+        $pixel=$Bitmap.GetPixel([int]$point[0],[int]$point[1])
+        if($pixel.A -ge 128 -or ($pixel.R -eq 32 -and $pixel.G -eq 37 -and $pixel.B -eq 45)){return $false}
     }
-    return $false
+    foreach($point in $samples.Inside){
+        $pixel=$Bitmap.GetPixel([int]$point[0],[int]$point[1])
+        if($pixel.A -ne 255 -or $pixel.R -ne 32 -or $pixel.G -ne 37 -or $pixel.B -ne 45){return $false}
+    }
+    return $true
 }
 
 function Test-CcodLightPixels {
     param([Drawing.Bitmap]$Bitmap,[ValidateSet('links')][string]$Region)
-    $scale=[double]$Bitmap.Width/32.0
-    $regions=@(
-        @(10,26,7,17),
-        @(5,21,12,24)
-    )
+    $regions=if($Bitmap.Width -eq 16){
+        @(@(3,5,6,11),@(11,13,4,9))
+    }elseif($Bitmap.Width -eq 32){
+        @(@(6,10,12,22),@(22,26,8,18))
+    }else{return $false}
     foreach($bounds in $regions){
         $found=$false
-        $left=[Math]::Max(0,[int][Math]::Floor($bounds[0]*$scale));$right=[Math]::Min($Bitmap.Width-1,[int][Math]::Ceiling($bounds[1]*$scale))
-        $top=[Math]::Max(0,[int][Math]::Floor($bounds[2]*$scale));$bottom=[Math]::Min($Bitmap.Height-1,[int][Math]::Ceiling($bounds[3]*$scale))
-        for($y=$top;$y -le $bottom -and -not $found;$y++){
-            for($x=$left;$x -le $right;$x++){
+        for($y=$bounds[2];$y -le $bounds[3] -and -not $found;$y++){
+            for($x=$bounds[0];$x -le $bounds[1];$x++){
                 $pixel=$Bitmap.GetPixel($x,$y)
-                if($pixel.A -ge 220 -and $pixel.R -ge 245 -and $pixel.G -ge 245 -and $pixel.B -ge 245){$found=$true;break}
+                if($pixel.A -ge 220 -and $pixel.R -ge 230 -and $pixel.G -ge 230 -and $pixel.B -ge 230){$found=$true;break}
             }
         }
         if(-not $found){return $false}
@@ -159,19 +161,42 @@ function Test-CcodStatusPixels {
     $expected=@{
         Gray=@(138,144,153);Green=@(41,179,111);Yellow=@(227,160,8);Red=@(217,74,74)
     }[$Color]
-    $scale=[double]$Bitmap.Width/32.0
-    $left=[Math]::Max(0,[int][Math]::Floor(21*$scale));$right=[Math]::Min($Bitmap.Width-1,[int][Math]::Ceiling(30*$scale))
-    $top=[Math]::Max(0,[int][Math]::Floor(21*$scale));$bottom=[Math]::Min($Bitmap.Height-1,[int][Math]::Ceiling(30*$scale))
-    $fillCount=0;$hasWhiteOutline=$false
-    for($y=$top;$y -le $bottom;$y++){
-        for($x=$left;$x -le $right;$x++){
+    $samples=if($Bitmap.Width -eq 16){
+        [pscustomobject]@{
+            Bounds=@(10,15,10,15);Center=@(12,12)
+            Outline=@(@(12,11),@(11,12),@(14,12),@(12,14))
+            Outside=@(@(14,10),@(10,14),@(15,12),@(12,15))
+        }
+    }elseif($Bitmap.Width -eq 32){
+        [pscustomobject]@{
+            Bounds=@(21,30,21,30);Center=@(25,25)
+            Outline=@(@(25,22),@(22,25),@(28,25),@(25,28))
+            Outside=@(@(25,20),@(20,25),@(30,25),@(25,30))
+        }
+    }else{return $false}
+    $fillCount=0
+    for($y=$samples.Bounds[2];$y -le $samples.Bounds[3];$y++){
+        for($x=$samples.Bounds[0];$x -le $samples.Bounds[1];$x++){
             $pixel=$Bitmap.GetPixel($x,$y)
             if($pixel.A -eq 255 -and $pixel.R -eq $expected[0] -and $pixel.G -eq $expected[1] -and $pixel.B -eq $expected[2]){$fillCount++}
-            if($pixel.A -ge 220 -and $pixel.R -ge 215 -and $pixel.G -ge 215 -and $pixel.B -ge 215){$hasWhiteOutline=$true}
         }
     }
     $expectedFillCount=if($Bitmap.Width -eq 16){1}else{21}
-    return $fillCount -eq $expectedFillCount -and $hasWhiteOutline
+    if($fillCount -ne $expectedFillCount){return $false}
+    $center=$Bitmap.GetPixel([int]$samples.Center[0],[int]$samples.Center[1])
+    if($center.A -ne 255 -or $center.R -ne $expected[0] -or $center.G -ne $expected[1] -or $center.B -ne $expected[2]){return $false}
+    foreach($point in $samples.Outline){
+        $pixel=$Bitmap.GetPixel([int]$point[0],[int]$point[1])
+        $whiteDelta=($pixel.R-$expected[0])+($pixel.G-$expected[1])+($pixel.B-$expected[2])
+        if($pixel.A -ne 255 -or $pixel.R -le $expected[0] -or $pixel.G -le $expected[1] -or $pixel.B -le $expected[2] -or $whiteDelta -lt 150){return $false}
+    }
+    foreach($point in $samples.Outside){
+        $pixel=$Bitmap.GetPixel([int]$point[0],[int]$point[1])
+        $whiteDelta=($pixel.R-$expected[0])+($pixel.G-$expected[1])+($pixel.B-$expected[2])
+        if($pixel.R -gt $expected[0] -and $pixel.G -gt $expected[1] -and $pixel.B -gt $expected[2] -and $whiteDelta -ge 150){return $false}
+        if($pixel.A -ne 0 -and ($pixel.R -gt 128 -or $pixel.G -gt 128 -or $pixel.B -gt 128)){return $false}
+    }
+    return $true
 }
 
 function Test-CcodTransparentCorners {
