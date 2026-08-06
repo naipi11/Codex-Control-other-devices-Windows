@@ -75,7 +75,7 @@ function New-CcodTrayFakeAdapters {
             $bitmap=[pscustomobject]@{Color=$Color;Size=[int]$Size;Disposed=$false;DisposeCount=0}
             $state.Bitmaps.Add($bitmap);$bitmap
         }.GetNewClosure()
-        DrawIconCircle={param($Bitmap,$Color,$Size)$state.Calls.Add("Draw:$Color`:$Size")}.GetNewClosure()
+        DrawBridgeIcon={param($Bitmap,$Color,$Size)$state.Calls.Add("Draw:$Color`:$Size")}.GetNewClosure()
         GetHicon={param($Bitmap)$state.HiconSeed++;$state.Calls.Add("GetHicon:$($Bitmap.Color):$($Bitmap.Size)");[IntPtr]$state.HiconSeed}.GetNewClosure()
         CloneIcon={
             param($Hicon,$Color,$Size)
@@ -118,12 +118,96 @@ function New-CcodValidPresentation {
     }
 }
 
+function Test-CcodOpaquePixels {
+    param([Drawing.Bitmap]$Bitmap,[ValidateSet('base')][string]$Region)
+    $scale=[double]$Bitmap.Width/32.0
+    $left=[Math]::Max(0,[int][Math]::Floor(2*$scale));$right=[Math]::Min($Bitmap.Width-1,[int][Math]::Ceiling(11*$scale))
+    $top=[Math]::Max(0,[int][Math]::Floor(8*$scale));$bottom=[Math]::Min($Bitmap.Height-1,[int][Math]::Ceiling(25*$scale))
+    for($y=$top;$y -le $bottom;$y++){
+        for($x=$left;$x -le $right;$x++){
+            $pixel=$Bitmap.GetPixel($x,$y)
+            if($pixel.A -eq 255 -and $pixel.R -eq 32 -and $pixel.G -eq 37 -and $pixel.B -eq 45){return $true}
+        }
+    }
+    return $false
+}
+
+function Test-CcodLightPixels {
+    param([Drawing.Bitmap]$Bitmap,[ValidateSet('links')][string]$Region)
+    $scale=[double]$Bitmap.Width/32.0
+    $regions=@(
+        @(10,26,7,17),
+        @(5,21,12,24)
+    )
+    foreach($bounds in $regions){
+        $found=$false
+        $left=[Math]::Max(0,[int][Math]::Floor($bounds[0]*$scale));$right=[Math]::Min($Bitmap.Width-1,[int][Math]::Ceiling($bounds[1]*$scale))
+        $top=[Math]::Max(0,[int][Math]::Floor($bounds[2]*$scale));$bottom=[Math]::Min($Bitmap.Height-1,[int][Math]::Ceiling($bounds[3]*$scale))
+        for($y=$top;$y -le $bottom -and -not $found;$y++){
+            for($x=$left;$x -le $right;$x++){
+                $pixel=$Bitmap.GetPixel($x,$y)
+                if($pixel.A -ge 220 -and $pixel.R -ge 245 -and $pixel.G -ge 245 -and $pixel.B -ge 245){$found=$true;break}
+            }
+        }
+        if(-not $found){return $false}
+    }
+    return $true
+}
+
+function Test-CcodStatusPixels {
+    param([Drawing.Bitmap]$Bitmap,[ValidateSet('dot')][string]$Region,[ValidateSet('Gray','Green','Yellow','Red')][string]$Color)
+    $expected=@{
+        Gray=@(138,144,153);Green=@(41,179,111);Yellow=@(227,160,8);Red=@(217,74,74)
+    }[$Color]
+    $scale=[double]$Bitmap.Width/32.0
+    $left=[Math]::Max(0,[int][Math]::Floor(21*$scale));$right=[Math]::Min($Bitmap.Width-1,[int][Math]::Ceiling(30*$scale))
+    $top=[Math]::Max(0,[int][Math]::Floor(21*$scale));$bottom=[Math]::Min($Bitmap.Height-1,[int][Math]::Ceiling(30*$scale))
+    $fillCount=0;$hasWhiteOutline=$false
+    for($y=$top;$y -le $bottom;$y++){
+        for($x=$left;$x -le $right;$x++){
+            $pixel=$Bitmap.GetPixel($x,$y)
+            if($pixel.A -eq 255 -and $pixel.R -eq $expected[0] -and $pixel.G -eq $expected[1] -and $pixel.B -eq $expected[2]){$fillCount++}
+            if($pixel.A -ge 220 -and $pixel.R -ge 215 -and $pixel.G -ge 215 -and $pixel.B -ge 215){$hasWhiteOutline=$true}
+        }
+    }
+    $expectedFillCount=if($Bitmap.Width -eq 16){1}else{21}
+    return $fillCount -eq $expectedFillCount -and $hasWhiteOutline
+}
+
+function Test-CcodTransparentCorners {
+    param([Drawing.Bitmap]$Bitmap)
+    foreach($point in @(@(0,0),@(($Bitmap.Width-1),0),@(0,($Bitmap.Height-1)),@(($Bitmap.Width-1),($Bitmap.Height-1)))){
+        if($Bitmap.GetPixel([int]$point[0],[int]$point[1]).A -ne 0){return $false}
+    }
+    return $true
+}
+
 $results=[Collections.Generic.List[object]]::new()
 
 $results.Add((Invoke-CcodTest 'exports exactly the five frozen TrayUi functions' {
     $expected='Close-CcodTrayContext,New-CcodTrayContext,Set-CcodTrayPresentation,Start-CcodProcessWatcher,Stop-CcodProcessWatcher'
     $actual=((Get-Command -Module TrayUi -CommandType Function).Name|Sort-Object)-join ','
     Assert-CcodEqual $expected $actual 'public export surface remains exact'
+}))
+
+$results.Add((Invoke-CcodTest 'exposes and draws the production bridge icon contract at both cached sizes' {
+    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
+    Assert-CcodTrue ($production.ContainsKey('DrawBridgeIcon')) 'production adapter exposes DrawBridgeIcon'
+    Assert-CcodTrue (-not $production.ContainsKey('DrawIconCircle')) 'retired DrawIconCircle adapter is absent'
+    foreach($color in @('Gray','Green','Yellow','Red')){
+        foreach($size in @(16,32)){
+            $bitmap=& $production.CreateBitmap $color $size
+            try{
+                & $production.DrawBridgeIcon $bitmap $color $size
+                Assert-CcodEqual $size $bitmap.Width "$color $size width"
+                Assert-CcodEqual $size $bitmap.Height "$color $size height"
+                Assert-CcodTrue (Test-CcodOpaquePixels -Bitmap $bitmap -Region 'base') "$color $size has dark rounded base"
+                Assert-CcodTrue (Test-CcodLightPixels -Bitmap $bitmap -Region 'links') "$color $size has visible bridge links"
+                Assert-CcodTrue (Test-CcodStatusPixels -Bitmap $bitmap -Region 'dot' -Color $color) "$color $size has correct outlined status dot"
+                Assert-CcodTrue (Test-CcodTransparentCorners -Bitmap $bitmap) "$color $size corners are transparent"
+            }finally{& $production.DisposeIconResource $bitmap}
+        }
+    }
 }))
 
 $results.Add((Invoke-CcodTest 'constructs one fake-first STA tray graph and closes every owned resource exactly once' {
@@ -141,7 +225,22 @@ $results.Add((Invoke-CcodTest 'constructs one fake-first STA tray graph and clos
     Assert-CcodEqual 3 @($fake.State.Objects|Where-Object Kind -eq 'Row').Count 'three read-only rows'
     Assert-CcodEqual 6 @($fake.State.Objects|Where-Object Kind -eq 'MenuItem').Count 'six command items'
     Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*'}).Count 'eight cached bitmap sizes and colors'
+    Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Draw:*'}).Count 'eight cached bitmaps are drawn once'
+    Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Clone:*'}).Count 'eight cached icon clones are created'
     Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'DestroyIcon:*'}).Count 'every temporary HICON is destroyed immediately'
+    Assert-CcodEqual 'Gray:16,Gray:32,Green:16,Green:32,Yellow:16,Yellow:32,Red:16,Red:32' (@($context.Icons.Keys)-join ',') 'cached icon keys are exact and ordered'
+    $iconCalls=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'})
+    $expectedIconCalls=@(
+        'Bitmap:Gray:16','Draw:Gray:16','GetHicon:Gray:16','Clone:Gray:16','DestroyIcon:1001','DisposeIcon:Gray:16',
+        'Bitmap:Gray:32','Draw:Gray:32','GetHicon:Gray:32','Clone:Gray:32','DestroyIcon:1002','DisposeIcon:Gray:32',
+        'Bitmap:Green:16','Draw:Green:16','GetHicon:Green:16','Clone:Green:16','DestroyIcon:1003','DisposeIcon:Green:16',
+        'Bitmap:Green:32','Draw:Green:32','GetHicon:Green:32','Clone:Green:32','DestroyIcon:1004','DisposeIcon:Green:32',
+        'Bitmap:Yellow:16','Draw:Yellow:16','GetHicon:Yellow:16','Clone:Yellow:16','DestroyIcon:1005','DisposeIcon:Yellow:16',
+        'Bitmap:Yellow:32','Draw:Yellow:32','GetHicon:Yellow:32','Clone:Yellow:32','DestroyIcon:1006','DisposeIcon:Yellow:32',
+        'Bitmap:Red:16','Draw:Red:16','GetHicon:Red:16','Clone:Red:16','DestroyIcon:1007','DisposeIcon:Red:16',
+        'Bitmap:Red:32','Draw:Red:32','GetHicon:Red:32','Clone:Red:32','DestroyIcon:1008','DisposeIcon:Red:32'
+    )
+    Assert-CcodEqual ($expectedIconCalls-join ',') ($iconCalls-join ',') 'each temporary HICON is destroyed before its bitmap and the next icon'
     Assert-CcodEqual 250 $context.Timer.Properties.Interval 'single timer is exactly 250 ms'
     Assert-CcodEqual $true $context.Timer.Properties.Started 'timer starts once after graph creation'
     Assert-CcodEqual $true $context.NotifyIcon.Properties.Visible 'notify icon becomes visible only after setup'
@@ -157,7 +256,8 @@ $results.Add((Invoke-CcodTest 'constructs one fake-first STA tray graph and clos
     Assert-CcodEqual $true $first.Closed 'first close succeeds'
     Assert-CcodEqual 0 @($first.CleanupCodes).Count 'clean fake close has no failure code'
     Assert-CcodEqual 'Closed' $context.State 'close latches state before cleanup'
-    Assert-CcodEqual 8 @($context.Icons.Values|Where-Object Disposed).Count 'all owned icon clones disposed once'
+    Assert-CcodEqual 8 @($context.Icons.Values|Where-Object {$_.DisposeCount -eq 1}).Count 'all owned icon clones disposed exactly once'
+    Assert-CcodEqual 0 @($context.Icons.Values|Where-Object {$_.DisposeCount -gt 1}).Count 'no owned icon clone is disposed twice'
     $callCount=$fake.State.Calls.Count
     $second=Close-CcodTrayContext -Context $context
     Assert-CcodEqual $true $second.Closed 'second close is a success no-op'
@@ -169,7 +269,7 @@ $results.Add((Invoke-CcodTest 'renders the exact presentation without policy or 
     try{
         $context=New-CcodTrayContext -CommandQueue $queue -OnTick {} -Adapters $fake.Adapters
         $presentation=New-CcodValidPresentation
-        $bitmapCount=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*'}).Count
+        $iconResourceCalls=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'}).Count
         $output=@(Set-CcodTrayPresentation -Context $context -Presentation $presentation -PackageText $null -RuntimeText $null)
         Assert-CcodEqual 0 $output.Count 'presentation emits no output'
         Assert-CcodEqual 'Status: Current Codex session is fixed' $context.Rows.Status.Properties.Text 'status row is read-only display data'
@@ -177,7 +277,7 @@ $results.Add((Invoke-CcodTest 'renders the exact presentation without policy or 
         Assert-CcodEqual ('Runtime: '+[char]0x2014) $context.Rows.Runtime.Properties.Text 'null runtime renders em dash'
         Assert-CcodEqual 'Current Codex session is fixed' $context.NotifyIcon.Properties.Text 'tooltip comes only from Task 9 presentation'
         Assert-CcodEqual 'Green' $context.NotifyIcon.Properties.Icon.Color 'cached green icon selected'
-        Assert-CcodEqual $bitmapCount @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*'}).Count 'presentation allocates no icon or bitmap'
+        Assert-CcodEqual $iconResourceCalls @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'}).Count 'presentation allocates or disposes no icon resources'
 
         foreach($kind in @('ApplyNow','ManualRetry','SetAutomationEnabled','SetCandidateCompatibleOptIn','OpenLogs','Uninstall')){
             $context.Items[$kind].Properties.Enabled=$true
@@ -211,6 +311,19 @@ $results.Add((Invoke-CcodTest 'renders the exact presentation without policy or 
         $closedOutput=@(& $closedCallback $context.Items.OpenLogs $null)
         Assert-CcodEqual 0 $closedOutput.Count 'closed callback is a no-output no-op'
         Assert-CcodEqual $clockCalls @($fake.State.Calls|Where-Object {$_ -ceq 'Clock:GetUtcNow'}).Count 'closed callback invokes no clock or queue adapter'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'rejects an invalid presentation color before NotifyIcon mutation or icon allocation' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        $presentation=New-CcodValidPresentation;$presentation.Color='Blue'
+        $notifyMutations=@($fake.State.Calls|Where-Object {$_ -like 'Set:TrayNotifyIcon:*'}).Count
+        $iconResourceCalls=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'}).Count
+        Assert-CcodThrows {Set-CcodTrayPresentation -Context $context -Presentation $presentation} 'CCOD_TRAY_INPUT_INVALID'
+        Assert-CcodEqual $notifyMutations @($fake.State.Calls|Where-Object {$_ -like 'Set:TrayNotifyIcon:*'}).Count 'invalid color does not mutate NotifyIcon'
+        Assert-CcodEqual $iconResourceCalls @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'}).Count 'invalid color allocates or disposes no icon resources'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 

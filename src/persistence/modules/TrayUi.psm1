@@ -4,7 +4,7 @@ $script:TrayAdapterNames=@(
     'GetUtcNow','GetQueueCount','TryEnqueue','TryDequeue','GetManagedThreadId','GetApartmentState',
     'CreateUiObject','AddUiChild','SetUiProperty','GetUiProperty','SetUiVisible','StartUiTimer','StopUiTimer',
     'AttachUiCallback','DetachUiCallback','DisposeUiObject','ExitUiContext',
-    'CreateBitmap','DrawIconCircle','GetHicon','CloneIcon','DestroyIcon','DisposeIconResource',
+    'CreateBitmap','DrawBridgeIcon','GetHicon','CloneIcon','DestroyIcon','DisposeIconResource',
     'NewSourceIdentifier','RegisterTrace','RegisterIntrinsic','CleanupWatcherAttempt','DetachWatcherCallback','UnregisterWatcher',
     'RemoveWatcherJob','DisposeWatcherResource'
 )
@@ -174,16 +174,66 @@ function Get-CcodTrayDefaultAdapters {
     $defaults.DisposeUiObject={param($Object)$Object.Dispose()}
     $defaults.ExitUiContext={param($Context)$Context.ExitThread()}
     $defaults.CreateBitmap={param($Color,$Size)Add-Type -AssemblyName System.Drawing -ErrorAction Stop;New-Object Drawing.Bitmap($Size,$Size)}
-    $defaults.DrawIconCircle={
+    $defaults.DrawBridgeIcon={
         param($Bitmap,$Color,$Size)
-        $map=@{Gray=[Drawing.Color]::Gray;Green=[Drawing.Color]::LimeGreen;Yellow=[Drawing.Color]::Gold;Red=[Drawing.Color]::Crimson}
-        $graphics=$null;$brush=$null
+        $palette=@{
+            Gray=[Drawing.Color]::FromArgb(255,138,144,153)
+            Green=[Drawing.Color]::FromArgb(255,41,179,111)
+            Yellow=[Drawing.Color]::FromArgb(255,227,160,8)
+            Red=[Drawing.Color]::FromArgb(255,217,74,74)
+        }
+        $graphics=$null;$basePath=$null;$baseBrush=$null;$linkOnePath=$null;$linkTwoPath=$null;$linkPen=$null;$dotBrush=$null;$dotOutlinePen=$null
         try{
             $graphics=[Drawing.Graphics]::FromImage($Bitmap)
-            $brush=New-Object Drawing.SolidBrush($map[$Color])
-            $graphics.Clear([Drawing.Color]::Transparent);$graphics.FillEllipse($brush,1,1,$Size-2,$Size-2)
+            $graphics.SmoothingMode=[Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $graphics.PixelOffsetMode=[Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $graphics.Clear([Drawing.Color]::Transparent)
+            $scale=[single]($Size/32.0)
+
+            $basePath=[Drawing.Drawing2D.GraphicsPath]::new()
+            $baseX=[single](2*$scale);$baseY=[single](2*$scale);$baseWidth=[single](28*$scale);$baseHeight=[single](28*$scale);$baseCorner=[single](8*$scale)
+            $basePath.AddArc([Drawing.RectangleF]::new($baseX,$baseY,$baseCorner,$baseCorner),180,90)
+            $basePath.AddArc([Drawing.RectangleF]::new($baseX+$baseWidth-$baseCorner,$baseY,$baseCorner,$baseCorner),270,90)
+            $basePath.AddArc([Drawing.RectangleF]::new($baseX+$baseWidth-$baseCorner,$baseY+$baseHeight-$baseCorner,$baseCorner,$baseCorner),0,90)
+            $basePath.AddArc([Drawing.RectangleF]::new($baseX,$baseY+$baseHeight-$baseCorner,$baseCorner,$baseCorner),90,90)
+            $basePath.CloseFigure()
+            $baseBrush=[Drawing.SolidBrush]::new([Drawing.Color]::FromArgb(255,32,37,45))
+            $graphics.FillPath($baseBrush,$basePath)
+
+            $linkOnePath=[Drawing.Drawing2D.GraphicsPath]::new()
+            $linkOneX=[single](6.5*$scale);$linkOneY=[single](12.5*$scale);$linkWidth=[single](14*$scale);$linkHeight=[single](8.5*$scale)
+            $linkOnePath.AddArc([Drawing.RectangleF]::new($linkOneX,$linkOneY,$linkHeight,$linkHeight),90,180)
+            $linkOnePath.AddLine($linkOneX+($linkHeight/2),$linkOneY,$linkOneX+$linkWidth-($linkHeight/2),$linkOneY)
+            $linkOnePath.AddArc([Drawing.RectangleF]::new($linkOneX+$linkWidth-$linkHeight,$linkOneY,$linkHeight,$linkHeight),270,180)
+            $linkOnePath.AddLine($linkOneX+$linkWidth-($linkHeight/2),$linkOneY+$linkHeight,$linkOneX+($linkHeight/2),$linkOneY+$linkHeight)
+            $linkOnePath.CloseFigure()
+
+            $linkTwoPath=[Drawing.Drawing2D.GraphicsPath]::new()
+            $linkTwoX=[single](11.5*$scale);$linkTwoY=[single](9*$scale)
+            $linkTwoPath.AddArc([Drawing.RectangleF]::new($linkTwoX,$linkTwoY,$linkHeight,$linkHeight),90,180)
+            $linkTwoPath.AddLine($linkTwoX+($linkHeight/2),$linkTwoY,$linkTwoX+$linkWidth-($linkHeight/2),$linkTwoY)
+            $linkTwoPath.AddArc([Drawing.RectangleF]::new($linkTwoX+$linkWidth-$linkHeight,$linkTwoY,$linkHeight,$linkHeight),270,180)
+            $linkTwoPath.AddLine($linkTwoX+$linkWidth-($linkHeight/2),$linkTwoY+$linkHeight,$linkTwoX+($linkHeight/2),$linkTwoY+$linkHeight)
+            $linkTwoPath.CloseFigure()
+
+            $linkPen=[Drawing.Pen]::new([Drawing.Color]::White,[single](2.4*$scale))
+            $linkPen.LineJoin=[Drawing.Drawing2D.LineJoin]::Round
+            $graphics.DrawPath($linkPen,$linkOnePath)
+            $graphics.DrawPath($linkPen,$linkTwoPath)
+
+            $dotBrush=[Drawing.SolidBrush]::new($palette[$Color])
+            $dotOutlinePen=[Drawing.Pen]::new([Drawing.Color]::White,[single](1.0*$scale))
+            $dotBounds=[Drawing.RectangleF]::new([single](22*$scale),[single](22*$scale),[single](7*$scale),[single](7*$scale))
+            $graphics.FillEllipse($dotBrush,$dotBounds)
+            $graphics.DrawEllipse($dotOutlinePen,$dotBounds)
         }finally{
-            if($null -ne $brush){$brush.Dispose()}
+            if($null -ne $dotOutlinePen){$dotOutlinePen.Dispose()}
+            if($null -ne $dotBrush){$dotBrush.Dispose()}
+            if($null -ne $linkPen){$linkPen.Dispose()}
+            if($null -ne $linkTwoPath){$linkTwoPath.Dispose()}
+            if($null -ne $linkOnePath){$linkOnePath.Dispose()}
+            if($null -ne $baseBrush){$baseBrush.Dispose()}
+            if($null -ne $basePath){$basePath.Dispose()}
             if($null -ne $graphics){$graphics.Dispose()}
         }
     }
@@ -524,7 +574,7 @@ function New-CcodTrayContext {
                 $bitmap=$null;$hicon=[IntPtr]::Zero
                 try{
                     $bitmap=Invoke-CcodOwnedTrayAdapter $adapter.CreateBitmap @($color,[int]$size) $adapter.DisposeIconResource $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-                    Invoke-CcodTrayAdapter $adapter.DrawIconCircle @($bitmap,$color,[int]$size) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
+                    Invoke-CcodTrayAdapter $adapter.DrawBridgeIcon @($bitmap,$color,[int]$size) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
                     $validHicon={param($value)[bool]($value -is [IntPtr] -and $value -ne [IntPtr]::Zero)}
                     $hicon=Invoke-CcodOwnedTrayAdapter $adapter.GetHicon @($bitmap) $adapter.DestroyIcon $validHicon 'CCOD_TRAY_CREATE_FAILED' 'Tray'
                     $clone=Invoke-CcodOwnedTrayAdapter $adapter.CloneIcon @($hicon,$color,[int]$size) $adapter.DisposeIconResource $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
