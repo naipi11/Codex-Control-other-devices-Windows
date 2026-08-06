@@ -2,8 +2,10 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestSupport.ps1')
 
 $repositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$persistenceModulePath = Join-Path $repositoryRoot 'src\persistence\modules\PersistenceIO.psm1'
 $modulePath = Join-Path $repositoryRoot 'src\persistence\modules\UiPreferences.psm1'
 if (-not [IO.File]::Exists($modulePath)) { throw 'MISSING_UI_PREFERENCES_MODULE: src\persistence\modules\UiPreferences.psm1' }
+Import-Module $persistenceModulePath -Force
 Import-Module $modulePath -Force
 
 function New-CcodUiPreferenceFixture {
@@ -80,6 +82,42 @@ try {
             Assert-CcodEqual ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String((Get-CcodUiPreferenceBytes -StateRoot $initRoot))) 'existing preference bytes remain unchanged'
         } finally {
             if ([IO.Directory]::Exists($initRoot)) { Remove-Item -LiteralPath $initRoot -Recurse -Force }
+        }
+    }))
+
+    $results.Add((Invoke-CcodTest 'surfaces a prepared-file initialization race without clobbering the competing preference' {
+        $raceRoot = New-CcodUiPreferenceFixture
+        $uiModule = Get-Module UiPreferences
+        $winnerBytes = [Text.UTF8Encoding]::new($false).GetBytes("{`"schemaVersion`":1,`"languageMode`":`"en-US`",`"updatedAtUtc`":`"2026-08-05T00:00:00.0000000+00:00`"}`n")
+        $hadWriter = & $uiModule { $null -ne (Get-Command Write-CcodAtomicJsonIfAbsent -CommandType Function -ErrorAction SilentlyContinue) }
+        $originalWriter = if ($hadWriter) { & $uiModule { (Get-Command Write-CcodAtomicJsonIfAbsent -CommandType Function).ScriptBlock } } else { $null }
+        $raceWriter = {
+            param($Path, $Value)
+            $adapters = @{
+                CommitFileByHandleNoReplace = {
+                    param([IO.FileStream]$Source, [string]$Destination)
+                    [IO.File]::WriteAllBytes($Destination, $winnerBytes)
+                    $errorCode = [CcodNativeAtomicFile]::MoveFileByHandleNoReplace($Source.SafeFileHandle, $Destination)
+                    return [pscustomobject]@{ Success = ($errorCode -eq 0); ErrorCode = $errorCode }
+                }
+            }
+            PersistenceIO\Write-CcodAtomicJsonIfAbsent -Path $Path -Value $Value -Adapters $adapters
+        }.GetNewClosure()
+        try {
+            & $uiModule { param($Writer) Set-Item -Path Function:Write-CcodAtomicJsonIfAbsent -Value $Writer } $raceWriter
+            Assert-CcodThrows { Initialize-CcodUiPreference -StateRoot $raceRoot } 'CCOD_UI_PREFERENCES_EXISTS'
+            $path = Join-Path $raceRoot 'ui-preferences.json'
+            Assert-CcodEqual ([Convert]::ToBase64String($winnerBytes)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) 'the initializer preserves the competing preference bytes'
+            $siblings = @(Get-ChildItem -LiteralPath $raceRoot -Force)
+            Assert-CcodEqual 1 $siblings.Count 'the losing initializer leaves no temporary or recovery artifact'
+            Assert-CcodEqual 'ui-preferences.json' $siblings[0].Name 'the competing preference is the only state artifact'
+        } finally {
+            if ($hadWriter) {
+                & $uiModule { param($Writer) Set-Item -Path Function:Write-CcodAtomicJsonIfAbsent -Value $Writer } $originalWriter
+            } else {
+                & $uiModule { Remove-Item -Path Function:Write-CcodAtomicJsonIfAbsent -ErrorAction SilentlyContinue }
+            }
+            if ([IO.Directory]::Exists($raceRoot)) { Remove-Item -LiteralPath $raceRoot -Recurse -Force }
         }
     }))
 

@@ -83,6 +83,32 @@ try {
         Assert-CcodEqual 1 $siblings.Count 'successful native replacement must leave no sibling artifact'
     }
 
+    Invoke-CcodTest 'does not clobber a target that appears at the create-if-absent commit boundary' {
+        $path = Join-Path $root 'create-if-absent-race\settings.json'
+        $directory = Split-Path $path -Parent
+        $winnerBytes = [Text.UTF8Encoding]::new($false).GetBytes("{`"schemaVersion`":1,`"value`":`"winner`"}`n")
+        $raceState = [pscustomobject]@{ CompetitorCreated = $false; CommitAttempted = $false }
+        $adapters = @{
+            GetRandomFileName = { param([string]$Purpose) 'loser-prepared.json' }
+            CommitFileByHandleNoReplace = {
+                param([IO.FileStream]$Source, [string]$Destination)
+                [IO.File]::WriteAllBytes($Destination, $winnerBytes)
+                $raceState.CompetitorCreated = $true
+                $errorCode = [CcodNativeAtomicFile]::MoveFileByHandleNoReplace($Source.SafeFileHandle, $Destination)
+                $raceState.CommitAttempted = $true
+                return [pscustomobject]@{ Success = ($errorCode -eq 0); ErrorCode = $errorCode }
+            }
+        }
+
+        Assert-CcodThrows { Write-CcodAtomicJsonIfAbsent -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'loser' }) -Adapters $adapters } 'CCOD_ATOMIC_TARGET_EXISTS'
+        $siblings = @(Get-ChildItem -LiteralPath $directory -Force)
+        Assert-CcodEqual $true $raceState.CompetitorCreated 'the competing target appears only after the loser prepared its owned file'
+        Assert-CcodEqual $true $raceState.CommitAttempted 'the loser attempts a no-clobber native commit'
+        Assert-CcodEqual ([Convert]::ToBase64String($winnerBytes)) ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) 'the winner bytes remain exact'
+        Assert-CcodEqual 1 $siblings.Count 'the losing create leaves no temporary or recovery artifact'
+        Assert-CcodEqual 'settings.json' $siblings[0].Name 'the winning target is the only sibling left'
+    }
+
     Invoke-CcodTest 'commits only the owned replacement object when its pathname is attacked' {
         $path = Join-Path $root 'replace-source-race\settings.json'
         $directory = Split-Path $path -Parent

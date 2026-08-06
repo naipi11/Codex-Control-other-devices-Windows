@@ -103,12 +103,16 @@ function Initialize-CcodUiPreference {
     param([Parameter(Mandatory)][string]$StateRoot)
 
     $path = Resolve-CcodContainedPath -Root $StateRoot -RelativePath 'ui-preferences.json' -AllowMissingLeaf
-    if ([IO.File]::Exists($path)) {
-        Throw-CcodUiPreferenceError 'CCOD_UI_PREFERENCES_EXISTS' 'UI preferences already exist.' $path
-    }
     $store = New-CcodUiPreferenceStore -LanguageMode 'System' -UpdatedAtUtc (Get-CcodUiPreferenceTimestamp -Adapters (Get-CcodUiPreferenceAdapters))
     Assert-CcodUiPreferenceStore -Store $store
-    Write-CcodAtomicJson -Path $path -Value $store
+    try {
+        Write-CcodAtomicJsonIfAbsent -Path $path -Value $store
+    } catch {
+        if ($_.FullyQualifiedErrorId -like 'CCOD_ATOMIC_TARGET_EXISTS*') {
+            Throw-CcodUiPreferenceError 'CCOD_UI_PREFERENCES_EXISTS' 'UI preferences already exist.' $path
+        }
+        throw
+    }
 }
 
 function Read-CcodUiPreference {
