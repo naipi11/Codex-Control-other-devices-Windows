@@ -437,6 +437,73 @@ function Write-CcodAtomicJsonIfAbsent {
     Throw-CcodError 'CCOD_ATOMIC_CREATE_FAILED' "Native atomic JSON create failed with Windows error $($result.ErrorCode)" $Path
 }
 
+function Test-CcodJsonHasNoDuplicateProperties {
+    param([AllowNull()][string]$Json)
+
+    if ($null -eq $Json) { return $false }
+    $objects = [Collections.Generic.Stack[object]]::new()
+    for ($index = 0; $index -lt $Json.Length; $index++) {
+        $character = $Json[$index]
+        if ($character -eq '{') {
+            $objects.Push([Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal))
+            continue
+        }
+        if ($character -eq '}') {
+            if ($objects.Count -eq 0) { return $false }
+            [void]$objects.Pop()
+            continue
+        }
+        if ($character -ne '"') { continue }
+
+        $name = [Text.StringBuilder]::new()
+        $index++
+        while ($index -lt $Json.Length) {
+            $character = $Json[$index]
+            if ($character -eq '"') { break }
+            if ($character -ne [char]92) {
+                [void]$name.Append($character)
+                $index++
+                continue
+            }
+
+            $index++
+            if ($index -ge $Json.Length) { return $false }
+            $escape = $Json[$index]
+            if ($escape -eq 'u') {
+                if ($index + 4 -ge $Json.Length) { return $false }
+                try {
+                    [void]$name.Append([char][Convert]::ToInt32($Json.Substring($index + 1, 4), 16))
+                } catch {
+                    return $false
+                }
+                $index += 5
+                continue
+            }
+            switch ([string]$escape) {
+                '"' { $decoded = '"' }
+                '\' { $decoded = [char]92 }
+                '/' { $decoded = '/' }
+                'b' { $decoded = [char]8 }
+                'f' { $decoded = [char]12 }
+                'n' { $decoded = [char]10 }
+                'r' { $decoded = [char]13 }
+                't' { $decoded = [char]9 }
+                default { return $false }
+            }
+            [void]$name.Append($decoded)
+            $index++
+        }
+        if ($index -ge $Json.Length) { return $false }
+
+        $next = $index + 1
+        while ($next -lt $Json.Length -and [char]::IsWhiteSpace($Json[$next])) { $next++ }
+        if ($next -lt $Json.Length -and $Json[$next] -eq ':') {
+            if ($objects.Count -eq 0 -or -not $objects.Peek().Add($name.ToString())) { return $false }
+        }
+    }
+    return $objects.Count -eq 0
+}
+
 function Read-CcodStrictJson {
     [CmdletBinding()]
     param(
@@ -450,7 +517,15 @@ function Read-CcodStrictJson {
     }
 
     try {
-        $value = [IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json -ErrorAction Stop
+        $json = [IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false))
+    } catch {
+        Throw-CcodError 'CCOD_STATE_MALFORMED' "$Kind state is not valid JSON" $Path
+    }
+    if (-not (Test-CcodJsonHasNoDuplicateProperties -Json $json)) {
+        Throw-CcodError 'CCOD_STATE_MALFORMED' "$Kind state is not valid JSON" $Path
+    }
+    try {
+        $value = $json | ConvertFrom-Json -ErrorAction Stop
     } catch {
         Throw-CcodError 'CCOD_STATE_MALFORMED' "$Kind state is not valid JSON" $Path
     }

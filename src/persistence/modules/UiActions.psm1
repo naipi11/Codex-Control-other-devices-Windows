@@ -63,7 +63,7 @@ function Invoke-CcodUiActionAdapter {
 }
 
 function ConvertTo-CcodUiActionArgument {
-    param([Parameter(Mandatory)][string]$Argument)
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Argument)
     $quoted=[Text.StringBuilder]::new();[void]$quoted.Append('"');$backslashes=0
     foreach($character in $Argument.ToCharArray()){
         if($character -eq [char]'\'){$backslashes++;continue}

@@ -70,6 +70,7 @@ try{
     $results.Add((Invoke-CcodTest 'quotes each Windows argument independently with hand-derived literals and builds a hidden non-shell start' {
         $module=Get-Module UiActions
         $cases=@(
+            [pscustomobject]@{Input='';Expected='""'},
             [pscustomobject]@{Input='C:\Program Files\Codex\tool.ps1';Expected='"C:\Program Files\Codex\tool.ps1"'},
             [pscustomobject]@{Input='value"quoted';Expected='"value\"quoted"'},
             [pscustomobject]@{Input='C:\A B\';Expected='"C:\A B\\"'}
@@ -107,6 +108,112 @@ try{
         Assert-CcodEqual '-InstallRoot' $calls.Arguments[5] 'root switch'
         Assert-CcodEqual $fixture.InstallRoot $calls.Arguments[6] 'exact install root'
         Assert-CcodEqual '-Confirm:$false' $calls.Arguments[7] 'second prompt suppressed after tray confirmation'
+    }))
+
+    $results.Add((Invoke-CcodTest 'does not confuse distinct literal manifest property prefixes with duplicates' {
+        $fixture=New-CcodUiActionFixture 'distinct property prefix'
+        $record=@($fixture.Manifest.files|Where-Object{$_.path -ceq 'Uninstall-CodexControlOtherDevices.ps1'})[0]
+        $manifestJson=@"
+{
+  "schemaVersion": 1,
+  "projectVersion": "7.0.0",
+  "runtimeId": "$($fixture.RuntimeId)",
+  "files": [
+    {
+      "path": "Uninstall-CodexControlOtherDevices.ps1",
+      "pathSuffix": "not-the-same-property",
+      "length": $($record.length),
+      "sha256": "$($record.sha256)"
+    }
+  ]
+}
+"@
+        [IO.File]::WriteAllText((Join-Path $fixture.RuntimeRoot 'manifest.json'),$manifestJson,[Text.UTF8Encoding]::new($false))
+        $calls=New-CcodUiActionCalls
+        $receipt=Start-CcodTrayUninstall -InstallRoot $fixture.InstallRoot -RuntimeRoot $fixture.RuntimeRoot -PowerShellPath $powershellPath -Adapters (New-CcodUiActionFakeAdapters $calls)
+        Assert-CcodEqual $true $receipt.Started 'distinct property prefixes preserve the validated launch result'
+        Assert-CcodEqual 1 $calls.Start 'distinct property prefixes reach only the fake process boundary'
+    }))
+
+    $results.Add((Invoke-CcodTest 'accepts literal string values containing braces and escaped quotes' {
+        $fixture=New-CcodUiActionFixture 'literal string lexical state'
+        $record=@($fixture.Manifest.files|Where-Object{$_.path -ceq 'Uninstall-CodexControlOtherDevices.ps1'})[0]
+        $manifestJson=@"
+{
+  "schemaVersion": 1,
+  "projectVersion": "7.0.0",
+  "runtimeId": "$($fixture.RuntimeId)",
+  "description": "literal { left } right and \"quoted\" text",
+  "files": [
+    { "path": "Uninstall-CodexControlOtherDevices.ps1", "length": $($record.length), "sha256": "$($record.sha256)" }
+  ]
+}
+"@
+        [IO.File]::WriteAllText((Join-Path $fixture.RuntimeRoot 'manifest.json'),$manifestJson,[Text.UTF8Encoding]::new($false))
+        $calls=New-CcodUiActionCalls
+        $receipt=Start-CcodTrayUninstall -InstallRoot $fixture.InstallRoot -RuntimeRoot $fixture.RuntimeRoot -PowerShellPath $powershellPath -Adapters (New-CcodUiActionFakeAdapters $calls)
+        Assert-CcodEqual $true $receipt.Started 'braces and escaped quotes inside a value remain lexical data'
+        Assert-CcodEqual 1 $calls.Start 'lexical string fixture reaches only the fake process boundary'
+    }))
+
+    $results.Add((Invoke-CcodTest 'rejects literal manifests with duplicate root or file properties before any process start' {
+        foreach($variant in @('duplicate root property','duplicate file property','duplicate file property with prefix collision')){
+            $fixture=New-CcodUiActionFixture $variant
+            $record=@($fixture.Manifest.files|Where-Object{$_.path -ceq 'Uninstall-CodexControlOtherDevices.ps1'})[0]
+            $manifestJson=switch($variant){
+                'duplicate root property' {@"
+{
+  "schemaVersion": 1,
+  "projectVersion": "7.0.0",
+  "runtimeId": "$($fixture.RuntimeId)",
+  "runtimeId": "$($fixture.RuntimeId)",
+  "files": [
+    { "path": "Uninstall-CodexControlOtherDevices.ps1", "length": $($record.length), "sha256": "$($record.sha256)" }
+  ]
+}
+"@}
+                'duplicate file property' {@"
+{
+  "schemaVersion": 1,
+  "projectVersion": "7.0.0",
+  "runtimeId": "$($fixture.RuntimeId)",
+  "files": [
+    {
+      "path": "Uninstall-CodexControlOtherDevices.ps1",
+      "path": "Uninstall-CodexControlOtherDevices.ps1",
+      "length": $($record.length),
+      "sha256": "$($record.sha256)"
+    }
+  ]
+}
+"@}
+                'duplicate file property with prefix collision' {@"
+{
+  "schemaVersion": 1,
+  "projectVersion": "7.0.0",
+  "runtimeId": "$($fixture.RuntimeId)",
+  "files": [
+    {
+      "path": "Uninstall-CodexControlOtherDevices.ps1",
+      "pathSuffix": "not-the-same-property",
+      "path": "Uninstall-CodexControlOtherDevices.ps1",
+      "length": $($record.length),
+      "sha256": "$($record.sha256)"
+    }
+  ]
+}
+"@}
+            }
+            [IO.File]::WriteAllText((Join-Path $fixture.RuntimeRoot 'manifest.json'),$manifestJson,[Text.UTF8Encoding]::new($false))
+            $calls=New-CcodUiActionCalls
+            $caught=$null
+            try{
+                Start-CcodTrayUninstall -InstallRoot $fixture.InstallRoot -RuntimeRoot $fixture.RuntimeRoot -PowerShellPath $powershellPath -Adapters (New-CcodUiActionFakeAdapters $calls)|Out-Null
+            }catch{$caught=$_}
+            Assert-CcodEqual 0 $calls.Start "$variant never reaches StartProcess"
+            Assert-CcodTrue ($null -ne $caught) "$variant returns a stable rejection"
+            Assert-CcodEqual 'CCOD_UNINSTALL_RUNTIME_INVALID' (([string]$caught.FullyQualifiedErrorId -split ',')[0]) "$variant uses the stable launcher rejection"
+        }
     }))
 
     $results.Add((Invoke-CcodTest 'rejects missing manifest mismatch unhashed script reparse escape wrong host and extra adapters before launch' {
