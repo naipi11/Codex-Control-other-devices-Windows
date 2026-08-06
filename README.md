@@ -1,23 +1,26 @@
-# Codex 控制其他设备（Windows）
+# Codex Control other devices for Windows
 
-语言 / Language：**简体中文** · [English](README.en.md)
+Language / 语言：English · [简体中文](README.zh-CN.md)
 
-在 Windows 版 Codex Desktop 中启用随应用一起打包、但因运行时缺陷被隐藏的：
+Enables the UI that ships with Codex Desktop for Windows but is hidden by a runtime defect:
 
-**设置 → 连接 → 控制其他设备（Control other devices）**
+**Settings → Connections → Control other devices**
 
-本项目不修改 `ChatGPT.exe`、`app.asar`，不写入
-`C:\Program Files\WindowsApps` 中的任何文件。安装后由常驻托盘守护程序自动接管；手动模式保留为保守回退。
+This project does not modify `ChatGPT.exe`, `app.asar`, or anything under
+`C:\Program Files\WindowsApps`. After installation, a persistent tray supervisor
+manages everything automatically; manual mode remains a conservative fallback.
 
 > [!IMPORTANT]
-> 注册设备时请完成账号或工作区要求的 MFA、SSO 或 passkey 验证。
+> Complete the MFA, SSO, or passkey checks required by your account or workspace before enrolling a device.
 >
 > [!WARNING]
-> 这是非官方运行时兼容方案，会在随机 `127.0.0.1` 端口启用 Chromium 调试接口。请仅在可信的 Windows 电脑上运行，并在每次 Codex 更新后重新执行兼容性检查。
+> This is an unofficial runtime compatibility project. It enables Chromium debugging on a random
+> `127.0.0.1` port. Run it only on a trusted Windows machine and re-run the compatibility check
+> after every Codex update.
 
-## 快速开始
+## Quick start
 
-运行只读预检，确认三项都满足再安装：
+Run the read-only preflight and continue only when all three checks pass:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CodexControlOtherDevices.ps1
@@ -25,128 +28,137 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CodexControlOther
 
 ```text
 Ready: True
-Node.js: 22 或更高
+Node.js: 22 or newer
 Heuristic match: True
 ```
 
-安装常驻守护并允许兼容更新试运行：
+Install the persistent supervisor and explicitly opt in to candidate-compatible trials:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -EnableCandidateCompatibleUpdates
 ```
 
-安装目录固定为 `%LOCALAPPDATA%\CodexControlOtherDevices`。首次接管时，Codex 可能被自动关闭并立即重开一次，请先保存未提交的输入或前台工作。
+The install root is `%LOCALAPPDATA%\CodexControlOtherDevices`. During the first takeover, a
+normal Codex launch may close and reopen once, so save unfinished work first.
 
-已验证：Windows 11 · Codex Desktop `26.730.8199.0` · Node.js `22.23.1`；标签显示、控制器授权、设备列表、远程项目均可用。
+Verified on Windows 11 · Codex Desktop `26.730.8199.0` · Node.js `22.23.1`:
+the tab, controller enrollment, device list, and remote projects are all working.
 
-## 日常使用
+## Everyday use
 
-- 登录后计划任务 `Codex Control Other Devices Supervisor` 自动启动托盘守护，无需手动运行任何脚本。
-- 托盘图标为绿色时，当前会话已生效；打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
-- 新版 Codex 正常启动自带 `--remote-debugging-port`（没有 `--inspect`），守护程序已能识别这种启动方式并自动完成接管。
-- 托盘菜单支持跟随系统、中文、English，切换即时生效，无需重启。
-- 升级本项目或 Codex 后无需重装守护程序本体，安装器只会原子切换版本化运行时。
+- The logon task `Codex Control Other Devices Supervisor` starts the tray supervisor automatically; no manual scripts are needed.
+- A green tray icon means the current session is active. Open **Settings → Connections → Control other devices** to enroll or use it.
+- New Codex builds start with `--remote-debugging-port` but no `--inspect`; the supervisor recognizes that launch shape and performs the takeover automatically.
+- The tray menu supports Follow system, Chinese, and English; switching applies immediately without restarting anything.
+- Updating this project or Codex does not require reinstalling the supervisor; the installer atomically switches versioned runtimes.
 
-## 托盘菜单
+## Tray menu
 
-原生 WinForms 菜单按语义状态显示或隐藏操作：立即应用、重试、自动化开关、兼容更新试运行、日志、卸载。卸载必须先在菜单中确认。
+The native WinForms menu shows actions only when their semantic state allows them: Apply now, Retry,
+Automation, Candidate-compatible trial, Logs, and Uninstall. Uninstall always requires explicit confirmation.
 
-| 颜色 | 状态 | 含义 |
+| Color | State | Meaning |
 |---|---|---|
-| 灰色 | Waiting / Inspecting / Transitioning | 等待 Codex、检查当前会话或正在应用桥接 |
-| 绿色 | Active / ActivePaused | 当前会话已验证可用 |
-| 黄色 | Suppressed | 兼容操作被抑制，需手动重试或新运行时 |
-| 红色 | Recovered / Error | 已安全恢复普通 Codex，或自动操作被阻止 |
+| Gray | Waiting / Inspecting / Transitioning | Waiting for Codex, inspecting the current session, or applying the bridge |
+| Green | Active / ActivePaused | Current session is verified and usable |
+| Yellow | Suppressed | Compatibility action is suppressed until a manual retry or a new runtime |
+| Red | Recovered / Error | Ordinary Codex was safely restored, or automatic actions are blocked |
 
-## 维护命令
+## Maintenance
 
-修复损坏状态：
+Repair damaged state:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -RepairState
 ```
 
-安全卸载（默认保留设备密钥）：
+Uninstall safely (device key store is preserved by default):
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-CodexControlOtherDevices.ps1
 ```
 
-卸载参数：`-BackupDeviceKeyStore` 备份密钥；`-RemoveDeviceKeyStore` 显式删除密钥（两者互斥）；`-KeepCurrentSpecialSession` 保留当前特殊会话（renderer CDP 会继续开放）。
+Options: `-BackupDeviceKeyStore` backs up the key; `-RemoveDeviceKeyStore` explicitly deletes it (mutually exclusive);
+`-KeepCurrentSpecialSession` keeps the current special session (renderer CDP stays open).
 
-手动启用或恢复普通会话（保守回退）：
+Manual per-session enable or restore (conservative fallback):
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-CodexControlOtherDevices.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Reset-CodexControlOtherDevices.ps1
 ```
 
-## 它解决了什么
+## What it fixes
 
-受影响的 Windows 包具备全部以下特征：
+Affected Windows packages have all of the following characteristics:
 
-1. Windows 控制器页面、字符串和后端调用已随包提供。
-2. Statsig 门 `782640499` 语义相反：`true` 反而隐藏 `showControlOtherDevices`。
-3. 主进程设备密钥入口只接受 `process.platform === "darwin"`。
-4. Windows 包未附带 `remote-control-device-key.node`。
+1. The Windows controller page, strings, and backend calls are already shipped.
+2. Statsig gate `782640499` is consumed with inverted semantics: `true` hides `showControlOtherDevices`.
+3. The main-process device-key entry point accepts only `process.platform === "darwin"`.
+4. The Windows package does not ship `remote-control-device-key.node`.
 
-官方文档见 [Remote connections](https://learn.chatgpt.com/docs/remote-connections)。本项目只修复本地 Windows 运行时缺口，不绕过账号授权、MFA/SSO/passkey、工作区策略或服务器权限。
+Official docs: [Remote connections](https://learn.chatgpt.com/docs/remote-connections).
+This project only fills the local Windows runtime gap. It does not bypass account authorization,
+MFA/SSO/passkeys, workspace policy, or server permissions.
 
-## 安全模型
+## Security model
 
-- 调试端口只绑定随机 `127.0.0.1`；主进程 Inspector 注入完成后必须关闭。
-- 与当前 Windows 用户同权限的进程可访问这些端口，因此不要在不可信电脑上运行。
-- 设备私钥保存在 `%CODEX_HOME%\remote-control-device-keys.windows.json`（未设置 `CODEX_HOME` 时为 `%USERPROFILE%\.codex\...`），使用 DPAPI 当前用户范围加密，是软件密钥而非 TPM 不可导出密钥。
-- 移动或删除本地密钥不会撤销服务器端授权，请先在 Codex 中撤销设备。
+- Debug ports bind only to a random `127.0.0.1`; the main-process Inspector must close after injection.
+- Any process running as the same Windows user can reach these ports, so only use a trusted machine.
+- The device private key is stored at `%CODEX_HOME%\remote-control-device-keys.windows.json`
+  (or `%USERPROFILE%\.codex\...` when `CODEX_HOME` is unset), encrypted with DPAPI current-user scope.
+  It is a software key, not a TPM-backed non-exportable key.
+- Moving or deleting the local key does not revoke server authorization; revoke the device in Codex first.
 
-详见 [SECURITY.md](SECURITY.md)、[docs/TECHNICAL.md](docs/TECHNICAL.md)。
+See [SECURITY.md](SECURITY.md) and [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
-## 诊断
+## Diagnostics
 
-日志位于 `%LOCALAPPDATA%\CodexControlOtherDevices\logs\`，主要有 `install.log`、`supervisor.log`、`bootstrap.log`、`transactions.log`。
+Logs live in `%LOCALAPPDATA%\CodexControlOtherDevices\logs\`: `install.log`, `supervisor.log`,
+`bootstrap.log`, and `transactions.log`.
 
-## 常见问题
+## Troubleshooting
 
-仍没有“控制其他设备”标签？
+Still no **Control other devices** tab?
 
-1. 确认托盘图标为绿色（灰色表示等待 Codex 或自动化已暂停）。
-2. 重跑预检，确认 `Ready: True`。
-3. 查看 `logs\supervisor.log` 和 `logs\install.log`。
-4. 确认安全软件没有阻止 `node.exe` 访问本机回环端口。
-5. 退出所有 Codex 进程后重试；守护程序最多自动重开一次。
+1. Confirm the tray icon is green (gray means waiting for Codex or automation is paused).
+2. Re-run the preflight and confirm `Ready: True`.
+3. Check `logs\supervisor.log` and `logs\install.log`.
+4. Make sure security software is not blocking `node.exe` from loopback access.
+5. Exit all Codex processes and retry; the supervisor restarts Codex at most once.
 
-授权失败？
+Enrollment or authorization fails?
 
-- 完成账号或工作区要求的 MFA/SSO/passkey。
-- 确认 Codex 与浏览器使用同一 ChatGPT 账号和工作区。
-- 组织工作区请确认管理员允许 Remote Control。
+- Complete MFA/SSO/passkey required by the account or workspace.
+- Use the same ChatGPT account and workspace in Codex and the browser.
+- For organization workspaces, confirm the admin allows Remote Control.
 
-## 项目结构
+## Project layout
 
 ```text
-Install-CodexControlOtherDevices.ps1   安装/升级/修复 CLI
-Uninstall-CodexControlOtherDevices.ps1 安全卸载 CLI
-Start-CodexControlOtherDevices.ps1     手动会话启动
-Reset-CodexControlOtherDevices.ps1     手动停止/密钥备份
-Test-CodexControlOtherDevices.ps1      只读兼容性预检
-src/persistence/                       引导、托盘守护、会话控制器、静态探测
-src/runtime/                           clean-room 桥接实现
-tests/                                 仓库自测、持久化测试、视觉 gallery
-docs/                                  技术文档、隔离记录、双语截图
+Install-CodexControlOtherDevices.ps1   Install/upgrade/repair CLI
+Uninstall-CodexControlOtherDevices.ps1 Safe uninstall CLI
+Start-CodexControlOtherDevices.ps1     Manual session start
+Reset-CodexControlOtherDevices.ps1     Manual stop / key backup
+Test-CodexControlOtherDevices.ps1      Read-only compatibility preflight
+src/persistence/                       Bootstrap, tray supervisor, session controller, static probe
+src/runtime/                           Clean-room bridge implementation
+tests/                                 Repository tests, persistence tests, visual gallery
+docs/                                  Technical docs, clean-room notes, bilingual screenshots
 ```
 
-## 验证
+## Validation
 
 ```powershell
 npm test
 ```
 
-## 许可与来源
+## License and provenance
 
-[MIT](LICENSE) © 2026 naipi11。问题定位与运行时技术来自
-[hunterbeach 的 Codex Windows runtime remote control Gist](https://gist.github.com/hunterbeach/dc4b74bda0e045e33f308099182b4f80)，
-上游思路分别来自 [zdaar/codex-hacks](https://github.com/zdaar/codex-hacks/blob/main/patch_codex_remote_control.py)
-和 [brunolemos 的 feature-override Gist](https://gist.github.com/brunolemos/7466058059eae140a57a7c6a42f235ae)。
-最终 `src/runtime` 采用隔离 clean-room 独立重写，不包含无许可上游源码文本；原始贡献与来源边界见
-[docs/CLEANROOM.md](docs/CLEANROOM.md) 和 [NOTICE.md](NOTICE.md)。
-本项目非官方，与 OpenAI 无关，不分发 OpenAI 的程序文件或资源。
+[MIT](LICENSE) © 2026 naipi11. Root-cause analysis and the runtime technique come from
+[hunterbeach's Codex Windows runtime remote control Gist](https://gist.github.com/hunterbeach/dc4b74bda0e045e33f308099182b4f80);
+the main-process approach credits [zdaar/codex-hacks](https://github.com/zdaar/codex-hacks/blob/main/patch_codex_remote_control.py),
+and the renderer injection pattern adapts [brunolemos' feature-override Gist](https://gist.github.com/brunolemos/7466058059eae140a57a7c6a42f235ae).
+The final `src/runtime` is an isolated clean-room rewrite with no unlicensed upstream source text;
+see [docs/CLEANROOM.md](docs/CLEANROOM.md) and [NOTICE.md](NOTICE.md).
+This project is unofficial, is not affiliated with OpenAI, and does not redistribute OpenAI binaries or assets.

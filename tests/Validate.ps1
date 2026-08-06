@@ -76,7 +76,7 @@ if ($failures.Count -eq 0) {
 
 foreach ($required in @(
     'README.md',
-    'README.en.md',
+    'README.zh-CN.md',
     'LICENSE',
     'NOTICE.md',
     'SECURITY.md',
