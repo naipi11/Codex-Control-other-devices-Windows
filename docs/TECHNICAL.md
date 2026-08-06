@@ -139,6 +139,115 @@ the manual launcher. The supervisor owns a tray icon, watches the same-Windows-
 session Codex package lifecycle, and reapplies the bridge automatically after
 normal launches, crashes, and compatible updates.
 
+### Bilingual tray UI contract
+
+The tray layer deliberately separates policy from presentation:
+
+- `SupervisorEngine.psm1` returns only the semantic presentation object
+  `{Color, StateKey, SessionReadyVisible, ApplyNowVisible, ApplyNowEnabled,
+  ManualRetryVisible, ManualRetryEnabled, AutomationToggleEnabled,
+  AutomationChecked, CandidateOptInToggleEnabled, CandidateOptInChecked,
+  OpenLogsEnabled, UninstallEnabled, Busy}`.
+- `Supervisor.ps1` owns preference reads, locale resolution, command routing, and
+  error containment.
+- `TrayUi.psm1` owns the STA-thread `NotifyIcon`, native
+  `ContextMenuStrip`/`ToolStripMenuItem` controls, localized text, icon resources,
+  and confirmation dialogs. It does not decide whether automation is safe.
+
+#### Catalog schema and locale resolution
+
+`src/persistence/resources/ui.en-US.json` and `ui.zh-CN.json` are immutable UTF-8
+resources. Each catalog must have exactly these ordered top-level properties:
+`schemaVersion`, `locale`, `strings`. `schemaVersion` is integer `1`; `locale`
+must exactly match the filename; `strings` must contain the same 32 ordered keys:
+
+```text
+Tray.Title
+Status.Waiting, Status.Inspecting, Status.Transitioning, Status.Active,
+Status.ActivePaused, Status.Suppressed, Status.Recovered, Status.Error
+Tooltip.Waiting, Tooltip.Inspecting, Tooltip.Transitioning, Tooltip.Active,
+Tooltip.ActivePaused, Tooltip.Suppressed, Tooltip.Recovered, Tooltip.Error
+Menu.SessionReady, Menu.ApplyNow, Menu.ManualRetry, Menu.Automation,
+Menu.CandidateOptIn, Menu.Language, Menu.FollowSystem, Menu.Chinese,
+Menu.English, Menu.OpenLogs, Menu.Uninstall
+Dialog.UninstallTitle, Dialog.UninstallMessage
+Error.UninstallStart, Error.LanguageChange
+```
+
+The loader rejects a BOM, malformed JSON, duplicate properties (including
+escaped-name collisions), extra/missing/reordered fields, control characters,
+non-string values, oversized strings, and resource paths that escape the
+contained resource directory. A damaged Chinese catalog falls back to the
+validated English catalog; if English is also invalid, the embedded emergency
+English dictionary is used with `UsedEmergencyCatalog=true`.
+
+| `LanguageMode` | Windows culture | `EffectiveLocale` |
+|---|---|---|
+| `System` | `zh`, `zh-*` | `zh-CN` |
+| `System` | any other culture or missing culture | `en-US` |
+| `zh-CN` | any | `zh-CN` |
+| `en-US` | any | `en-US` |
+
+The language root intentionally remains bilingual: Chinese mode renders
+`语言 / Language`; English mode renders `Language / 语言`.
+
+#### UI preference schema and safety boundary
+
+The display preference is independent of `settings.json` and has this exact schema:
+
+```json
+{
+  "schemaVersion": 1,
+  "languageMode": "System",
+  "updatedAtUtc": "2026-08-05T00:00:00.0000000Z"
+}
+```
+
+`languageMode` accepts only `System`, `zh-CN`, or `en-US`; `updatedAtUtc` must be a
+canonical UTC round-trip timestamp. `Initialize-CcodUiPreference` creates the file
+only on first install, while `Set-CcodUiLanguageMode` replaces it atomically.
+`Read-CcodUiPreference` returns `System` with a stable fallback code for missing or
+malformed data. That fallback never sets `StateDamageBlocksActions`, changes either
+automation-consent switch, quarantines safety state, or blocks a controller action.
+
+#### Live language changes and resource ownership
+
+A language menu click is handled on the tray's owning STA thread:
+
+1. `Supervisor.ps1` resolves the requested catalog and validates the exact catalog
+   contract.
+2. It atomically persists the requested mode in `ui-preferences.json`.
+3. `TrayUi.psm1` updates existing menu rows, language checkmarks, tooltip, and
+   title text in place; the `NotifyIcon`, menu, queue, callbacks, and semantic state
+   objects keep their identity.
+4. If persistence or rendering fails, the previous mode/catalog is restored and a
+   localized `Error.LanguageChange` message is contained; the compatibility loop
+   continues.
+
+`TrayUi.psm1` generates eight cached icons (Gray/Green/Yellow/Red × 16/32). Each
+temporary bitmap and GDI HICON is disposed after its cloned `Icon` is captured.
+The title image and bold title font are separately owned resources. Close is
+idempotent, detaches callbacks, hides/disposes the `NotifyIcon`, disposes the native
+menu and controls once, then releases title resources and cached icons.
+
+#### Installation, manifest, and uninstall boundary
+
+The installer includes exactly `ui.en-US.json` and `ui.zh-CN.json` in the fixed
+resource allowlist. They are copied into the staged runtime, hashed in
+`manifest.json`, and verified before `active.json` switches. The installed
+supervisor therefore uses the same immutable catalog bytes as the runtime
+manifest; do not manually copy UI files into an active runtime.
+
+Tray uninstall is a verified launch, not an in-process cleanup shortcut. After the
+native Yes/No warning (default button No), `UiActions.psm1` verifies the active
+runtime pointer, manifest hashes, contained `Uninstall-CodexControlOtherDevices.ps1`,
+reparse-point status, approved Windows PowerShell host, and the exact argument vector.
+Only then does it start the runtime-bound uninstaller. The uninstaller performs the
+existing normalization, task removal, supervisor shutdown/wait, and runtime/state
+cleanup sequence, preserving the DPAPI device-key store by default. A launch
+failure is logged as `CCOD_UNINSTALL_START_FAILED` and leaves the tray and current
+Codex session usable.
+
 ### Source and installed layouts
 
 The source checkout is the only trusted input. The installer copies a fixed
@@ -155,10 +264,12 @@ allowlist into a versioned runtime below `%LOCALAPPDATA%\CodexControlOtherDevice
 │   ├── src\persistence\SessionController.ps1
 │   ├── src\persistence\StaticProbeWorker.ps1
 │   ├── src\persistence\modules\*.psm1
+│   ├── src\persistence\resources\ui.*.json
 │   ├── src\runtime\*                    # clean-room bridge
 │   └── src\check-package.mjs
 ├── state\
 │   ├── settings.json                    # schema 1 consent + verified Node paths
+│   ├── ui-preferences.json              # schema 1 display-language preference
 │   ├── status.json                      # schema 1 supervisor/session evidence
 │   ├── verified-packages.json           # schema 1 suppression/verification cache
 │   └── transition.json                  # schema 1 active transaction
@@ -183,6 +294,9 @@ against the source SHA-256 before the manifest is trusted.
 - `settings.json` schema 1: `automationEnabled` and `candidateCompatibleOptIn`
   are independent booleans, `nodeCandidates` are absolute installer-verified
   `node.exe` paths, and `updatedAtUtc` is a canonical UTC string.
+- `ui-preferences.json` schema 1: display-only `languageMode` and canonical
+  `updatedAtUtc`; it is not safety state and malformed bytes fall back to
+  `System`.
 - `status.json` schema 1: nullable `session` with `supervisorPid`,
   `supervisorCreationTimeUtc`, `sessionId`, `runtimeId`, `sessionState`, and
   nullable `codex` identity/probe evidence. A non-empty `codex` requires

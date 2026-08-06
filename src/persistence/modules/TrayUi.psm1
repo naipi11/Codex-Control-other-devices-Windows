@@ -215,7 +215,19 @@ function Get-CcodTrayDefaultAdapters {
         if($object.PSObject.Properties['Name']){$object.Name=$Name}
         $object
     }
-    $defaults.AddUiChild={param($Parent,$Child)[void]$Parent.Items.Add($Child)}
+    $defaults.AddUiChild={
+        param($Parent,$Child)
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        if($Parent -is [Windows.Forms.ToolStripMenuItem]){
+            [void]$Parent.DropDownItems.Add($Child)
+            return
+        }
+        if($Parent -is [Windows.Forms.ContextMenuStrip]){
+            [void]$Parent.Items.Add($Child)
+            return
+        }
+        throw 'unsupported native menu parent'
+    }
     $defaults.SetUiProperty={param($Object,$Name,$Value)$Object.PSObject.Properties[$Name].Value=$Value}
     $defaults.GetUiProperty={param($Object,$Name)$Object.PSObject.Properties[$Name].Value}
     $defaults.SetUiVisible={param($Object,$Visible)$Object.Visible=[bool]$Visible}

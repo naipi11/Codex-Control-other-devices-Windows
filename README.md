@@ -68,6 +68,51 @@ hunterbeach 的原始研究记录验证过 `26.715.7063.0`。本仓库不只检�
 - 更新本项目或 Codex 后无需重新安装守护程序本体；升级安装器只会原子切换版本化
   运行时并让旧守护程序正常退出。
 
+### 托盘图标、状态与双语菜单
+
+托盘图标使用连接桥轮廓和状态圆点，而不是容易与普通应用混淆的字母图标。颜色只
+表达当前守护状态，不改变安全策略：
+
+| 颜色 | 状态 | 含义 |
+|---|---|---|
+| 灰色 | Waiting / Inspecting / Transitioning | 等待 Codex、检查当前会话或正在应用桥接 |
+| 绿色 | Active / ActivePaused | 当前会话已验证可用；若自动修复暂停，仍保留绿色但菜单会反映暂停状态 |
+| 黄色 | Suppressed | 兼容操作被抑制，需手动重试或新的运行时版本 |
+| 红色 | Recovered / Error | 已安全恢复普通 Codex，或自动操作被阻止，需要查看日志 |
+
+右键菜单是原生 WinForms 分组菜单，并按语义状态显示或隐藏操作：当前会话已就绪、
+立即检查、上次重试、自动修复开关、兼容更新试运行、日志和卸载不会在无关状态下
+伪装成可用操作。卸载必须先在菜单中确认；取消确认不会入队，也不会改变状态。
+
+菜单语言默认跟随 Windows。语言根节点在中文界面显示为 `语言 / Language`，在
+英文界面显示为 `Language / 语言`；子菜单提供：
+
+- `跟随系统（中文）` / `Follow system (Chinese)`；
+- `中文` / `Chinese`；
+- `English`。
+
+选择 `中文` 或 `English` 后，菜单和托盘提示会立即更新，无需重启 Supervisor 或
+Codex。选择跟随系统会写入
+`%LOCALAPPDATA%\CodexControlOtherDevices\state\ui-preferences.json` 的
+`languageMode: "System"`。该文件只保存显示偏好，不属于自动化安全状态；缺失或损坏
+时回退到跟随系统，且不会阻断兼容操作、改变授权开关或触发状态修复。
+
+### 视觉 gallery 与截图
+
+不想触碰当前 Codex 会话时，可以运行只读的托盘视觉 gallery：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA `
+  -File .\tests\manual\Show-TrayUiGallery.ps1 `
+  -Locale All -State All -DurationSeconds 8
+```
+
+gallery 只在内存中接受菜单命令，始终拒绝卸载确认，不检查、停止、启动或修改
+Codex，也不写入偏好和安全状态。仓库中的原生菜单截图：
+
+- [中文菜单](docs/assets/tray-menu-zh-CN.png)
+- [English menu](docs/assets/tray-menu-en-US.png)
+
 ### 安装
 
 先执行只读预检：
@@ -256,10 +301,12 @@ Issue，并附上：
 │   ├── Validate.ps1                        # 仓库与 hermetic 全量验证
 │   ├── PersistenceSelfTest.ps1             # PowerShell 持久化聚合测试
 │   ├── CleanroomSelfTest.js                # DPAPI/兼容/渲染/端口自测
-│   └── persistence/                        # 各模块自测（含 InstallLifecycle）
+│   ├── persistence/                        # 各模块自测（含 InstallLifecycle）
+│   └── manual/Show-TrayUiGallery.ps1       # 不触碰 Codex 的视觉 gallery
 ├── docs/
 │   ├── TECHNICAL.md                        # 技术设计与信任边界
-│   └── CLEANROOM.md                        # 隔离实现记录与边界
+│   ├── CLEANROOM.md                        # 隔离实现记录与边界
+│   └── assets/tray-menu-*.png              # 已检查的双语原生菜单截图
 ├── package.json                            # Node 版本约束与验证命令
 ├── SECURITY.md
 └── NOTICE.md

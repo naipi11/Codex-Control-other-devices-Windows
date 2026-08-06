@@ -111,6 +111,58 @@ three seconds and uses a WMI capability fallback when an optional capability is
 unavailable. Project upgrades and Codex restarts do not require rerunning the
 project; the installed supervisor continues to manage the current runtime.
 
+### Tray icon, status colors, and bilingual menu
+
+The tray icon uses a connection-bridge outline with a status dot instead of a
+letter-shaped application glyph. Color describes the supervisor state only; it
+does not change the safety policy:
+
+| Color | State | Meaning |
+|---|---|---|
+| Gray | Waiting / Inspecting / Transitioning | Waiting for Codex, inspecting the current session, or applying the bridge |
+| Green | Active / ActivePaused | The current session is verified; green is retained when automation is paused, while the menu shows the pause state |
+| Yellow | Suppressed | The compatibility action is suppressed until a manual retry or a new runtime |
+| Red | Recovered / Error | Ordinary Codex was safely restored, or automatic actions are blocked and logs need review |
+
+The menu is a native WinForms grouped menu whose actions are context-aware:
+current-session readiness, apply-now, retry, automation, candidate-update trials,
+logs, and uninstall are shown or enabled only when their semantic state allows it.
+Uninstall always requires an explicit menu confirmation; cancelling does not enqueue
+a command or change state.
+
+The default language follows Windows. The language root is `语言 / Language` in the
+Chinese UI and `Language / 语言` in the English UI. Its choices are:
+
+- `Follow system (Chinese)` / `跟随系统（中文）`;
+- `Chinese` / `中文`;
+- `English`.
+
+Choosing `Chinese` or `English` updates the menu and tray tooltip immediately,
+without restarting the Supervisor or Codex. Choosing the system mode persists
+`languageMode: "System"` in
+`%LOCALAPPDATA%\CodexControlOtherDevices\state\ui-preferences.json`. This file
+contains display preference only; a missing or damaged preference falls back to the
+system language and cannot block compatibility actions, change consent switches, or
+trigger safety-state repair.
+
+### Visual gallery and screenshots
+
+To inspect the tray UI without touching the current Codex session, run the visual-only
+gallery:
+
+~~~powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA `
+  -File .\tests\manual\Show-TrayUiGallery.ps1 `
+  -Locale All -State All -DurationSeconds 8
+~~~
+
+The gallery accepts menu commands in memory only, always rejects uninstall confirmation,
+never inspects, stops, launches, or modifies Codex, and never writes preference or safety
+state. The checked-in native menu screenshots are:
+
+- [Chinese menu](docs/assets/tray-menu-zh-CN.png)
+- [English menu](docs/assets/tray-menu-en-US.png)
+
 ## Manual mode
 
 Manual mode is a per-session, conservative fallback:
@@ -158,9 +210,11 @@ environment information before sharing them publicly.
 |   +-- InstallLifecycle.psm1
 |   +-- ScheduledTask.psm1
 +-- tests/persistence/
++-- tests/manual/Show-TrayUiGallery.ps1
 +-- docs/
 |   +-- TECHNICAL.md
 |   +-- CLEANROOM.md
+|   +-- assets/tray-menu-*.png
 +-- SECURITY.md
 +-- NOTICE.md
 ~~~
@@ -211,4 +265,3 @@ unofficial and is not affiliated with OpenAI.
 [MIT](LICENSE) © 2026 naipi11. The MIT license covers this repository's original
 code and documentation; referenced upstream works remain subject to their own
 rights and license terms. See [NOTICE.md](NOTICE.md).
-

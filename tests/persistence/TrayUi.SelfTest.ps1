@@ -265,6 +265,21 @@ $results.Add((Invoke-CcodTest 'production adapters create the required native me
     }finally{foreach($object in $objects){& $production.DisposeUiObject $object}}
 }))
 
+$results.Add((Invoke-CcodTest 'production AddUiChild uses the native ToolStripMenuItem dropdown collection' {
+    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
+    $parent=$null;$child=$null
+    try{
+        $parent=& $production.CreateUiObject 'MenuItem' 'LanguageItem'
+        $child=& $production.CreateUiObject 'MenuItem' 'EnglishItem'
+        & $production.AddUiChild $parent $child
+        Assert-CcodEqual 1 $parent.DropDownItems.Count 'nested language item is attached to DropDownItems'
+        Assert-CcodTrue ([object]::ReferenceEquals($parent.DropDownItems[0],$child)) 'nested language item identity is preserved'
+    }finally{
+        if($null -ne $parent){& $production.DisposeUiObject $parent}
+        elseif($null -ne $child){& $production.DisposeUiObject $child}
+    }
+}))
+
 $results.Add((Invoke-CcodTest 'confirms localized uninstall with native warning defaults and queues only the accepted click with no callback output' {
     $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
     $confirm=[pscustomobject]@{Results=[Collections.Generic.Queue[bool]]::new();Calls=[Collections.Generic.List[object]]::new()}
