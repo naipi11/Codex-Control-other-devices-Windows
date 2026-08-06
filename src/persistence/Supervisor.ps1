@@ -11,10 +11,17 @@ $script:CcodSupervisorLogPath=$null
 $script:CcodSupervisorAdapterNames=@(
     'GetIdentity','ResolveLayout','StartClock','GetElapsedMilliseconds','GetUtcNow',
     'EnterLease','ExitLease','OpenReadyEvent','OpenShutdownEvent','IsEventSignaled','SignalEvent','CloseEvent',
-    'ReadState','ReadJournal','EnumerateProcessIds','GetProcessSnapshot','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','GetTrayPresentation',
+    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','EnumerateProcessIds','GetProcessSnapshot','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','GetTrayPresentation',
     'NewQueue','GetQueueCount','TryDequeue','NewTray','SetTrayPresentation','StopTrayTimer','RequestUiExit','CloseTray','NewWatcher','StopWatcher',
     'GetWorkerLeafState','WriteWorkerRequest','StartWorker','PollWorker','ReadWorkerResult','WaitWorker','GetWorkerIdentity','TerminateWorker','DisposeWorker','DeleteWorkerFile',
     'ClearFailedAttempt','SetAutomationEnabled','SetCandidateOptIn','OpenLogs','WriteLog','RunUiContext'
+)
+$script:CcodSupervisorUiLanguageModes=@('System','zh-CN','en-US')
+$script:CcodSupervisorUiKeys=@(
+    'Tray.Title','Status.Waiting','Status.Inspecting','Status.Transitioning','Status.Active','Status.ActivePaused','Status.Suppressed','Status.Recovered','Status.Error',
+    'Tooltip.Waiting','Tooltip.Inspecting','Tooltip.Transitioning','Tooltip.Active','Tooltip.ActivePaused','Tooltip.Suppressed','Tooltip.Recovered','Tooltip.Error',
+    'Menu.SessionReady','Menu.ApplyNow','Menu.ManualRetry','Menu.Automation','Menu.CandidateOptIn','Menu.Language','Menu.FollowSystem','Menu.Chinese','Menu.English','Menu.OpenLogs','Menu.Uninstall',
+    'Dialog.UninstallTitle','Dialog.UninstallMessage','Error.UninstallStart','Error.LanguageChange'
 )
 $script:CcodSupervisorCleanupAllowlist=@(
     'CCOD_SUPERVISOR_LOG_FAILED','CCOD_SUPERVISOR_TIMER_STOP_FAILED','CCOD_SUPERVISOR_WORKER_WAIT_FAILED',
@@ -54,6 +61,42 @@ function Test-CcodSupervisorDiagnosticRecord {
     return $Value -is [Management.Automation.ErrorRecord] -or $Value -is [Management.Automation.WarningRecord] -or
         $Value -is [Management.Automation.VerboseRecord] -or $Value -is [Management.Automation.DebugRecord] -or
         $Value -is [Management.Automation.InformationRecord]
+}
+
+function Test-CcodSupervisorUiText {
+    param($Value)
+    if($Value -isnot [string] -or $Value.Length -lt 1 -or $Value.Length -gt 300){return $false}
+    foreach($character in $Value.ToCharArray()){if([char]::IsControl($character)){return $false}}
+    return $true
+}
+
+function Test-CcodSupervisorUiCatalog {
+    param($Catalog,[string]$ExpectedMode)
+    try{
+        if(-not (Test-CcodSupervisorExactProperties $Catalog @('LanguageMode','EffectiveLocale','Strings','UsedEmergencyCatalog','ErrorCode')) -or
+           $Catalog.LanguageMode -isnot [string] -or $script:CcodSupervisorUiLanguageModes -cnotcontains $Catalog.LanguageMode -or
+           $Catalog.LanguageMode -cne $ExpectedMode -or $Catalog.EffectiveLocale -isnot [string] -or @('zh-CN','en-US') -cnotcontains $Catalog.EffectiveLocale -or
+           $Catalog.UsedEmergencyCatalog -isnot [bool] -or
+           ($null -ne $Catalog.ErrorCode -and ($Catalog.ErrorCode -isnot [string] -or @('','CCOD_UI_RESOURCE_INVALID') -cnotcontains $Catalog.ErrorCode)) -or
+           -not (Test-CcodSupervisorExactProperties $Catalog.Strings $script:CcodSupervisorUiKeys)){return $false}
+        foreach($key in $script:CcodSupervisorUiKeys){if(-not (Test-CcodSupervisorUiText $Catalog.Strings.PSObject.Properties[$key].Value)){return $false}}
+        return $true
+    }catch{return $false}
+}
+
+function Test-CcodSupervisorUiPreference {
+    param($Preference)
+    return (Test-CcodSupervisorExactProperties $Preference @('LanguageMode','FallbackUsed','ErrorCode')) -and
+        $Preference.LanguageMode -is [string] -and $script:CcodSupervisorUiLanguageModes -ccontains $Preference.LanguageMode -and
+        $Preference.FallbackUsed -is [bool] -and ($null -eq $Preference.ErrorCode -or
+        ($Preference.ErrorCode -is [string] -and @('','CCOD_UI_PREFERENCES_MISSING','CCOD_UI_PREFERENCES_INVALID') -ccontains $Preference.ErrorCode))
+}
+
+function Test-CcodSupervisorCultureName {
+    param($Value)
+    if($Value -isnot [string] -or $Value.Length -lt 1 -or $Value.Length -gt 85){return $false}
+    foreach($character in $Value.ToCharArray()){if([char]::IsControl($character)){return $false}}
+    return $true
 }
 
 function Invoke-CcodSupervisorAdapterCapture {
@@ -100,7 +143,7 @@ function Invoke-CcodSupervisorNullableAdapter {
 function Import-CcodSupervisorModules {
     if($null -eq $script:CcodSupervisorScriptPath){throw 'supervisor script path is unavailable'}
     $moduleRoot=Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'modules'
-    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','SupervisorEngine.psm1','TrayUi.psm1','WorkerRuntime.psm1')){
+    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','SupervisorEngine.psm1','UiLocalization.psm1','UiPreferences.psm1','TrayUi.psm1','WorkerRuntime.psm1')){
         Import-Module -Name (Join-Path $moduleRoot $leaf) -Force -ErrorAction Stop
     }
 }
@@ -149,6 +192,11 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.CloseEvent={param($Event)$Event.Handle.Dispose();$Event.Disposed=$true}
     $defaults.ReadState={param($StateRoot,$SuppressionKey)if([string]::IsNullOrWhiteSpace($SuppressionKey)){Read-CcodState -StateRoot $StateRoot}else{Read-CcodState -StateRoot $StateRoot -CurrentSuppressionKey $SuppressionKey}}
     $defaults.ReadJournal={param($Path)Read-CcodTransition -Path $Path}
+    $defaults.ReadUiPreference={param($StateRoot)Read-CcodUiPreference -StateRoot $StateRoot}
+    $defaults.SetUiLanguageMode={param($StateRoot,$LanguageMode)Set-CcodUiLanguageMode -StateRoot $StateRoot -LanguageMode $LanguageMode|Out-Null}
+    $defaults.GetSystemCultureName={[Globalization.CultureInfo]::CurrentUICulture.Name}
+    $defaults.GetUiCatalog={param($ResourcesRoot,$LanguageMode,$SystemCultureName)Get-CcodUiCatalog -ResourcesRoot $ResourcesRoot -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
+    $defaults.ShowTrayError={param($Tray,$Catalog,$Key)Show-CcodTrayError -Context $Tray -Catalog $Catalog -Key $Key}
     $defaults.EnumerateProcessIds={Get-CcodChatGptProcessIds}
     $defaults.GetProcessSnapshot={param($ProcessId)Get-CcodProcessSnapshot -ProcessId $ProcessId}
     $defaults.GetSupervisorDecision={param($Context)Get-CcodSupervisorDecision -Context $Context}
@@ -158,8 +206,8 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.NewQueue={param($Kind)Write-Output -NoEnumerate ([Collections.Concurrent.ConcurrentQueue[object]]::new())}
     $defaults.GetQueueCount={param($Queue)[int]$Queue.Count}
     $defaults.TryDequeue={param($Queue)$value=$null;$ok=$Queue.TryDequeue([ref]$value);[pscustomobject][ordered]@{Succeeded=[bool]$ok;Value=$value}}
-    $defaults.NewTray={param($Queue,$OnTick)New-CcodTrayContext -CommandQueue $Queue -OnTick $OnTick}
-    $defaults.SetTrayPresentation={param($Tray,$Presentation,$PackageText,$RuntimeText)Set-CcodTrayPresentation -Context $Tray -Presentation $Presentation -PackageText $PackageText -RuntimeText $RuntimeText}
+    $defaults.NewTray={param($Queue,$OnTick,$Catalog,$LanguageMode,$SystemCultureName)New-CcodTrayContext -CommandQueue $Queue -OnTick $OnTick -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
+    $defaults.SetTrayPresentation={param($Tray,$Presentation,$Catalog,$LanguageMode,$SystemCultureName)Set-CcodTrayPresentation -Context $Tray -Presentation $Presentation -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
     $defaults.StopTrayTimer={param($Tray)$Tray.Timer.Stop()}
     $defaults.RequestUiExit={param($Tray)$Tray.ApplicationContext.ExitThread()}
     $defaults.CloseTray={param($Tray)Close-CcodTrayContext -Context $Tray}
@@ -294,7 +342,7 @@ function New-CcodSupervisorHostState {
     if(-not (Test-CcodSupervisorIdentity $Identity) -or -not (Test-CcodSupervisorLayout $Layout) -or $null -eq $Clock -or
        -not (Test-CcodSupervisorEvent $ShutdownEvent 'Shutdown') -or $null -eq $CommandQueue -or $null -eq $EventQueue -or $null -eq $State){throw 'host state inputs are invalid'}
     [pscustomobject][ordered]@{
-        SchemaVersion=1;ShutdownRequested=$false;ShutdownEvent=$ShutdownEvent;Tray=$null;State=$State;Journal=$Journal;WorkerSlot=$null
+        SchemaVersion=1;ShutdownRequested=$false;ShutdownEvent=$ShutdownEvent;Tray=$null;UiLanguageMode=$null;UiCatalog=$null;State=$State;Journal=$Journal;WorkerSlot=$null
         Identity=$Identity;Layout=$Layout;CommandQueue=$CommandQueue;EventQueue=$EventQueue;Clock=$Clock
         ObservedKeys=[ordered]@{};AttemptKeys=[ordered]@{};RecoveryIgnoreKeys=[ordered]@{};SuppressionKeys=[ordered]@{}
         StaticCache=[ordered]@{};TransportRetries=[ordered]@{};TerminalRecoveries=[ordered]@{}
@@ -459,11 +507,72 @@ function Invoke-CcodSupervisorPollSlot {
     finally{Clear-CcodSupervisorWorkerSlot $HostState $Adapters}
 }
 
+function Get-CcodSupervisorResourcesRoot {
+    if($null -eq $script:CcodSupervisorScriptPath){throw 'resources root is unavailable'}
+    $root=[IO.Path]::GetFullPath((Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'resources'))
+    if(-not [IO.Path]::IsPathRooted($root)){throw 'resources root is invalid'}
+    return $root
+}
+
+function Write-CcodSupervisorUiFailure {
+    param($HostState,[hashtable]$Adapters,[ValidateSet('LanguageChange','ErrorDialog')][string]$Stage,[string]$Code)
+    try{
+        $now=Invoke-CcodSupervisorAdapter $Adapters.GetUtcNow @() 1
+        if($now -is [DateTimeOffset]){$timestamp=$now.UtcDateTime.ToString('o',[Globalization.CultureInfo]::InvariantCulture)}
+        elseif($now -is [DateTime]){$timestamp=$now.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)}
+        else{throw 'UI failure clock is invalid'}
+        $record=[pscustomobject][ordered]@{schemaVersion=1;timestampUtc=$timestamp;component='Supervisor';stage=$Stage;code=$Code;outcome='Failed'}
+        Invoke-CcodSupervisorAdapter $Adapters.WriteLog @($record) 0
+    }catch{Add-CcodSupervisorCleanupCode $HostState.RuntimeCleanupCodes 'CCOD_SUPERVISOR_LOG_FAILED'}
+}
+
+function Set-CcodSupervisorCurrentTrayPresentation {
+    param($HostState,[hashtable]$Adapters,[AllowNull()][string]$SystemCultureName=$null)
+    if($null -eq $HostState.Tray -or $HostState.UiLanguageMode -isnot [string] -or
+       -not (Test-CcodSupervisorUiCatalog $HostState.UiCatalog $HostState.UiLanguageMode)){throw 'UI state is invalid'}
+    $culture=$SystemCultureName
+    if([string]::IsNullOrEmpty($culture)){$culture=Invoke-CcodSupervisorAdapter $Adapters.GetSystemCultureName @() 1}
+    if(-not (Test-CcodSupervisorCultureName $culture)){throw 'UI culture is invalid'}
+    $engine=New-CcodSupervisorEngineContext $HostState
+    $sessionState=if(@('Waiting','Inspecting','Transitioning','Active','Suppressed','Recovered','Error') -ccontains $HostState.SessionState){$HostState.SessionState}else{'Waiting'}
+    $arguments=@{
+        SessionState=$sessionState;AutomationEnabled=[bool]$engine.AutomationEnabled;CandidateCompatibleOptIn=[bool]$engine.CandidateCompatibleOptIn
+        HasOrdinary=[bool](@($HostState.Ordinary).Count -gt 0);ControllerRunning=[bool]($null -ne $HostState.WorkerSlot)
+        StateDamageBlocksActions=[bool]$engine.StateDamageBlocksActions;HasActiveTransaction=[bool]($null -ne $HostState.Journal);Reason=$HostState.Reason
+    }
+    $presentation=Invoke-CcodSupervisorAdapter $Adapters.GetTrayPresentation @($arguments) 1
+    if($null -eq $presentation){throw 'tray presentation is invalid'}
+    Invoke-CcodSupervisorAdapter $Adapters.SetTrayPresentation @($HostState.Tray,$presentation,$HostState.UiCatalog,$HostState.UiLanguageMode,$culture) 0
+}
+
 function Invoke-CcodSupervisorCommand {
     param($HostState,[hashtable]$Adapters,$Command)
     if(-not (Test-CcodSupervisorExactProperties $Command @('Kind','Value','EnqueuedAtUtc')) -or $Command.Kind -isnot [string] -or
-       @('ApplyNow','ManualRetry','SetAutomationEnabled','SetCandidateCompatibleOptIn','OpenLogs','Uninstall') -cnotcontains $Command.Kind -or
+       @('ApplyNow','ManualRetry','SetAutomationEnabled','SetCandidateCompatibleOptIn','SetUiLanguage','OpenLogs','Uninstall') -cnotcontains $Command.Kind -or
        -not (Test-CcodSupervisorCanonicalUtc $Command.EnqueuedAtUtc)){return}
+    if($Command.Kind -ceq 'SetUiLanguage'){
+        if($Command.Value -isnot [string] -or $script:CcodSupervisorUiLanguageModes -cnotcontains $Command.Value){return}
+        $oldMode=$HostState.UiLanguageMode;$oldCatalog=$HostState.UiCatalog;$persisted=$false;$trayUpdateAttempted=$false
+        try{
+            $culture=Invoke-CcodSupervisorAdapter $Adapters.GetSystemCultureName @() 1
+            if(-not (Test-CcodSupervisorCultureName $culture)){throw 'UI culture is invalid'}
+            $resourcesRoot=Get-CcodSupervisorResourcesRoot
+            $newCatalog=Invoke-CcodSupervisorAdapter $Adapters.GetUiCatalog @($resourcesRoot,$Command.Value,$culture) 1
+            if(-not (Test-CcodSupervisorUiCatalog $newCatalog $Command.Value)){throw 'UI catalog is invalid'}
+            Invoke-CcodSupervisorAdapter $Adapters.SetUiLanguageMode @($HostState.Layout.StateRoot,$Command.Value) 0
+            $persisted=$true
+            $HostState.UiLanguageMode=$Command.Value;$HostState.UiCatalog=$newCatalog
+            $trayUpdateAttempted=$true
+            Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters $culture
+        }catch{
+            $HostState.UiLanguageMode=$oldMode;$HostState.UiCatalog=$oldCatalog
+            if($persisted){try{Invoke-CcodSupervisorAdapter $Adapters.SetUiLanguageMode @($HostState.Layout.StateRoot,$oldMode) 0}catch{}}
+            if($trayUpdateAttempted){try{Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters $culture}catch{}}
+            Write-CcodSupervisorUiFailure $HostState $Adapters 'LanguageChange' 'CCOD_UI_LANGUAGE_CHANGE_FAILED'
+            try{Invoke-CcodSupervisorAdapter $Adapters.ShowTrayError @($HostState.Tray,$oldCatalog,'Error.LanguageChange') 0}catch{Write-CcodSupervisorUiFailure $HostState $Adapters 'ErrorDialog' 'CCOD_UI_ERROR_DIALOG_FAILED'}
+        }
+        return
+    }
     switch($Command.Kind){
         'ApplyNow' {$HostState.ForceReconcile=$true}
         'SetAutomationEnabled' {if($Command.Value -is [bool]){Invoke-CcodSupervisorAdapter $Adapters.SetAutomationEnabled @($HostState.Layout.StateRoot,[bool]$Command.Value) 0;$HostState.ForceReconcile=$true}}
@@ -576,6 +685,7 @@ function Invoke-CcodSupervisorTick {
     $decision=Invoke-CcodSupervisorAdapter $Adapters.GetSupervisorDecision @($context) 1
     if(-not (Test-CcodSupervisorExactProperties $decision @('Action','Reason','Target','AttemptKey','SuppressionKey','EffectiveClassification','RequiresController'))){throw 'supervisor decision is invalid'}
     $HostState.LastDecision=$decision;$HostState.Reason=[string]$decision.Reason
+    Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters
     switch($decision.Action){
         'RepairRenderer' {Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'RepairRenderer' $decision.Target|Out-Null;return}
         'InspectOrdinary' {Start-CcodSupervisorWorkerSlot $HostState $Adapters 'StaticProbe' 'StaticProbe' $decision.Target|Out-Null;return}
@@ -625,13 +735,21 @@ function Invoke-CcodSupervisorHost {
             $state=Invoke-CcodSupervisorAdapter $adapter.ReadState @($layout.StateRoot) 1
             if($null -eq $state){throw 'state contract is invalid'}
             $journal=Invoke-CcodSupervisorAdapter $adapter.ReadJournal @($layout.TransitionPath) 1
+            $preference=Invoke-CcodSupervisorAdapter $adapter.ReadUiPreference @($layout.StateRoot) 1
+            if(-not (Test-CcodSupervisorUiPreference $preference)){throw 'UI preference contract is invalid'}
+            $cultureName=Invoke-CcodSupervisorAdapter $adapter.GetSystemCultureName @() 1
+            if(-not (Test-CcodSupervisorCultureName $cultureName)){throw 'UI culture contract is invalid'}
+            $resourcesRoot=Get-CcodSupervisorResourcesRoot
+            $catalog=Invoke-CcodSupervisorAdapter $adapter.GetUiCatalog @($resourcesRoot,$preference.LanguageMode,$cultureName) 1
+            if(-not (Test-CcodSupervisorUiCatalog $catalog $preference.LanguageMode)){throw 'UI catalog contract is invalid'}
             $commandQueue=Invoke-CcodSupervisorAdapter $adapter.NewQueue @('Command') 1
             $eventQueue=Invoke-CcodSupervisorAdapter $adapter.NewQueue @('Event') 1
             if($null -eq $commandQueue -or $null -eq $eventQueue){throw 'queue contract is invalid'}
             $hostState=New-CcodSupervisorHostState -Identity $identity -Layout $layout -Clock $clock -ShutdownEvent $shutdownEvent -CommandQueue $commandQueue -EventQueue $eventQueue -State $state -Journal $journal
+            $hostState.UiLanguageMode=$preference.LanguageMode;$hostState.UiCatalog=$catalog
             $hostStateRef=$hostState;$adapterRef=$adapter
             $onTick={Invoke-CcodSupervisorTick $hostStateRef $adapterRef}.GetNewClosure()
-            $trayArguments=[object[]]::new(2);$trayArguments[0]=$commandQueue;$trayArguments[1]=$onTick
+            $trayArguments=[object[]]::new(5);$trayArguments[0]=$commandQueue;$trayArguments[1]=$onTick;$trayArguments[2]=$catalog;$trayArguments[3]=$preference.LanguageMode;$trayArguments[4]=$cultureName
             $tray=Invoke-CcodSupervisorAdapter $adapter.NewTray $trayArguments 1
             if($null -eq $tray){throw 'tray contract is invalid'}
             $hostState.Tray=$tray

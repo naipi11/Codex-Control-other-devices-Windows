@@ -3,10 +3,28 @@ $ErrorActionPreference='Stop'
 
 $repositoryRoot=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $modulePath=Join-Path $repositoryRoot 'src\persistence\modules\TrayUi.psm1'
+$localizationPath=Join-Path $repositoryRoot 'src\persistence\modules\UiLocalization.psm1'
+$resourcesRoot=Join-Path $repositoryRoot 'src\persistence\resources'
 if(-not [IO.File]::Exists($modulePath)){
     throw 'MISSING_TRAY_UI_MODULE: src\persistence\modules\TrayUi.psm1'
 }
+Import-Module $localizationPath -Force
 Import-Module $modulePath -Force
+$script:TestEnglishCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode en-US -SystemCultureName en-US
+$script:TestChineseCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode zh-CN -SystemCultureName zh-CN
+$script:TestSystemCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode System -SystemCultureName zh-CN
+
+function New-CcodTestTrayContext {
+    param($CommandQueue,[scriptblock]$OnTick,$Adapters,$Catalog=$script:TestEnglishCatalog,[string]$LanguageMode='en-US',[string]$SystemCultureName='en-US')
+    TrayUi\New-CcodTrayContext -CommandQueue $CommandQueue -OnTick $OnTick -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName -Adapters $Adapters
+}
+
+function Set-CcodTestTrayPresentation {
+    param($Context,$Presentation,$Catalog=$script:TestEnglishCatalog,[string]$LanguageMode='en-US',[string]$SystemCultureName='en-US')
+    TrayUi\Set-CcodTrayPresentation -Context $Context -Presentation $Presentation -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName
+}
+Set-Alias -Name New-CcodTrayContext -Value New-CcodTestTrayContext -Scope Script
+Set-Alias -Name Set-CcodTrayPresentation -Value Set-CcodTestTrayPresentation -Scope Script
 
 function New-CcodTrayTestQueue {
     Write-Output -NoEnumerate ([Collections.Generic.Queue[object]]::new())
@@ -18,6 +36,9 @@ function New-CcodTrayFakeAdapters {
         Objects=[Collections.Generic.List[object]]::new()
         Bitmaps=[Collections.Generic.List[object]]::new()
         IconClones=[Collections.Generic.List[object]]::new()
+        TitleBitmaps=[Collections.Generic.List[object]]::new()
+        BoldFonts=[Collections.Generic.List[object]]::new()
+        Dialogs=[Collections.Generic.List[object]]::new()
         HiconSeed=1000
         ThreadId=37
         Apartment='STA'
@@ -44,7 +65,7 @@ function New-CcodTrayFakeAdapters {
             param($Kind,$Name)
             $state.Calls.Add("Create:$Kind`:$Name")
             $object=[pscustomobject]@{
-                Kind=$Kind;Name=$Name;Properties=[ordered]@{IsDisposed=$false};Events=[ordered]@{}
+                Kind=$Kind;Name=$Name;Properties=[ordered]@{IsDisposed=$false;Font=[pscustomobject]@{Bold=$false}};Events=[ordered]@{}
                 Children=[Collections.Generic.List[object]]::new();Disposed=$false;DisposeCount=0
             }
             $state.Objects.Add($object)
@@ -66,7 +87,10 @@ function New-CcodTrayFakeAdapters {
         DisposeUiObject={
             param($Object)
             $state.Calls.Add("DisposeUi:$($Object.Name)");$Object.Disposed=$true;$Object.Properties['IsDisposed']=$true;$Object.DisposeCount++
-            if($Object.Kind -ceq 'Menu'){foreach($child in $Object.Children){$child.Disposed=$true;$child.Properties['IsDisposed']=$true;$child.DisposeCount++}}
+            if($Object.Kind -ceq 'Menu'){
+                $pending=[Collections.Generic.Stack[object]]::new();foreach($child in $Object.Children){$pending.Push($child)}
+                while($pending.Count -gt 0){$child=$pending.Pop();$child.Disposed=$true;$child.Properties['IsDisposed']=$true;$child.DisposeCount++;foreach($nested in $child.Children){$pending.Push($nested)}}
+            }
         }.GetNewClosure()
         ExitUiContext={param($Context)$state.Calls.Add("ExitUi:$($Context.Name)")}.GetNewClosure()
         CreateBitmap={
@@ -82,8 +106,21 @@ function New-CcodTrayFakeAdapters {
             $state.Calls.Add("Clone:$Color`:$Size");$icon=[pscustomobject]@{Color=$Color;Size=[int]$Size;Disposed=$false;DisposeCount=0}
             $state.IconClones.Add($icon);$icon
         }.GetNewClosure()
+        CloneIconBitmap={
+            param($Icon)
+            $state.Calls.Add("CloneBitmap:$($Icon.Color):$($Icon.Size)")
+            $bitmap=[pscustomobject]@{Kind='TitleBitmap';Name='TitleImage';Color=$Icon.Color;Size=[int]$Icon.Size;Disposed=$false;DisposeCount=0}
+            $state.TitleBitmaps.Add($bitmap);$bitmap
+        }.GetNewClosure()
+        CreateBoldFont={
+            param($Font)
+            $state.Calls.Add('CreateBoldFont')
+            $font=[pscustomobject]@{Kind='BoldFont';Name='TitleBoldFont';Bold=$true;Disposed=$false;DisposeCount=0}
+            $state.BoldFonts.Add($font);$font
+        }.GetNewClosure()
+        ShowErrorDialog={param($Title,$Message)$state.Dialogs.Add([pscustomobject][ordered]@{Title=$Title;Message=$Message})}.GetNewClosure()
         DestroyIcon={param($Hicon)$state.Calls.Add("DestroyIcon:$([long]$Hicon)")}.GetNewClosure()
-        DisposeIconResource={param($Resource)$state.Calls.Add("DisposeIcon:$($Resource.Color):$($Resource.Size)");$Resource.Disposed=$true;$Resource.DisposeCount++}.GetNewClosure()
+        DisposeIconResource={param($Resource)if($Resource.PSObject.Properties['Kind']){$state.Calls.Add("DisposeResource:$($Resource.Kind):$($Resource.Name)")}else{$state.Calls.Add("DisposeIcon:$($Resource.Color):$($Resource.Size)")};$Resource.Disposed=$true;$Resource.DisposeCount++}.GetNewClosure()
         NewSourceIdentifier={$state.SourceSeed++;'ccod-process-'+('{0:x32}' -f $state.SourceSeed)}.GetNewClosure()
         RegisterTrace={
             param($SourceIdentifier,$ClassName,$Callback)
@@ -112,8 +149,8 @@ function New-CcodTrayFakeAdapters {
 
 function New-CcodValidPresentation {
     [pscustomobject][ordered]@{
-        Color='Green';Tooltip='Current Codex session is fixed';StatusText='Current Codex session is fixed'
-        ApplyNowEnabled=$false;ManualRetryEnabled=$false;AutomationToggleEnabled=$true;AutomationChecked=$true
+        Color='Green';StateKey='Active';SessionReadyVisible=$true;ApplyNowVisible=$false;ApplyNowEnabled=$false;ManualRetryVisible=$false;ManualRetryEnabled=$false
+        AutomationToggleEnabled=$true;AutomationChecked=$true
         CandidateOptInToggleEnabled=$true;CandidateOptInChecked=$false;OpenLogsEnabled=$true;UninstallEnabled=$true;Busy=$false
     }
 }
@@ -209,10 +246,105 @@ function Test-CcodTransparentCorners {
 
 $results=[Collections.Generic.List[object]]::new()
 
-$results.Add((Invoke-CcodTest 'exports exactly the five frozen TrayUi functions' {
-    $expected='Close-CcodTrayContext,New-CcodTrayContext,Set-CcodTrayPresentation,Start-CcodProcessWatcher,Stop-CcodProcessWatcher'
+$results.Add((Invoke-CcodTest 'exports exactly the six frozen TrayUi functions' {
+    $expected='Close-CcodTrayContext,New-CcodTrayContext,Set-CcodTrayPresentation,Show-CcodTrayError,Start-CcodProcessWatcher,Stop-CcodProcessWatcher'
     $actual=((Get-Command -Module TrayUi -CommandType Function).Name|Sort-Object)-join ','
     Assert-CcodEqual $expected $actual 'public export surface remains exact'
+}))
+
+$results.Add((Invoke-CcodTest 'production adapters create the required native menu boundary types' {
+    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
+    $objects=[Collections.Generic.List[object]]::new()
+    try{
+        foreach($spec in @(@('Menu','Menu'),@('Row','TitleRow'),@('MenuItem','ApplyNowItem'),@('Separator','StatusSeparator'))){$objects.Add((& $production.CreateUiObject $spec[0] $spec[1]))}
+        Assert-CcodEqual 'System.Windows.Forms.ContextMenuStrip' $objects[0].GetType().FullName 'menu is native ContextMenuStrip'
+        Assert-CcodEqual 'System.Windows.Forms.ToolStripMenuItem' $objects[1].GetType().FullName 'row is native ToolStripMenuItem'
+        Assert-CcodEqual 'System.Windows.Forms.ToolStripMenuItem' $objects[2].GetType().FullName 'command is native ToolStripMenuItem'
+        Assert-CcodEqual 'System.Windows.Forms.ToolStripSeparator' $objects[3].GetType().FullName 'separator is native ToolStripSeparator'
+    }finally{foreach($object in $objects){& $production.DisposeUiObject $object}}
+}))
+
+$results.Add((Invoke-CcodTest 'builds the exact grouped bilingual menu and applies semantic visibility and truth state' {
+    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
+    try{
+        $context=TrayUi\New-CcodTrayContext -CommandQueue $queue -OnTick {} -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN -Adapters $fake.Adapters
+        $active=New-CcodValidPresentation
+        $output=@(TrayUi\Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN)
+        Assert-CcodEqual 0 $output.Count 'localized semantic render emits no output'
+        Assert-CcodEqual 'Title,Status' (@($context.Rows.Keys)-join ',') 'row map is exact and ordered'
+        Assert-CcodEqual 'SessionReady,ApplyNow,ManualRetry,SetAutomationEnabled,SetCandidateCompatibleOptIn,Language,OpenLogs,Uninstall' (@($context.Items.Keys)-join ',') 'item map is exact and ordered'
+        Assert-CcodEqual 'System,zh-CN,en-US' (@($context.LanguageItems.Keys)-join ',') 'language map is exact and ordered'
+        Assert-CcodEqual 'Status,Preferences,Danger' (@($context.Separators.Keys)-join ',') 'separator map is exact and ordered'
+        Assert-CcodEqual 'TitleRow,StatusRow,StatusSeparator,SessionReadyItem,ApplyNowItem,ManualRetryItem,PreferencesSeparator,SetAutomationEnabledItem,SetCandidateCompatibleOptInItem,LanguageItem,OpenLogsItem,DangerSeparator,UninstallItem' (@($context.Menu.Children.Name)-join ',') 'top-level menu grouping is exact'
+        Assert-CcodEqual 'SystemLanguageItem,zh-CNLanguageItem,en-USLanguageItem' (@($context.Items.Language.Children.Name)-join ',') 'language submenu order is exact'
+        Assert-CcodEqual 'Row,Row' (@($context.Rows.Values.Kind)-join ',') 'fake rows cross the Row adapter boundary'
+        Assert-CcodEqual 'MenuItem,MenuItem,MenuItem,MenuItem,MenuItem,MenuItem,MenuItem,MenuItem' (@($context.Items.Values.Kind)-join ',') 'fake items cross the MenuItem boundary'
+        Assert-CcodEqual 'Separator,Separator,Separator' (@($context.Separators.Values.Kind)-join ',') 'fake separators cross the Separator boundary'
+        $zhLanguage=[string]::Concat([char[]]@(0x8bed,0x8a00))+' / Language'
+        $zhTitle='Codex '+[string]::Concat([char[]]@(0x8bbe,0x5907,0x8fde,0x63a5))
+        $zhStatus=[string]::Concat([char[]]@(0x5f53,0x524d,0x4f1a,0x8bdd,0x5df2,0x542f,0x7528,0x201c,0x8fde,0x63a5,0x5176,0x4ed6,0x8bbe,0x5907,0x201d))
+        Assert-CcodEqual $zhTitle $context.Rows.Title.Properties.Text 'title resolves from Chinese catalog'
+        Assert-CcodEqual $zhStatus $context.Rows.Status.Properties.Text 'status resolves from semantic key'
+        Assert-CcodEqual $zhLanguage $context.Items.Language.Properties.Text 'language root stays bilingual'
+        Assert-CcodEqual $false $context.Rows.Title.Properties.Enabled 'title is disabled'
+        Assert-CcodEqual $false $context.Rows.Status.Properties.Enabled 'status is disabled'
+        Assert-CcodEqual $true $context.Rows.Title.Properties.Font.Bold 'title is visually bold'
+        Assert-CcodTrue ($null -ne $context.Rows.Title.Properties.Image) 'title carries bridge bitmap'
+        Assert-CcodEqual $true $context.Items.SessionReady.Properties.Visible 'active session row is visible'
+        Assert-CcodEqual $false $context.Items.ApplyNow.Properties.Visible 'irrelevant apply action is hidden'
+        Assert-CcodEqual $false $context.Items.ManualRetry.Properties.Visible 'irrelevant retry action is hidden'
+        Assert-CcodEqual $false $context.Items.SetAutomationEnabled.Properties.CheckOnClick 'automation does not own optimistic truth'
+        Assert-CcodEqual $false $context.Items.SetCandidateCompatibleOptIn.Properties.CheckOnClick 'candidate preference does not own optimistic truth'
+        Assert-CcodEqual 'True,False,False' ((@($context.LanguageItems.Values)|ForEach-Object {[string]$_.Properties.Checked})-join ',') 'System alone is checked'
+    }finally{if($null -ne $context){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'language commands are exact and live English switching mutates text without rebuilding owned state' {
+    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
+    try{
+        $context=TrayUi\New-CcodTrayContext -CommandQueue $queue -OnTick {} -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN -Adapters $fake.Adapters
+        $active=New-CcodValidPresentation
+        TrayUi\Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN
+        foreach($mode in @('System','zh-CN','en-US')){
+            $item=$context.LanguageItems[$mode];$item.Properties.Enabled=$true
+            Assert-CcodEqual 0 @(& $item.Events.Click $item $null).Count "$mode click emits no output"
+        }
+        Assert-CcodEqual 3 $queue.Count 'each language child enqueues once'
+        foreach($mode in @('System','zh-CN','en-US')){
+            $command=$queue.Dequeue()
+            Assert-CcodEqual 'Kind,Value,EnqueuedAtUtc' (@($command.PSObject.Properties.Name)-join ',') 'language command has exact ordered fields'
+            Assert-CcodEqual 'SetUiLanguage' $command.Kind 'language command kind is exact'
+            Assert-CcodEqual $mode $command.Value 'language value preserves case-exact enum'
+            Assert-CcodEqual '2030-02-03T04:05:06.0000000Z' $command.EnqueuedAtUtc 'language timestamp is canonical UTC'
+        }
+        $notify=$context.NotifyIcon;$menu=$context.Menu;$titleImage=$context.TitleImage;$icons=$context.Icons;$originalQueue=$context.CommandQueue
+        $createCount=@($fake.State.Calls|Where-Object {$_ -like 'Create:*'}).Count
+        $resourceCount=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Clone:*' -or $_ -like 'CloneBitmap:*' -or $_ -eq 'CreateBoldFont'}).Count
+        Assert-CcodEqual 0 @(TrayUi\Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName zh-CN).Count 'live language switch emits no output'
+        Assert-CcodEqual 'Codex Device Connection' $context.Rows.Title.Properties.Text 'title switches immediately'
+        Assert-CcodEqual ([char]0x201c+'Control other devices'+[char]0x201d+' is active for this session') $context.Rows.Status.Properties.Text 'status switches immediately'
+        Assert-CcodEqual 'Codex device connection: working' $context.NotifyIcon.Properties.Text 'tooltip switches immediately'
+        $visibleTexts=@($context.Rows.Title.Properties.Text,$context.Rows.Status.Properties.Text,$context.Items.SessionReady.Properties.Text,$context.Items.SetAutomationEnabled.Properties.Text,$context.Items.SetCandidateCompatibleOptIn.Properties.Text,$context.Items.Language.Properties.Text,$context.LanguageItems.System.Properties.Text,$context.LanguageItems.'zh-CN'.Properties.Text,$context.LanguageItems.'en-US'.Properties.Text,$context.Items.OpenLogs.Properties.Text,$context.Items.Uninstall.Properties.Text)
+        $expectedTexts=@('Codex Device Connection',([char]0x201c+'Control other devices'+[char]0x201d+' is active for this session'),'Current session is ready','Repair new sessions automatically','Allow compatible update trials',('Language / '+[char]0x8bed+[char]0x8a00),('Follow system ('+[char]0x4e2d+[char]0x6587+')'),([char]0x4e2d+[char]0x6587),'English','Open logs',('Uninstall supervisor'+[char]0x2026))
+        Assert-CcodEqual ($expectedTexts-join '|') ($visibleTexts-join '|') 'every visible row and menu string switches from the supplied catalog'
+        Assert-CcodEqual 'False,False,True' ((@($context.LanguageItems.Values)|ForEach-Object {[string]$_.Properties.Checked})-join ',') 'en-US alone is checked after switch'
+        Assert-CcodTrue ([object]::ReferenceEquals($notify,$context.NotifyIcon) -and [object]::ReferenceEquals($menu,$context.Menu) -and [object]::ReferenceEquals($titleImage,$context.TitleImage) -and [object]::ReferenceEquals($icons,$context.Icons) -and [object]::ReferenceEquals($originalQueue,$context.CommandQueue)) 'live switch preserves all owned identities and the queue'
+        Assert-CcodEqual $createCount @($fake.State.Calls|Where-Object {$_ -like 'Create:*'}).Count 'live switch creates no UI object'
+        Assert-CcodEqual $resourceCount @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Clone:*' -or $_ -like 'CloneBitmap:*' -or $_ -eq 'CreateBoldFont'}).Count 'live switch allocates no owned graphic resource'
+    }finally{if($null -ne $context){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'shows only allow-listed localized native tray errors on the owner thread with no output' {
+    $fake=New-CcodTrayFakeAdapters;$context=TrayUi\New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Catalog $script:TestChineseCatalog -LanguageMode zh-CN -SystemCultureName en-US -Adapters $fake.Adapters
+    try{
+        Assert-CcodEqual 0 @(Show-CcodTrayError -Context $context -Catalog $script:TestChineseCatalog -Key Error.LanguageChange).Count 'error dialog emits no output'
+        Assert-CcodEqual 1 $fake.State.Dialogs.Count 'one dialog is shown'
+        Assert-CcodEqual ('Codex '+[string]::Concat([char[]]@(0x8bbe,0x5907,0x8fde,0x63a5))) $fake.State.Dialogs[0].Title 'dialog title is localized'
+        Assert-CcodEqual ([string]::Concat([char[]]@(0x65e0,0x6cd5,0x5207,0x6362,0x8bed,0x8a00,0xff1b,0x5df2,0x4fdd,0x7559,0x539f,0x8bed,0x8a00,0x3002))) $fake.State.Dialogs[0].Message 'dialog message is localized and non-sensitive'
+        Assert-CcodThrows {Show-CcodTrayError -Context $context -Catalog $script:TestChineseCatalog -Key Tray.Title} 'CCOD_TRAY_INPUT_INVALID'
+        $fake.State.ThreadId=38
+        Assert-CcodThrows {Show-CcodTrayError -Context $context -Catalog $script:TestChineseCatalog -Key Error.UninstallStart} 'CCOD_TRAY_THREAD_INVALID'
+    }finally{$fake.State.ThreadId=37;Close-CcodTrayContext -Context $context|Out-Null}
 }))
 
 $results.Add((Invoke-CcodTest 'exposes and draws the production bridge icon contract at both cached sizes' {
@@ -247,12 +379,17 @@ $results.Add((Invoke-CcodTest 'constructs one fake-first STA tray graph and clos
     Assert-CcodEqual 1 @($fake.State.Objects|Where-Object Kind -eq 'Timer').Count 'one timer'
     Assert-CcodEqual 1 @($fake.State.Objects|Where-Object Kind -eq 'NotifyIcon').Count 'one notify icon'
     Assert-CcodEqual 1 @($fake.State.Objects|Where-Object Kind -eq 'Menu').Count 'one menu'
-    Assert-CcodEqual 3 @($fake.State.Objects|Where-Object Kind -eq 'Row').Count 'three read-only rows'
-    Assert-CcodEqual 6 @($fake.State.Objects|Where-Object Kind -eq 'MenuItem').Count 'six command items'
+    Assert-CcodEqual 2 @($fake.State.Objects|Where-Object Kind -eq 'Row').Count 'two read-only rows'
+    Assert-CcodEqual 11 @($fake.State.Objects|Where-Object Kind -eq 'MenuItem').Count 'eight mapped items plus three language children'
+    Assert-CcodEqual 3 @($fake.State.Objects|Where-Object Kind -eq 'Separator').Count 'three native separators'
     Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*'}).Count 'eight cached bitmap sizes and colors'
     Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Draw:*'}).Count 'eight cached bitmaps are drawn once'
     Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Clone:*'}).Count 'eight cached icon clones are created'
     Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'DestroyIcon:*'}).Count 'every temporary HICON is destroyed immediately'
+    Assert-CcodEqual 1 $fake.State.TitleBitmaps.Count 'one title bitmap is cloned from a cached icon'
+    Assert-CcodEqual 1 $fake.State.BoldFonts.Count 'one owned bold title font is created'
+    Assert-CcodTrue ([object]::ReferenceEquals($context.TitleImage,$context.Rows.Title.Properties.Image)) 'owned title bitmap is attached to title row'
+    Assert-CcodTrue ([object]::ReferenceEquals($context.TitleFont,$context.Rows.Title.Properties.Font)) 'owned bold font is attached to title row'
     Assert-CcodEqual 'Gray:16,Gray:32,Green:16,Green:32,Yellow:16,Yellow:32,Red:16,Red:32' (@($context.Icons.Keys)-join ',') 'cached icon keys are exact and ordered'
     $iconCalls=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'})
     $expectedIconCalls=@(
@@ -283,6 +420,8 @@ $results.Add((Invoke-CcodTest 'constructs one fake-first STA tray graph and clos
     Assert-CcodEqual 'Closed' $context.State 'close latches state before cleanup'
     Assert-CcodEqual 8 @($context.Icons.Values|Where-Object {$_.DisposeCount -eq 1}).Count 'all owned icon clones disposed exactly once'
     Assert-CcodEqual 0 @($context.Icons.Values|Where-Object {$_.DisposeCount -gt 1}).Count 'no owned icon clone is disposed twice'
+    Assert-CcodEqual 1 $context.TitleImage.DisposeCount 'owned title bitmap is disposed exactly once'
+    Assert-CcodEqual 1 $context.TitleFont.DisposeCount 'owned bold font is disposed exactly once'
     $callCount=$fake.State.Calls.Count
     $second=Close-CcodTrayContext -Context $context
     Assert-CcodEqual $true $second.Closed 'second close is a success no-op'
@@ -295,12 +434,10 @@ $results.Add((Invoke-CcodTest 'renders the exact presentation without policy or 
         $context=New-CcodTrayContext -CommandQueue $queue -OnTick {} -Adapters $fake.Adapters
         $presentation=New-CcodValidPresentation
         $iconResourceCalls=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'}).Count
-        $output=@(Set-CcodTrayPresentation -Context $context -Presentation $presentation -PackageText $null -RuntimeText $null)
+        $output=@(Set-CcodTrayPresentation -Context $context -Presentation $presentation)
         Assert-CcodEqual 0 $output.Count 'presentation emits no output'
-        Assert-CcodEqual 'Status: Current Codex session is fixed' $context.Rows.Status.Properties.Text 'status row is read-only display data'
-        Assert-CcodEqual ('Package: '+[char]0x2014) $context.Rows.Package.Properties.Text 'null package renders em dash'
-        Assert-CcodEqual ('Runtime: '+[char]0x2014) $context.Rows.Runtime.Properties.Text 'null runtime renders em dash'
-        Assert-CcodEqual 'Current Codex session is fixed' $context.NotifyIcon.Properties.Text 'tooltip comes only from Task 9 presentation'
+        Assert-CcodEqual ([char]0x201c+'Control other devices'+[char]0x201d+' is active for this session') $context.Rows.Status.Properties.Text 'status row is localized display data'
+        Assert-CcodEqual 'Codex device connection: working' $context.NotifyIcon.Properties.Text 'tooltip resolves from the semantic state key'
         Assert-CcodEqual 'Green' $context.NotifyIcon.Properties.Icon.Color 'cached green icon selected'
         Assert-CcodEqual $iconResourceCalls @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'}).Count 'presentation allocates or disposes no icon resources'
 
@@ -358,13 +495,12 @@ $results.Add((Invoke-CcodTest 'rejects malformed presentation display data and w
         $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
         $base=New-CcodValidPresentation
         $extra=[pscustomobject][ordered]@{};foreach($property in $base.PSObject.Properties){$extra|Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value};$extra|Add-Member Extra $true
+        $badState=New-CcodValidPresentation;$badState.StateKey='active'
+        $badVisible=New-CcodValidPresentation;$badVisible.SessionReadyVisible='true'
         foreach($case in @(
             {Set-CcodTrayPresentation -Context $context -Presentation $extra},
-            {Set-CcodTrayPresentation -Context $context -Presentation $base -PackageText ('p'*161)},
-            {Set-CcodTrayPresentation -Context $context -Presentation $base -RuntimeText ('r'*97)},
-            {Set-CcodTrayPresentation -Context $context -Presentation $base -PackageText ("pkg"+[char]1)},
-            {Set-CcodTrayPresentation -Context $context -Presentation $base -RuntimeText ("runtime"+[char]0x7f)},
-            {Set-CcodTrayPresentation -Context $context -Presentation $base -PackageText ("pkg"+[char]0x85)}
+            {Set-CcodTrayPresentation -Context $context -Presentation $badState},
+            {Set-CcodTrayPresentation -Context $context -Presentation $badVisible}
         )){Assert-CcodThrows $case 'CCOD_TRAY_INPUT_INVALID'}
         $fake.State.ThreadId=38
         Assert-CcodThrows {Set-CcodTrayPresentation -Context $context -Presentation $base} 'CCOD_TRAY_THREAD_INVALID'
@@ -513,7 +649,7 @@ $results.Add((Invoke-CcodTest 'continues every tray and watcher cleanup stage wi
     $receipt=Close-CcodTrayContext -Context $context
     $expected='CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED,CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED,CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
     Assert-CcodEqual $expected (@($receipt.CleanupCodes)-join ',') 'tray cleanup codes are ordered deduplicated and allowlisted'
-    Assert-CcodTrue ($cleanup.Hide -ge 1 -and $cleanup.Stop -eq 1 -and $cleanup.Ui -ge 4 -and $cleanup.Icon -eq 8 -and $cleanup.Detach -eq 7 -and $cleanup.Exit -eq 1) 'all tray cleanup stages continue after failures'
+    Assert-CcodTrue ($cleanup.Hide -ge 1 -and $cleanup.Stop -eq 1 -and $cleanup.Ui -ge 4 -and $cleanup.Icon -eq 10 -and $cleanup.Detach -eq 10 -and $cleanup.Exit -eq 1) 'all tray cleanup stages continue after title resources and callback failures'
     Assert-CcodTrue (($receipt|ConvertTo-Json -Compress) -cnotmatch 'SECRET') 'tray receipt exposes no injected text'
 
     $fake2=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$watcher=Start-CcodProcessWatcher -Queue $queue -OnFullReconciliationRequired {} -Adapters $fake2.Adapters;$queue.Enqueue('hint')
@@ -656,20 +792,24 @@ $results.Add((Invoke-CcodTest 'accepts every exact Stopping callback-clear snaps
     }
 }))
 
-$results.Add((Invoke-CcodTest 'recovers every identifiable UI bitmap HICON clone and attachment emitted before a diagnostic failure' {
-    foreach($stage in @('CreateUiObject','CreateBitmap','GetHicon','CloneIcon','AttachUiCallback')){
+$results.Add((Invoke-CcodTest 'recovers every identifiable UI bitmap HICON clone title resource and attachment emitted before a diagnostic failure' {
+    foreach($stage in @('CreateUiObject','CreateBitmap','GetHicon','CloneIcon','CloneIconBitmap','CreateBoldFont','AttachUiCallback')){
         $fake=New-CcodTrayFakeAdapters;$original=$fake.Adapters[$stage]
         switch($stage){
             'CreateUiObject' {$fake.Adapters[$stage]={param($Kind,$Name)$value=& $original $Kind $Name;$value;Write-Warning 'SECRET_AFTER_UI'}.GetNewClosure()}
             'CreateBitmap' {$fake.Adapters[$stage]={param($Color,$Size)$value=& $original $Color $Size;$value;Write-Warning 'SECRET_AFTER_BITMAP'}.GetNewClosure()}
             'GetHicon' {$fake.Adapters[$stage]={param($Bitmap)$value=& $original $Bitmap;$value;Write-Warning 'SECRET_AFTER_HICON'}.GetNewClosure()}
             'CloneIcon' {$fake.Adapters[$stage]={param($Hicon,$Color,$Size)$value=& $original $Hicon $Color $Size;$value;Write-Warning 'SECRET_AFTER_CLONE'}.GetNewClosure()}
+            'CloneIconBitmap' {$fake.Adapters[$stage]={param($Icon)$value=& $original $Icon;$value;Write-Warning 'SECRET_AFTER_TITLE_BITMAP'}.GetNewClosure()}
+            'CreateBoldFont' {$fake.Adapters[$stage]={param($Font)$value=& $original $Font;$value;Write-Warning 'SECRET_AFTER_TITLE_FONT'}.GetNewClosure()}
             'AttachUiCallback' {$fake.Adapters[$stage]={param($Object,$EventName,$Callback)$value=& $original $Object $EventName $Callback;$value;Write-Warning 'SECRET_AFTER_ATTACH'}.GetNewClosure()}
         }
         Assert-CcodThrows {New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters} 'CCOD_TRAY_CREATE_FAILED'
         Assert-CcodTrue (@($fake.State.Objects|Where-Object {$_.DisposeCount -gt 1}).Count -eq 0) "$stage never double-disposes a UI object"
         Assert-CcodTrue (@($fake.State.Bitmaps|Where-Object {$_.DisposeCount -ne 1}).Count -eq 0) "$stage disposes every created bitmap once"
         Assert-CcodTrue (@($fake.State.IconClones|Where-Object {$_.DisposeCount -ne 1}).Count -eq 0) "$stage disposes every created clone once"
+        Assert-CcodTrue (@($fake.State.TitleBitmaps|Where-Object {$_.DisposeCount -ne 1}).Count -eq 0) "$stage disposes every created title bitmap once"
+        Assert-CcodTrue (@($fake.State.BoldFonts|Where-Object {$_.DisposeCount -ne 1}).Count -eq 0) "$stage disposes every created bold font once"
         if($stage -ceq 'GetHicon'){Assert-CcodEqual 1 @($fake.State.Calls|Where-Object {$_ -like 'DestroyIcon:*'}).Count 'diagnostic HICON is still destroyed'}
         if($stage -ceq 'AttachUiCallback'){Assert-CcodEqual 1 @($fake.State.Calls|Where-Object {$_ -like 'Detach:ApplyNowItem:*'}).Count 'diagnostic attachment is detached immediately'}
     }
@@ -716,24 +856,24 @@ $results.Add((Invoke-CcodTest 'does not dispose a child twice when AddUiChild at
         Write-Warning 'SECRET_ADD_AFTER_ATTACH'
     }.GetNewClosure()
     Assert-CcodThrows {New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters} 'CCOD_TRAY_CREATE_FAILED'
-    $statusRows=@($fake.State.Objects|Where-Object {$_.Name -ceq 'StatusRow'})
-    Assert-CcodEqual 1 $statusRows.Count 'the partial-success path creates one first child'
-    Assert-CcodEqual 1 $statusRows[0].DisposeCount 'the attached child is disposed exactly once through its menu owner'
+    $titleRows=@($fake.State.Objects|Where-Object {$_.Name -ceq 'TitleRow'})
+    Assert-CcodEqual 1 $titleRows.Count 'the partial-success path creates one first child'
+    Assert-CcodEqual 1 $titleRows[0].DisposeCount 'the attached child is disposed exactly once through its menu owner'
     Assert-CcodEqual 0 @($fake.State.Objects|Where-Object {$_.DisposeCount -gt 1}).Count 'partial Add ownership never permits a second direct dispose'
 }))
 
-$results.Add((Invoke-CcodTest 'does not dispose nine children twice when Menu disposal cascades and then emits a diagnostic' {
+$results.Add((Invoke-CcodTest 'does not dispose thirteen top-level children twice when Menu disposal cascades and then emits a diagnostic' {
     $fake=New-CcodTrayFakeAdapters
     $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
     $menu=$context.Menu;$children=@($menu.Children);$originalDispose=$context.Adapters.DisposeUiObject
-    Assert-CcodEqual 9 $children.Count 'complete tray owns three rows and six items before close'
+    Assert-CcodEqual 13 $children.Count 'complete tray owns exact top-level grouped menu before close'
     $context.Adapters.DisposeUiObject={
         param($Object)
         & $originalDispose $Object
         if($Object.Kind -ceq 'Menu'){Write-Warning 'SECRET_MENU_AFTER_CASCADE'}
     }.GetNewClosure()
     $receipt=Close-CcodTrayContext -Context $context
-    Assert-CcodEqual 9 @($children|Where-Object {$_.DisposeCount -eq 1}).Count 'all cascaded children remain exactly-once disposed'
+    Assert-CcodEqual 13 @($children|Where-Object {$_.DisposeCount -eq 1}).Count 'all cascaded children remain exactly-once disposed'
     Assert-CcodEqual 0 @($children|Where-Object {$_.DisposeCount -gt 1}).Count 'diagnostic after menu cascade never triggers direct redisposal'
     Assert-CcodEqual 1 $menu.DisposeCount 'menu itself is disposed exactly once'
     Assert-CcodEqual 'CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED' (@($receipt.CleanupCodes)-join ',') 'diagnostic remains a bounded sanitized menu cleanup failure'

@@ -2,10 +2,16 @@ $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $supervisorPath = Join-Path $repositoryRoot 'src\persistence\Supervisor.ps1'
+$localizationPath = Join-Path $repositoryRoot 'src\persistence\modules\UiLocalization.psm1'
+$resourcesRoot = Join-Path $repositoryRoot 'src\persistence\resources'
 if (-not [IO.File]::Exists($supervisorPath)) {
     throw 'CCOD_TEST_SUPERVISOR_CONTRACT_MISSING'
 }
 
+Import-Module $localizationPath -Force
+$script:TestSystemCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode System -SystemCultureName zh-CN
+$script:TestChineseCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode zh-CN -SystemCultureName zh-CN
+$script:TestEnglishCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode en-US -SystemCultureName zh-CN
 $readyToken = 'a' * 64
 . $supervisorPath -ReadyToken $readyToken
 
@@ -35,6 +41,7 @@ function Assert-CcodReceipt {
 
 function New-CcodSupervisorFake {
     param([string]$FailAt=$null,[bool]$ShutdownSignaled=$false,[string]$FirstLeaseOutcome='Acquired',[string]$SecondLeaseOutcome='Acquired',[bool]$AccountAbandoned=$false,[bool]$LocalAbandoned=$false)
+    $systemCatalog=$script:TestSystemCatalog;$chineseCatalog=$script:TestChineseCatalog;$englishCatalog=$script:TestEnglishCatalog
     $world=[pscustomobject]@{
         Calls=[Collections.Generic.List[string]]::new();FailAt=$FailAt;ShutdownSignaled=$ShutdownSignaled
         FirstLeaseOutcome=$FirstLeaseOutcome;SecondLeaseOutcome=$SecondLeaseOutcome;AccountAbandoned=$AccountAbandoned;LocalAbandoned=$LocalAbandoned
@@ -44,6 +51,9 @@ function New-CcodSupervisorFake {
         ActiveJournal=$null;Decision=[pscustomobject][ordered]@{Action='KeepOrdinary';Reason='Idle';Target=$null;AttemptKey=$null;SuppressionKey=$null;EffectiveClassification=$null;RequiresController=$false}
         ProcessIds=@();Snapshots=@{};Poll=[pscustomobject][ordered]@{Completed=$false;ExitCode=$null;StdoutText='';StdoutByteCount=0;StdoutOverflow=$false;StderrByteCount=0;StderrOverflow=$false}
         WorkerResult=$null;TickCount=0
+        Preference=[pscustomobject][ordered]@{LanguageMode='System';FallbackUsed=$false;ErrorCode=$null};StoredLanguageMode='System';SystemCultureName='zh-CN'
+        SetUiLanguageModes=[Collections.Generic.List[string]]::new();TrayArguments=$null;PresentationArguments=[Collections.Generic.List[object]]::new()
+        UiFailureRecords=[Collections.Generic.List[object]]::new();TrayErrors=[Collections.Generic.List[object]]::new()
     }
     $adapters=@{}
     foreach($name in Get-CcodSupervisorAdapterNames){
@@ -86,17 +96,27 @@ function New-CcodSupervisorFake {
     $adapters.CloseEvent={param($Event)$world.Calls.Add("Close:$($Event.Kind)");if($world.FailAt -ceq "Close$($Event.Kind)"){throw 'PRIVATE_CLOSE_SECRET'}}.GetNewClosure()
     $adapters.ReadState={param($StateRoot)$world.Calls.Add('Read:State');$world.StateReads++;if($world.FailAt -ceq 'ReadState'){throw 'PRIVATE_STATE_SECRET'};[pscustomobject]@{AutomationEnabled=$true;Settings=[pscustomobject]@{candidateCompatibleOptIn=$false};Damage=$null}}.GetNewClosure()
     $adapters.ReadJournal={param($Path)$world.Calls.Add('Read:Journal');$world.JournalReads++;if($world.FailAt -ceq 'ReadJournal'){throw 'PRIVATE_JOURNAL_SECRET'};$world.ActiveJournal}.GetNewClosure()
+    $adapters.ReadUiPreference={param($StateRoot)$world.Calls.Add('Read:UiPreference');if($world.FailAt -ceq 'ReadUiPreference'){throw 'PRIVATE_UI_PREFERENCE_SECRET'};$world.Preference}.GetNewClosure()
+    $adapters.SetUiLanguageMode={param($StateRoot,$Mode)$world.Calls.Add("Persist:UiLanguage:$Mode");$world.SetUiLanguageModes.Add($Mode);if($world.FailAt -ceq 'SetUiLanguageMode'){throw 'PRIVATE_UI_WRITE_SECRET'};$world.StoredLanguageMode=$Mode}.GetNewClosure()
+    $adapters.GetSystemCultureName={$world.Calls.Add('Get:SystemCulture');[string]$world.SystemCultureName}.GetNewClosure()
+    $adapters.GetUiCatalog={
+        param($ResourcesRoot,$Mode,$CultureName)
+        $world.Calls.Add("Get:UiCatalog:$Mode")
+        if($world.FailAt -ceq 'GetUiCatalog'){throw 'PRIVATE_CATALOG_SECRET'}
+        if($Mode -ceq 'System'){$systemCatalog}elseif($Mode -ceq 'zh-CN'){$chineseCatalog}elseif($Mode -ceq 'en-US'){$englishCatalog}else{throw 'PRIVATE_INVALID_MODE'}
+    }.GetNewClosure()
+    $adapters.ShowTrayError={param($Tray,$Catalog,$Key)$world.Calls.Add("Show:TrayError:$Key");if($world.FailAt -ceq 'ShowTrayError'){throw 'PRIVATE_DIALOG_SECRET'};$world.TrayErrors.Add([pscustomobject][ordered]@{Tray=$Tray;Catalog=$Catalog;Key=$Key})}.GetNewClosure()
     $adapters.EnumerateProcessIds={$world.Calls.Add('Enumerate');Write-Output -NoEnumerate @($world.ProcessIds)}.GetNewClosure()
     $adapters.GetProcessSnapshot={param($Pid)$world.Calls.Add("Snapshot:$Pid");if($world.Snapshots.ContainsKey([int]$Pid)){$world.Snapshots[[int]$Pid]}else{$null}}.GetNewClosure()
     $adapters.GetSupervisorDecision={param($Context)$world.Calls.Add('Decision');$world.Decision}.GetNewClosure()
     $adapters.AddObservedEvent={param($Observed,$Pid,$Created)$world.Calls.Add("Observed:$Pid");$true}.GetNewClosure()
     $adapters.CompleteControllerRun={param($Result,$TransactionId,$Action,$RuntimeId)$world.Calls.Add("Reduce:$Action");[pscustomobject][ordered]@{SessionState='Idle';BlockAutomaticActions=$false;AttemptKey=$null;RecoveryIgnoreKey=$null;SuppressionKey=$null;ErrorCode=$null;Reason='Reduced'}}.GetNewClosure()
-    $adapters.GetTrayPresentation={param($Arguments)[pscustomobject][ordered]@{Color='Gray';Tooltip='Idle';StatusText='Idle';ApplyNowEnabled=$true;ManualRetryEnabled=$false;AutomationToggleEnabled=$true;AutomationChecked=$true;CandidateOptInToggleEnabled=$true;CandidateOptInChecked=$false;OpenLogsEnabled=$true;UninstallEnabled=$false;Busy=$false}}.GetNewClosure()
+    $adapters.GetTrayPresentation={param($Arguments)[pscustomobject][ordered]@{Color='Gray';StateKey='Waiting';SessionReadyVisible=$false;ApplyNowVisible=$true;ApplyNowEnabled=$true;ManualRetryVisible=$false;ManualRetryEnabled=$false;AutomationToggleEnabled=$true;AutomationChecked=$true;CandidateOptInToggleEnabled=$true;CandidateOptInChecked=$false;OpenLogsEnabled=$true;UninstallEnabled=$false;Busy=$false}}.GetNewClosure()
     $adapters.NewQueue={param($Kind)$world.Calls.Add("Queue:$Kind");if($Kind -ceq 'Command'){Write-Output -NoEnumerate $world.CommandQueue}else{Write-Output -NoEnumerate $world.EventQueue}}.GetNewClosure()
     $adapters.GetQueueCount={param($Queue)[int]$Queue.Count}.GetNewClosure()
     $adapters.TryDequeue={param($Queue)$world.TryDequeueSawRealQueue=[object]::ReferenceEquals($Queue,$world.CommandQueue);if($Queue.Count){[pscustomobject][ordered]@{Succeeded=$true;Value=$Queue.Dequeue()}}else{[pscustomobject][ordered]@{Succeeded=$false;Value=$null}}}.GetNewClosure()
-    $adapters.NewTray={param($Queue,$OnTick)$world.NewTraySawRealQueue=[object]::ReferenceEquals($Queue,$world.CommandQueue);$world.Calls.Add('New:Tray');if($world.FailAt -ceq 'NewTray'){throw 'PRIVATE_TRAY_SECRET'};$world.OnTick=$OnTick;[pscustomobject]@{Kind='Tray';Timer=[pscustomobject]@{Kind='Timer'};ApplicationContext=[pscustomobject]@{Kind='App'}}}.GetNewClosure()
-    $adapters.SetTrayPresentation={param($Tray,$Presentation,$PackageText,$RuntimeText)$world.Calls.Add('Set:Presentation')}.GetNewClosure()
+    $adapters.NewTray={param($Queue,$OnTick,$Catalog,$LanguageMode,$SystemCultureName)$world.NewTraySawRealQueue=[object]::ReferenceEquals($Queue,$world.CommandQueue);$world.Calls.Add('New:Tray');if($world.FailAt -ceq 'NewTray'){throw 'PRIVATE_TRAY_SECRET'};$world.OnTick=$OnTick;$world.TrayArguments=[pscustomobject][ordered]@{Queue=$Queue;OnTick=$OnTick;Catalog=$Catalog;LanguageMode=$LanguageMode;SystemCultureName=$SystemCultureName};[pscustomobject]@{Kind='Tray';Timer=[pscustomobject]@{Kind='Timer'};ApplicationContext=[pscustomobject]@{Kind='App'}}}.GetNewClosure()
+    $adapters.SetTrayPresentation={param($Tray,$Presentation,$Catalog,$LanguageMode,$SystemCultureName)$world.Calls.Add('Set:Presentation');if($world.FailAt -ceq 'SetTrayPresentation'){throw 'PRIVATE_PRESENTATION_SECRET'};$world.PresentationArguments.Add([pscustomobject][ordered]@{Tray=$Tray;Presentation=$Presentation;Catalog=$Catalog;LanguageMode=$LanguageMode;SystemCultureName=$SystemCultureName})}.GetNewClosure()
     $adapters.StopTrayTimer={param($Tray)$world.Calls.Add('Stop:Timer');if($world.FailAt -ceq 'StopTimer'){throw 'PRIVATE_TIMER_SECRET'}}.GetNewClosure()
     $adapters.RequestUiExit={param($Tray)$world.Calls.Add('Exit:UI')}.GetNewClosure()
     $adapters.CloseTray={param($Tray)$world.Calls.Add('Close:Tray');if($world.FailAt -ceq 'CloseTray'){throw 'PRIVATE_TRAY_CLOSE_SECRET'};[pscustomobject][ordered]@{SchemaVersion=1;Closed=$true;CleanupCodes=@()}}.GetNewClosure()
@@ -117,7 +137,7 @@ function New-CcodSupervisorFake {
     $adapters.SetCandidateOptIn={param($StateRoot,$Enabled)$world.Calls.Add("Candidate:$Enabled")}.GetNewClosure()
     $adapters.OpenLogs={param($Path)$world.Calls.Add('Open:Logs')}.GetNewClosure()
     $adapters.RunUiContext={param($Tray)$world.Calls.Add('Run:UI');if($world.FailAt -ceq 'RunUi'){throw 'PRIVATE_UI_SECRET'};if($world.TickCount -gt 0){foreach($index in 1..$world.TickCount){& $world.OnTick}}}.GetNewClosure()
-    $adapters.WriteLog={param($Record)$world.Calls.Add("Log:$($Record.code)")}.GetNewClosure()
+    $adapters.WriteLog={param($Record)$world.Calls.Add("Log:$($Record.code)");if($world.FailAt -ceq 'WriteLog'){throw 'PRIVATE_LOG_SECRET'};$world.UiFailureRecords.Add($Record)}.GetNewClosure()
     [pscustomobject]@{World=$world;Adapters=$adapters;Identity=$identity;Layout=$layout}
 }
 
@@ -127,6 +147,7 @@ function New-CcodTickFixture {
     $state=[pscustomobject]@{AutomationEnabled=$true;AutomaticCandidateTrialsAllowed=$false;Settings=[pscustomobject]@{candidateCompatibleOptIn=$false};VerifiedPackages=[pscustomobject][ordered]@{schemaVersion=1;packages=[ordered]@{}};Damage=[pscustomobject]@{}}
     $hostState=New-CcodSupervisorHostState -Identity $fake.Identity -Layout $fake.Layout -Clock ([pscustomobject]@{Kind='Clock'}) -ShutdownEvent $shutdown -CommandQueue $fake.World.CommandQueue -EventQueue $fake.World.EventQueue -State $state -Journal $null
     $hostState.Tray=[pscustomobject]@{Kind='Tray'}
+    $hostState.UiLanguageMode='System';$hostState.UiCatalog=$script:TestSystemCatalog
     [pscustomobject]@{Fake=$fake;Host=$hostState}
 }
 
@@ -180,10 +201,13 @@ Invoke-CcodTest 'acquires both lifetime leases and signals Ready only after all 
     Assert-CcodTrue $fake.World.NewTraySawRealQueue 'tray receives the command queue itself'
     Assert-CcodTrue $fake.World.NewWatcherSawRealQueue 'watcher receives the event queue itself'
     $calls=@($fake.World.Calls)
-    foreach($before in @('Enter:AccountSupervisor:5000','Enter:Supervisor:5000','Open:Ready','Open:Shutdown','Read:State','Read:Journal','Queue:Command','Queue:Event','New:Tray','New:Watcher')){
+    foreach($before in @('Enter:AccountSupervisor:5000','Enter:Supervisor:5000','Open:Ready','Open:Shutdown','Read:State','Read:Journal','Read:UiPreference','Get:SystemCulture','Get:UiCatalog:System','Queue:Command','Queue:Event','New:Tray','New:Watcher')){
         Assert-CcodTrue ([Array]::IndexOf($calls,$before) -ge 0) "$before occurs"
         Assert-CcodTrue ([Array]::IndexOf($calls,$before) -lt [Array]::IndexOf($calls,'Signal:Ready')) "$before precedes Ready"
     }
+    Assert-CcodTrue ([object]::ReferenceEquals($script:TestSystemCatalog,$fake.World.TrayArguments.Catalog)) 'tray receives the validated initial catalog'
+    Assert-CcodEqual 'System' $fake.World.TrayArguments.LanguageMode 'tray receives exact initial mode'
+    Assert-CcodEqual 'zh-CN' $fake.World.TrayArguments.SystemCultureName 'tray receives system culture'
     Assert-CcodTrue ([Array]::IndexOf($calls,'Signal:Ready') -lt [Array]::IndexOf($calls,'Run:UI')) 'Ready precedes message loop'
     Assert-CcodTrue ([Array]::IndexOf($calls,'Exit:Supervisor') -lt [Array]::IndexOf($calls,'Exit:AccountSupervisor')) 'leases release in reverse order'
 }
@@ -231,7 +255,7 @@ Invoke-CcodTest 'never signals Ready when Shutdown is already signaled' {
 }
 
 Invoke-CcodTest 'contains initialization secrets and runs every available cleanup stage' {
-    foreach($stage in @('ReadState','ReadJournal','NewTray','NewWatcher','SignalReady','RunUi')){
+    foreach($stage in @('ReadState','ReadJournal','ReadUiPreference','GetUiCatalog','NewTray','NewWatcher','SignalReady','RunUi')){
         $fake=New-CcodSupervisorFake -FailAt $stage
         $receipt=Invoke-CcodSupervisorHost -ReadyToken $readyToken -Adapters $fake.Adapters
         Assert-CcodReceipt $receipt 'Failed' 1
@@ -262,6 +286,118 @@ Invoke-CcodTest 'rejects malformed or partial adapter sets before any lifecycle 
     $receipt2=Invoke-CcodSupervisorHost -ReadyToken $readyToken -Adapters $fake2.Adapters
     Assert-CcodReceipt $receipt2 'StartupRejected' 2
     Assert-CcodEqual 0 $fake2.World.Calls.Count 'extra adapter set invokes nothing'
+}
+
+Invoke-CcodTest 'adds the exact localization adapters and host fields at the frozen boundaries' {
+    $names=Get-CcodSupervisorAdapterNames
+    $first=[Array]::IndexOf($names,'ReadUiPreference')
+    Assert-CcodTrue ($first -ge 0) 'ReadUiPreference adapter exists'
+    Assert-CcodEqual 'ReadUiPreference,SetUiLanguageMode,GetSystemCultureName,GetUiCatalog,ShowTrayError' (@($names[$first..($first+4)])-join ',') 'localization adapter order is exact'
+    $fixture=New-CcodTickFixture
+    $hostNames=@($fixture.Host.PSObject.Properties.Name)
+    $trayIndex=[Array]::IndexOf($hostNames,'Tray')
+    Assert-CcodEqual 'Tray,UiLanguageMode,UiCatalog,State' (@($hostNames[$trayIndex..($trayIndex+3)])-join ',') 'UI host fields occur immediately after Tray'
+}
+
+Invoke-CcodTest 'commits one valid UI language command before refreshing the existing tray in place' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $tray=$hostState.Tray;$oldState=$hostState.State;$oldQueue=$hostState.CommandQueue
+    $command=[pscustomobject][ordered]@{Kind='SetUiLanguage';Value='en-US';EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
+    Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $hostState -Adapters $fixture.Fake.Adapters).Count 'language command emits no output'
+    Assert-CcodEqual 'en-US' $hostState.UiLanguageMode 'mode changes only after persistence'
+    Assert-CcodTrue ([object]::ReferenceEquals($script:TestEnglishCatalog,$hostState.UiCatalog)) 'catalog refreshes immediately'
+    Assert-CcodEqual 'en-US' $world.StoredLanguageMode 'atomic preference stores exact mode'
+    Assert-CcodEqual 1 $world.SetUiLanguageModes.Count 'one atomic write occurs'
+    Assert-CcodEqual 1 $world.PresentationArguments.Count 'existing tray refreshes once'
+    $render=$world.PresentationArguments[0]
+    Assert-CcodTrue ([object]::ReferenceEquals($tray,$render.Tray)) 'tray is not recreated'
+    Assert-CcodTrue ([object]::ReferenceEquals($script:TestEnglishCatalog,$render.Catalog)) 'new validated catalog is rendered'
+    Assert-CcodEqual 'en-US' $render.LanguageMode 'render receives exact new mode'
+    Assert-CcodTrue ([object]::ReferenceEquals($oldState,$hostState.State) -and [object]::ReferenceEquals($oldQueue,$hostState.CommandQueue)) 'controller state and bounded queue remain running'
+    $calls=@($world.Calls)
+    Assert-CcodTrue ([Array]::IndexOf($calls,'Get:UiCatalog:en-US') -lt [Array]::IndexOf($calls,'Persist:UiLanguage:en-US')) 'catalog validation precedes persistence'
+    Assert-CcodTrue ([Array]::IndexOf($calls,'Persist:UiLanguage:en-US') -lt [Array]::IndexOf($calls,'Set:Presentation')) 'tray mutates only after persistence'
+}
+
+Invoke-CcodTest 'restores the existing tray with the old catalog after a new-language render failure' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $oldCatalog=$hostState.UiCatalog;$renderModes=[Collections.Generic.List[string]]::new();$first=[pscustomobject]@{Pending=$true}
+    $fixture.Fake.Adapters.SetTrayPresentation={
+        param($Tray,$Presentation,$Catalog,$LanguageMode,$SystemCultureName)
+        $renderModes.Add($LanguageMode)
+        if($first.Pending){$first.Pending=$false;throw 'PRIVATE_PARTIAL_RENDER_SECRET'}
+    }.GetNewClosure()
+    $command=[pscustomobject][ordered]@{Kind='SetUiLanguage';Value='en-US';EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
+    Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $hostState -Adapters $fixture.Fake.Adapters).Count 'render failure and rollback emit no output'
+    Assert-CcodEqual 'en-US,System' (@($renderModes)-join ',') 'failed new render is followed by one old-mode tray redraw'
+    Assert-CcodEqual 'en-US,System' (@($world.SetUiLanguageModes)-join ',') 'persisted preference is restored atomically after render failure'
+    Assert-CcodEqual 'System' $world.StoredLanguageMode 'stored preference returns to old mode'
+    Assert-CcodEqual 'System' $hostState.UiLanguageMode 'host returns to old mode'
+    Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$hostState.UiCatalog)) 'host returns to old catalog identity'
+    Assert-CcodEqual 1 $world.UiFailureRecords.Count 'one stable language-change failure is logged'
+    Assert-CcodEqual 1 $world.TrayErrors.Count 'old catalog reports the failed language change'
+}
+
+Invoke-CcodTest 'rejects malformed language commands before catalog resolution or persistence' {
+    $timestamp='2026-08-05T00:00:00.0000000Z'
+    $cases=@(
+        [pscustomobject][ordered]@{Kind='SetUiLanguage';Value='system';EnqueuedAtUtc=$timestamp},
+        [pscustomobject][ordered]@{Kind='SetUiLanguage';Value='zh-cn';EnqueuedAtUtc=$timestamp},
+        [pscustomobject][ordered]@{Kind='SetUiLanguage';Value='fr-FR';EnqueuedAtUtc=$timestamp},
+        [pscustomobject][ordered]@{Kind='SetUiLanguage';EnqueuedAtUtc=$timestamp},
+        [pscustomobject][ordered]@{Kind='SetUiLanguage';Value='en-US';EnqueuedAtUtc=$timestamp;Extra=$true},
+        [pscustomobject][ordered]@{Kind='SetUiLanguage';Value=[int]1;EnqueuedAtUtc=$timestamp}
+    )
+    foreach($command in $cases){
+        $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host;$oldCatalog=$hostState.UiCatalog
+        Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $hostState -Adapters $fixture.Fake.Adapters).Count 'rejected language command emits no output'
+        Assert-CcodEqual 0 $world.SetUiLanguageModes.Count 'rejected value never persists'
+        Assert-CcodEqual 0 @($world.Calls|Where-Object {$_ -like 'Get:UiCatalog:*'}).Count 'rejected value never reaches catalog adapter'
+        Assert-CcodEqual 'System' $hostState.UiLanguageMode 'rejected value preserves old mode'
+        Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$hostState.UiCatalog)) 'rejected value preserves old catalog'
+    }
+}
+
+Invoke-CcodTest 'rolls back catalog and persistence failures and reports only bounded stable UI records through the old catalog' {
+    foreach($stage in @('GetUiCatalog','SetUiLanguageMode')){
+        $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host;$world.FailAt=$stage
+        $oldCatalog=$hostState.UiCatalog;$oldMode=$hostState.UiLanguageMode;$oldStored=$world.StoredLanguageMode
+        $oldSession=$hostState.SessionState;$oldBlock=$hostState.BlockAutomaticActions;$oldWorker=$hostState.WorkerSlot
+        $command=[pscustomobject][ordered]@{Kind='SetUiLanguage';Value='en-US';EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
+        Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $hostState -Adapters $fixture.Fake.Adapters).Count "$stage failure is contained with no output"
+        Assert-CcodEqual $oldMode $hostState.UiLanguageMode "$stage preserves mode"
+        Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$hostState.UiCatalog)) "$stage preserves old catalog identity"
+        Assert-CcodEqual $oldStored $world.StoredLanguageMode "$stage preserves stored preference"
+        Assert-CcodEqual 1 $world.UiFailureRecords.Count "$stage writes one bounded failure record"
+        $record=$world.UiFailureRecords[0]
+        Assert-CcodEqual 'schemaVersion,timestampUtc,component,stage,code,outcome' (@($record.PSObject.Properties.Name)-join ',') 'failure record shape is exact'
+        Assert-CcodEqual '1,2030-02-03T03:04:05.0000000Z,Supervisor,LanguageChange,CCOD_UI_LANGUAGE_CHANGE_FAILED,Failed' "$($record.schemaVersion),$($record.timestampUtc),$($record.component),$($record.stage),$($record.code),$($record.outcome)" 'failure record values are stable English'
+        Assert-CcodTrue (($record|ConvertTo-Json -Compress) -cnotmatch 'PRIVATE|Fake|en-US|Catalog') 'failure record contains no exception path catalog or input'
+        Assert-CcodEqual 1 $world.TrayErrors.Count "$stage shows one localized error"
+        Assert-CcodEqual 'Error.LanguageChange' $world.TrayErrors[0].Key 'old-catalog language error key is exact'
+        Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$world.TrayErrors[0].Catalog)) 'dialog resolves through the old catalog'
+        Assert-CcodTrue ($hostState.SessionState -ceq $oldSession -and $hostState.BlockAutomaticActions -eq $oldBlock -and [object]::ReferenceEquals($oldWorker,$hostState.WorkerSlot)) 'controller and Codex state remain untouched'
+    }
+}
+
+Invoke-CcodTest 'contains error-dialog and UI-log failures independently without changing controller state' {
+    $dialogFixture=New-CcodTickFixture;$dialogWorld=$dialogFixture.Fake.World;$dialogHost=$dialogFixture.Host
+    $dialogSession=$dialogHost.SessionState
+    $dialogWorld.FailAt='SetUiLanguageMode';$dialogFixture.Fake.Adapters.ShowTrayError={param($Tray,$Catalog,$Key)$dialogWorld.Calls.Add('Show:TrayError:failed');throw 'PRIVATE_DIALOG_SECRET'}.GetNewClosure()
+    $command=[pscustomobject][ordered]@{Kind='SetUiLanguage';Value='zh-CN';EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
+    Invoke-CcodSupervisorCommand -Command $command -HostState $dialogHost -Adapters $dialogFixture.Fake.Adapters
+    Assert-CcodEqual 'CCOD_UI_LANGUAGE_CHANGE_FAILED,CCOD_UI_ERROR_DIALOG_FAILED' (@($dialogWorld.UiFailureRecords.code)-join ',') 'dialog failure is logged separately'
+    Assert-CcodEqual 'System' $dialogHost.UiLanguageMode 'dialog failure preserves UI mode'
+    Assert-CcodEqual $dialogSession $dialogHost.SessionState 'dialog failure preserves controller state'
+
+    $logFixture=New-CcodTickFixture;$logWorld=$logFixture.Fake.World;$logHost=$logFixture.Host
+    $logSession=$logHost.SessionState
+    $logWorld.FailAt='SetUiLanguageMode';$logFixture.Fake.Adapters.WriteLog={param($Record)throw 'PRIVATE_LOG_SECRET'}
+    Invoke-CcodSupervisorCommand -Command $command -HostState $logHost -Adapters $logFixture.Fake.Adapters
+    Assert-CcodTrue $logHost.RuntimeCleanupCodes.Contains('CCOD_SUPERVISOR_LOG_FAILED') 'log failure is reduced to existing bounded cleanup code'
+    Assert-CcodEqual 1 $logWorld.TrayErrors.Count 'log failure does not suppress the localized dialog'
+    Assert-CcodEqual 'System' $logHost.UiLanguageMode 'log failure preserves UI mode'
+    Assert-CcodEqual $logSession $logHost.SessionState 'log failure preserves controller state'
 }
 
 Invoke-CcodTest 'gives Shutdown absolute priority over a slot journal command and decision' {
