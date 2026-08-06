@@ -1,267 +1,164 @@
 # Codex Control other devices for Windows
 
-[English](README.en.md) | [Simplified Chinese](README.md)
+Language / 语言：English · [简体中文](README.md)
 
-Enable the UI already shipped in Codex Desktop for Windows but blocked by a runtime defect:
+Enables the UI that ships with Codex Desktop for Windows but is hidden by a runtime defect:
 
 **Settings → Connections → Control other devices**
 
 This project does not modify `ChatGPT.exe`, `app.asar`, or anything under
-`C:\Program Files\WindowsApps`. The persistent installation is managed by a
-current-user tray supervisor; manual mode remains a conservative fallback.
+`C:\Program Files\WindowsApps`. After installation, a persistent tray supervisor
+manages everything automatically; manual mode remains a conservative fallback.
 
 > [!IMPORTANT]
-> Complete the MFA, SSO, or passkey checks required by the account or workspace.
-> The account used for this test required MFA to be enabled before enrollment.
-
+> Complete the MFA, SSO, or passkey checks required by your account or workspace before enrolling a device.
+>
 > [!WARNING]
-> This is an unofficial, version-sensitive runtime compatibility project. It enables
-> Chromium debugging on a random `127.0.0.1` port. Run it only on a trusted Windows
-> machine and repeat the compatibility check after every Codex update.
+> This is an unofficial runtime compatibility project. It enables Chromium debugging on a random
+> `127.0.0.1` port. Run it only on a trusted Windows machine and re-run the compatibility check
+> after every Codex update.
 
-## Root cause
+## Quick start
 
-Affected Windows packages have all of the following characteristics:
+Run the read-only preflight and continue only when all three checks pass:
 
-1. The Windows controller page, strings, and backend calls are already shipped.
-2. Statsig gate `782640499` is consumed with inverted semantics: `true` hides
-   `showControlOtherDevices`.
-3. The main-process device-key entry point accepts only
-   `process.platform === "darwin"`.
-4. The Windows package does not ship `remote-control-device-key.node`.
-
-The resulting symptom is specific: Windows displays **Control this computer**
-and **SSH**, and mobile devices can control the PC, but the Windows client cannot
-act as a controller because **Control other devices** is absent.
-
-OpenAI's [Remote connections documentation](https://learn.chatgpt.com/docs/remote-connections)
-describes the normal pairing, account/workspace, required authentication, and host requirements.
-This project fills only the affected local Windows runtime gap. It does not
-bypass account authorization, MFA/SSO/passkeys, workspace policy, or server permissions.
-
-## Persistent tray supervisor (recommended)
-
-Installation registers a current-user logon task, **Codex Control Other Devices
-Supervisor**, which starts a persistent tray supervisor. It watches ordinary Codex
-launches and, only when the package is eligible, performs and verifies the
-compatibility takeover. Manual mode remains a conservative fallback.
-
-### Install
-
-Run this read-only preflight first:
-
-~~~powershell
+```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CodexControlOtherDevices.ps1
-~~~
+```
 
-Continue only when the check reports `Ready: True`, Node.js 22 or later, and
-`Heuristic match: True`. Install the supervisor and explicitly opt in to
-candidate-compatible update trials:
+```text
+Ready: True
+Node.js: 22 or newer
+Heuristic match: True
+```
 
-~~~powershell
+Install the persistent supervisor and explicitly opt in to candidate-compatible trials:
+
+```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -EnableCandidateCompatibleUpdates
-~~~
+```
 
-The install root is `%LOCALAPPDATA%\CodexControlOtherDevices`. A compatible
-first-seen package gets one controlled trial. Unknown, incompatible, and
-native-module-present builds stay ordinary; the supervisor never takes them over.
-Save unfinished work before a trial: a normal Codex launch may close and reopen
-once. Simulated restart/update fixtures are not proof of an actual Windows logon
-or Microsoft Store update; those cycles require real observation.
+The install root is `%LOCALAPPDATA%\CodexControlOtherDevices`. During the first takeover, a
+normal Codex launch may close and reopen once, so save unfinished work first.
 
-### Repair state
+Verified on Windows 11 · Codex Desktop `26.730.8199.0` · Node.js `22.23.1`:
+the tab, controller enrollment, device list, and remote projects are all working.
 
-~~~powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -RepairState
-~~~
+## Everyday use
 
-Repair recreates schema-1 state with `automationEnabled=false` and
-`candidateCompatibleOptIn=false`. Re-enable automation and the
-candidate-compatible option, if desired, from the tray.
+- The logon task `Codex Control Other Devices Supervisor` starts the tray supervisor automatically; no manual scripts are needed.
+- A green tray icon means the current session is active. Open **Settings → Connections → Control other devices** to enroll or use it.
+- New Codex builds start with `--remote-debugging-port` but no `--inspect`; the supervisor recognizes that launch shape and performs the takeover automatically.
+- The tray menu supports Follow system, Chinese, and English; switching applies immediately without restarting anything.
+- Updating this project or Codex does not require reinstalling the supervisor; the installer atomically switches versioned runtimes.
 
-### Uninstall
+## Tray menu
 
-~~~powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-CodexControlOtherDevices.ps1
-~~~
-
-By default, uninstall normalizes a special session to ordinary, then removes the
-task, tray supervisor, runtime, state, and logs while preserving the DPAPI
-device-key store. `-KeepCurrentSpecialSession` keeps the special session, with
-the warning that renderer CDP remains open without tray monitoring.
-`-BackupDeviceKeyStore` and `-RemoveDeviceKeyStore` are mutually exclusive.
-Moving or deleting the local key does not revoke server authorization; revoke
-the device in Codex first.
-
-### Supervisor behavior
-
-The **Codex Control Other Devices Supervisor** task is limited to the current
-user and uses `InteractiveToken`, `IgnoreNew`, three one-minute retries, `PT0S`
-execution time, and no battery-start or battery-stop restrictions.
-
-The tray icon reports these states:
-
-- Gray: waiting for Codex or paused.
-- Green: special session verified.
-- Yellow: incompatible, native-module-present, or suppressed.
-- Red: takeover failed and an ordinary session was restored.
-
-Use the tray menu to pause, resume, or retry. The supervisor reconciles every
-three seconds and uses a WMI capability fallback when an optional capability is
-unavailable. Project upgrades and Codex restarts do not require rerunning the
-project; the installed supervisor continues to manage the current runtime.
-
-### Tray icon, status colors, and bilingual menu
-
-The tray icon uses a connection-bridge outline with a status dot instead of a
-letter-shaped application glyph. Color describes the supervisor state only; it
-does not change the safety policy:
+The native WinForms menu shows actions only when their semantic state allows them: Apply now, Retry,
+Automation, Candidate-compatible trial, Logs, and Uninstall. Uninstall always requires explicit confirmation.
 
 | Color | State | Meaning |
 |---|---|---|
 | Gray | Waiting / Inspecting / Transitioning | Waiting for Codex, inspecting the current session, or applying the bridge |
-| Green | Active / ActivePaused | The current session is verified; green is retained when automation is paused, while the menu shows the pause state |
-| Yellow | Suppressed | The compatibility action is suppressed until a manual retry or a new runtime |
-| Red | Recovered / Error | Ordinary Codex was safely restored, or automatic actions are blocked and logs need review |
+| Green | Active / ActivePaused | Current session is verified and usable |
+| Yellow | Suppressed | Compatibility action is suppressed until a manual retry or a new runtime |
+| Red | Recovered / Error | Ordinary Codex was safely restored, or automatic actions are blocked |
 
-The menu is a native WinForms grouped menu whose actions are context-aware:
-current-session readiness, apply-now, retry, automation, candidate-update trials,
-logs, and uninstall are shown or enabled only when their semantic state allows it.
-Uninstall always requires an explicit menu confirmation; cancelling does not enqueue
-a command or change state.
+## Maintenance
 
-The default language follows Windows. The language root is `语言 / Language` in the
-Chinese UI and `Language / 语言` in the English UI. Its choices are:
+Repair damaged state:
 
-- `Follow system (Chinese)` / `跟随系统（中文）`;
-- `Chinese` / `中文`;
-- `English`.
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -RepairState
+```
 
-Choosing `Chinese` or `English` updates the menu and tray tooltip immediately,
-without restarting the Supervisor or Codex. Choosing the system mode persists
-`languageMode: "System"` in
-`%LOCALAPPDATA%\CodexControlOtherDevices\state\ui-preferences.json`. This file
-contains display preference only; a missing or damaged preference falls back to the
-system language and cannot block compatibility actions, change consent switches, or
-trigger safety-state repair.
+Uninstall safely (device key store is preserved by default):
 
-### Visual gallery and screenshots
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-CodexControlOtherDevices.ps1
+```
 
-To inspect the tray UI without touching the current Codex session, run the visual-only
-gallery:
+Options: `-BackupDeviceKeyStore` backs up the key; `-RemoveDeviceKeyStore` explicitly deletes it (mutually exclusive);
+`-KeepCurrentSpecialSession` keeps the current special session (renderer CDP stays open).
 
-~~~powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -STA `
-  -File .\tests\manual\Show-TrayUiGallery.ps1 `
-  -Locale All -State All -DurationSeconds 8
-~~~
+Manual per-session enable or restore (conservative fallback):
 
-The gallery accepts menu commands in memory only, always rejects uninstall confirmation,
-never inspects, stops, launches, or modifies Codex, and never writes preference or safety
-state. The checked-in native menu screenshots are:
-
-- [Chinese menu](docs/assets/tray-menu-zh-CN.png)
-- [English menu](docs/assets/tray-menu-en-US.png)
-
-## Manual mode
-
-Manual mode is a per-session, conservative fallback:
-
-~~~powershell
+```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-CodexControlOtherDevices.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Reset-CodexControlOtherDevices.ps1
-~~~
+```
 
-## Security notes
+## What it fixes
 
-Renderer CDP for a special session remains on `127.0.0.1`. It can execute code
-inside the Codex renderer, so untrusted processes running as the same Windows
-user are inside this project's threat boundary. The task and supervisor are
-unelevated; their current-user files are part of the trust root. Manifest hashes
-detect corruption, not the identity of the user who controls those files. Damaged
-state disables automation rather than guessing how to recover. Default uninstall
-normalizes the special session before removing the tray.
+Affected Windows packages have all of the following characteristics:
 
-Encrypted device keys are stored at
-`%CODEX_HOME%\remote-control-device-keys.windows.json`. When `CODEX_HOME` is
-unset, the default is `%USERPROFILE%\.codex\remote-control-device-keys.windows.json`.
-The bridge uses the compatibility label `os_protected_nonextractable`, but this
-JavaScript fallback is a DPAPI-protected software key, not a TPM-backed
-non-exportable key. Read [SECURITY.md](SECURITY.md) before use.
+1. The Windows controller page, strings, and backend calls are already shipped.
+2. Statsig gate `782640499` is consumed with inverted semantics: `true` hides `showControlOtherDevices`.
+3. The main-process device-key entry point accepts only `process.platform === "darwin"`.
+4. The Windows package does not ship `remote-control-device-key.node`.
+
+Official docs: [Remote connections](https://learn.chatgpt.com/docs/remote-connections).
+This project only fills the local Windows runtime gap. It does not bypass account authorization,
+MFA/SSO/passkeys, workspace policy, or server permissions.
+
+## Security model
+
+- Debug ports bind only to a random `127.0.0.1`; the main-process Inspector must close after injection.
+- Any process running as the same Windows user can reach these ports, so only use a trusted machine.
+- The device private key is stored at `%CODEX_HOME%\remote-control-device-keys.windows.json`
+  (or `%USERPROFILE%\.codex\...` when `CODEX_HOME` is unset), encrypted with DPAPI current-user scope.
+  It is a software key, not a TPM-backed non-exportable key.
+- Moving or deleting the local key does not revoke server authorization; revoke the device in Codex first.
+
+See [SECURITY.md](SECURITY.md) and [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
 ## Diagnostics
 
-Persistent logs are stored in `%LOCALAPPDATA%\CodexControlOtherDevices\logs\`.
-The primary files are `install.log`, `supervisor.log`, and `bootstrap.log`.
-Logs should not contain credentials or private keys, but review local paths and
-environment information before sharing them publicly.
+Logs live in `%LOCALAPPDATA%\CodexControlOtherDevices\logs\`: `install.log`, `supervisor.log`,
+`bootstrap.log`, and `transactions.log`.
 
-## Project structure
+## Troubleshooting
 
-~~~text
-.
-+-- Install-CodexControlOtherDevices.ps1
-+-- Uninstall-CodexControlOtherDevices.ps1
-+-- src/persistence/bootstrap.ps1
-+-- src/persistence/Supervisor.ps1
-+-- src/persistence/SessionController.ps1
-+-- src/persistence/StaticProbeWorker.ps1
-+-- src/persistence/modules/
-|   +-- InstallLifecycle.psm1
-|   +-- ScheduledTask.psm1
-+-- tests/persistence/
-+-- tests/manual/Show-TrayUiGallery.ps1
-+-- docs/
-|   +-- TECHNICAL.md
-|   +-- CLEANROOM.md
-|   +-- assets/tray-menu-*.png
-+-- SECURITY.md
-+-- NOTICE.md
-~~~
+Still no **Control other devices** tab?
+
+1. Confirm the tray icon is green (gray means waiting for Codex or automation is paused).
+2. Re-run the preflight and confirm `Ready: True`.
+3. Check `logs\supervisor.log` and `logs\install.log`.
+4. Make sure security software is not blocking `node.exe` from loopback access.
+5. Exit all Codex processes and retry; the supervisor restarts Codex at most once.
+
+Enrollment or authorization fails?
+
+- Complete MFA/SSO/passkey required by the account or workspace.
+- Use the same ChatGPT account and workspace in Codex and the browser.
+- For organization workspaces, confirm the admin allows Remote Control.
+
+## Project layout
+
+```text
+Install-CodexControlOtherDevices.ps1   Install/upgrade/repair CLI
+Uninstall-CodexControlOtherDevices.ps1 Safe uninstall CLI
+Start-CodexControlOtherDevices.ps1     Manual session start
+Reset-CodexControlOtherDevices.ps1     Manual stop / key backup
+Test-CodexControlOtherDevices.ps1      Read-only compatibility preflight
+src/persistence/                       Bootstrap, tray supervisor, session controller, static probe
+src/runtime/                           Clean-room bridge implementation
+tests/                                 Repository tests, persistence tests, visual gallery
+docs/                                  Technical docs, clean-room notes, bilingual screenshots
+```
 
 ## Validation
 
-~~~powershell
+```powershell
 npm test
-~~~
+```
 
-Repository validation covers PowerShell and Node.js syntax checks, clean-room and
-persistence suites, required files, and (unless explicitly skipped) read-only
-installed-package preflight. It does not simulate proof of a real Windows logon
-or Microsoft Store update cycle.
+## License and provenance
 
-## Original contributions and provenance
-
-This repository uses the problem analysis and runtime technique published by
-hunterbeach as a functional specification, plus read-only inspection of Codex
-Desktop `26.721.4979.0` and local end-to-end validation. Because the referenced
-upstream implementations do not state a license that permits their source text
-to be relicensed here, the final `src/runtime` code is an isolated clean-room
-rewrite. Its implementer received only required behavior, interface fields, and
-the locally installed package's calling contract, and was prohibited from
-reading the earlier derived prototype, Gist source, or other online workaround
-source. See [docs/CLEANROOM.md](docs/CLEANROOM.md).
-
-Original engineering contributions in this repository include the streaming
-sentinel check, random ports, verified main Inspector shutdown, automatic
-normal-launch rollback, versioned/legacy-compatible DPAPI storage, the
-dependency-free clean-room bridge, validation, and bilingual documentation.
-
-The root-cause identification and runtime technique come from hunterbeach's
-[Codex Windows runtime remote control Gist](https://gist.github.com/hunterbeach/dc4b74bda0e045e33f308099182b4f80).
-That Gist credits the main-process approach to
-[zdaar/codex-hacks](https://github.com/zdaar/codex-hacks/blob/main/patch_codex_remote_control.py)
-and adapts its renderer injection pattern from
-[brunolemos' feature-override Gist](https://gist.github.com/brunolemos/7466058059eae140a57a7c6a42f235ae).
-These sources remain explicit so upstream discoveries are not presented as this
-project's original discoveries. No unlicensed upstream source text is included
-in the clean-room runtime. See [NOTICE.md](NOTICE.md) for the boundary.
-
-No OpenAI application binary or asset is redistributed. This project is
-unofficial and is not affiliated with OpenAI.
-
-## License
-
-[MIT](LICENSE) © 2026 naipi11. The MIT license covers this repository's original
-code and documentation; referenced upstream works remain subject to their own
-rights and license terms. See [NOTICE.md](NOTICE.md).
+[MIT](LICENSE) © 2026 naipi11. Root-cause analysis and the runtime technique come from
+[hunterbeach's Codex Windows runtime remote control Gist](https://gist.github.com/hunterbeach/dc4b74bda0e045e33f308099182b4f80);
+the main-process approach credits [zdaar/codex-hacks](https://github.com/zdaar/codex-hacks/blob/main/patch_codex_remote_control.py),
+and the renderer injection pattern adapts [brunolemos' feature-override Gist](https://gist.github.com/brunolemos/7466058059eae140a57a7c6a42f235ae).
+The final `src/runtime` is an isolated clean-room rewrite with no unlicensed upstream source text;
+see [docs/CLEANROOM.md](docs/CLEANROOM.md) and [NOTICE.md](NOTICE.md).
+This project is unofficial, is not affiliated with OpenAI, and does not redistribute OpenAI binaries or assets.
