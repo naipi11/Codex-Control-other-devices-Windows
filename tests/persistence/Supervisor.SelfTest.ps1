@@ -146,9 +146,43 @@ function New-CcodTickFixture {
     $shutdown=[pscustomobject][ordered]@{SchemaVersion=1;Name='Fake-Shutdown';Kind='Shutdown';CreatedNew=$false;Handle=[pscustomobject]@{Kind='Shutdown'};Disposed=$false}
     $state=[pscustomobject]@{AutomationEnabled=$true;AutomaticCandidateTrialsAllowed=$false;Settings=[pscustomobject]@{candidateCompatibleOptIn=$false};VerifiedPackages=[pscustomobject][ordered]@{schemaVersion=1;packages=[ordered]@{}};Damage=[pscustomobject]@{}}
     $hostState=New-CcodSupervisorHostState -Identity $fake.Identity -Layout $fake.Layout -Clock ([pscustomobject]@{Kind='Clock'}) -ShutdownEvent $shutdown -CommandQueue $fake.World.CommandQueue -EventQueue $fake.World.EventQueue -State $state -Journal $null
-    $hostState.Tray=[pscustomobject]@{Kind='Tray'}
+    $hostState.Tray=[pscustomobject]@{Kind='Tray';RenderedLanguageMode='System';RenderedCatalog=$script:TestSystemCatalog;RenderedText='old-stable'}
     $hostState.UiLanguageMode='System';$hostState.UiCatalog=$script:TestSystemCatalog
     [pscustomobject]@{Fake=$fake;Host=$hostState}
+}
+
+function New-CcodLanguageRecoveryFixture {
+    param(
+        [ValidateSet('None','BeforeWrite','AfterWrite')][string]$PreferenceRollbackFailure='None',
+        [bool]$TrayRecoveryFailure=$false
+    )
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $renderAttempts=[Collections.Generic.List[string]]::new();$renderCount=[pscustomobject]@{Value=0}
+    $systemCatalog=$script:TestSystemCatalog;$englishCatalog=$script:TestEnglishCatalog
+    $fixture.Fake.Adapters.SetUiLanguageMode={
+        param($StateRoot,$Mode)
+        $world.Calls.Add("Persist:UiLanguage:$Mode");$world.SetUiLanguageModes.Add($Mode)
+        if($Mode -ceq 'System' -and $PreferenceRollbackFailure -ceq 'BeforeWrite'){throw 'PRIVATE_PREFERENCE_ROLLBACK_BEFORE_WRITE'}
+        $world.StoredLanguageMode=$Mode
+        if($Mode -ceq 'System' -and $PreferenceRollbackFailure -ceq 'AfterWrite'){throw 'PRIVATE_PREFERENCE_ROLLBACK_AFTER_WRITE'}
+    }.GetNewClosure()
+    $fixture.Fake.Adapters.ReadUiPreference={
+        param($StateRoot)
+        $world.Calls.Add('Read:UiPreference:Recovery')
+        [pscustomobject][ordered]@{LanguageMode=[string]$world.StoredLanguageMode;FallbackUsed=$false;ErrorCode=$null}
+    }.GetNewClosure()
+    $fixture.Fake.Adapters.SetTrayPresentation={
+        param($Tray,$Presentation,$Catalog,$LanguageMode,$SystemCultureName)
+        $renderCount.Value++;$renderAttempts.Add($LanguageMode)
+        $world.PresentationArguments.Add([pscustomobject][ordered]@{Tray=$Tray;Presentation=$Presentation;Catalog=$Catalog;LanguageMode=$LanguageMode;SystemCultureName=$SystemCultureName})
+        $Tray.RenderedLanguageMode=$LanguageMode;$Tray.RenderedCatalog=$Catalog
+        if($renderCount.Value -eq 1){$Tray.RenderedText='new-partial';throw 'PRIVATE_PARTIAL_NEW_RENDER'}
+        if($TrayRecoveryFailure){$Tray.RenderedText='recovery-partial';throw 'PRIVATE_RECOVERY_RENDER'}
+        if($LanguageMode -ceq 'System'){$Tray.RenderedText='old-restored';$Tray.RenderedCatalog=$systemCatalog}
+        elseif($LanguageMode -ceq 'en-US'){$Tray.RenderedText='new-restored';$Tray.RenderedCatalog=$englishCatalog}
+        else{throw 'PRIVATE_UNEXPECTED_RECOVERY_MODE'}
+    }.GetNewClosure()
+    [pscustomobject]@{Fixture=$fixture;World=$world;Host=$hostState;RenderAttempts=$renderAttempts}
 }
 
 function New-CcodTestTransition {
@@ -320,22 +354,73 @@ Invoke-CcodTest 'commits one valid UI language command before refreshing the exi
 }
 
 Invoke-CcodTest 'restores the existing tray with the old catalog after a new-language render failure' {
-    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
-    $oldCatalog=$hostState.UiCatalog;$renderModes=[Collections.Generic.List[string]]::new();$first=[pscustomobject]@{Pending=$true}
-    $fixture.Fake.Adapters.SetTrayPresentation={
-        param($Tray,$Presentation,$Catalog,$LanguageMode,$SystemCultureName)
-        $renderModes.Add($LanguageMode)
-        if($first.Pending){$first.Pending=$false;throw 'PRIVATE_PARTIAL_RENDER_SECRET'}
-    }.GetNewClosure()
+    $recovery=New-CcodLanguageRecoveryFixture;$fixture=$recovery.Fixture;$world=$recovery.World;$hostState=$recovery.Host
+    $oldCatalog=$hostState.UiCatalog;$controllerState=$hostState.State;$queue=$hostState.CommandQueue;$session=$hostState.SessionState;$blocked=$hostState.BlockAutomaticActions
     $command=[pscustomobject][ordered]@{Kind='SetUiLanguage';Value='en-US';EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
     Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $hostState -Adapters $fixture.Fake.Adapters).Count 'render failure and rollback emit no output'
-    Assert-CcodEqual 'en-US,System' (@($renderModes)-join ',') 'failed new render is followed by one old-mode tray redraw'
+    Assert-CcodEqual 'en-US,System' (@($recovery.RenderAttempts)-join ',') 'partial new render is followed by one old-mode tray redraw'
+    Assert-CcodEqual 'old-restored' $hostState.Tray.RenderedText 'old redraw reverses the observable partial new-language text'
+    Assert-CcodEqual 'System' $hostState.Tray.RenderedLanguageMode 'visible tray returns to old language'
+    Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$hostState.Tray.RenderedCatalog)) 'visible tray returns to old catalog identity'
     Assert-CcodEqual 'en-US,System' (@($world.SetUiLanguageModes)-join ',') 'persisted preference is restored atomically after render failure'
     Assert-CcodEqual 'System' $world.StoredLanguageMode 'stored preference returns to old mode'
     Assert-CcodEqual 'System' $hostState.UiLanguageMode 'host returns to old mode'
     Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$hostState.UiCatalog)) 'host returns to old catalog identity'
-    Assert-CcodEqual 1 $world.UiFailureRecords.Count 'one stable language-change failure is logged'
+    Assert-CcodEqual 'LanguageChange|CCOD_UI_LANGUAGE_CHANGE_FAILED' (($world.UiFailureRecords|ForEach-Object{"$($_.stage)|$($_.code)"})-join ',') 'primary failure log remains exact'
     Assert-CcodEqual 1 $world.TrayErrors.Count 'old catalog reports the failed language change'
+    Assert-CcodTrue ([object]::ReferenceEquals($controllerState,$hostState.State) -and [object]::ReferenceEquals($queue,$hostState.CommandQueue) -and $hostState.SessionState -ceq $session -and $hostState.BlockAutomaticActions -eq $blocked) 'partial render recovery leaves controller and Codex state unchanged'
+}
+
+Invoke-CcodTest 'confirms disk mode after preference rollback failure and aligns host and tray to that known mode' {
+    $recovery=New-CcodLanguageRecoveryFixture -PreferenceRollbackFailure BeforeWrite;$fixture=$recovery.Fixture;$world=$recovery.World;$hostState=$recovery.Host
+    $controllerState=$hostState.State;$queue=$hostState.CommandQueue;$session=$hostState.SessionState;$blocked=$hostState.BlockAutomaticActions
+    $command=[pscustomobject][ordered]@{Kind='SetUiLanguage';Value='en-US';EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
+    Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $hostState -Adapters $fixture.Fake.Adapters).Count 'preference recovery failure is contained with no output'
+    Assert-CcodEqual 'en-US,en-US' (@($recovery.RenderAttempts)-join ',') 'known disk mode is used for the recovery redraw'
+    Assert-CcodEqual 'en-US' $world.StoredLanguageMode 'failed old write leaves new mode on disk'
+    Assert-CcodEqual 'en-US' $hostState.UiLanguageMode 'host follows confirmed new disk mode'
+    Assert-CcodTrue ([object]::ReferenceEquals($script:TestEnglishCatalog,$hostState.UiCatalog)) 'host uses the validated catalog matching confirmed disk mode'
+    Assert-CcodEqual 'new-restored' $hostState.Tray.RenderedText 'recovery redraw replaces partial text with a complete known-mode presentation'
+    Assert-CcodEqual 'en-US' $hostState.Tray.RenderedLanguageMode 'visible tray follows confirmed disk mode'
+    Assert-CcodTrue ([object]::ReferenceEquals($script:TestEnglishCatalog,$hostState.Tray.RenderedCatalog)) 'visible tray uses the catalog matching confirmed disk mode'
+    Assert-CcodTrue ($world.Calls.Contains('Read:UiPreference:Recovery')) 'disk preference is read after rollback write failure'
+    Assert-CcodEqual 'LanguageChange|CCOD_UI_LANGUAGE_CHANGE_FAILED,LanguagePreferenceRollback|CCOD_UI_LANGUAGE_PREFERENCE_ROLLBACK_FAILED' (($world.UiFailureRecords|ForEach-Object{"$($_.stage)|$($_.code)"})-join ',') 'primary and preference recovery logs are exact and ordered'
+    Assert-CcodTrue (($world.UiFailureRecords|ConvertTo-Json -Compress) -cnotmatch 'PRIVATE|Fake|CodexControlOtherDevices|new-partial|en-US') 'recovery logs contain no exception path catalog text or user input'
+    Assert-CcodEqual 'Error.LanguageChange' $world.TrayErrors[0].Key 'language error remains best-effort after confirmed-disk recovery'
+    Assert-CcodTrue ([object]::ReferenceEquals($script:TestSystemCatalog,$world.TrayErrors[0].Catalog)) 'language error still resolves through the old validated catalog'
+    Assert-CcodTrue ([object]::ReferenceEquals($controllerState,$hostState.State) -and [object]::ReferenceEquals($queue,$hostState.CommandQueue) -and $hostState.SessionState -ceq $session -and $hostState.BlockAutomaticActions -eq $blocked) 'preference recovery leaves controller and Codex state unchanged'
+}
+
+Invoke-CcodTest 'logs old-tray redraw failure independently and still shows the old-catalog error' {
+    $recovery=New-CcodLanguageRecoveryFixture -TrayRecoveryFailure $true;$fixture=$recovery.Fixture;$world=$recovery.World;$hostState=$recovery.Host
+    $oldCatalog=$hostState.UiCatalog;$controllerState=$hostState.State;$queue=$hostState.CommandQueue;$session=$hostState.SessionState;$blocked=$hostState.BlockAutomaticActions
+    $command=[pscustomobject][ordered]@{Kind='SetUiLanguage';Value='en-US';EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
+    Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $hostState -Adapters $fixture.Fake.Adapters).Count 'old tray redraw failure is contained with no output'
+    Assert-CcodEqual 'System' $world.StoredLanguageMode 'preference rollback still succeeds'
+    Assert-CcodEqual 'System' $hostState.UiLanguageMode 'host remains aligned with old disk mode'
+    Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$hostState.UiCatalog)) 'host retains old catalog'
+    Assert-CcodEqual 'recovery-partial' $hostState.Tray.RenderedText 'failed redraw remains explicitly observable as incomplete in the fake boundary'
+    Assert-CcodEqual 'LanguageChange|CCOD_UI_LANGUAGE_CHANGE_FAILED,LanguageTrayRollback|CCOD_UI_LANGUAGE_TRAY_ROLLBACK_FAILED' (($world.UiFailureRecords|ForEach-Object{"$($_.stage)|$($_.code)"})-join ',') 'primary and tray recovery logs are exact and ordered'
+    Assert-CcodTrue (($world.UiFailureRecords|ConvertTo-Json -Compress) -cnotmatch 'PRIVATE|Fake|CodexControlOtherDevices|recovery-partial|en-US') 'tray recovery log contains no exception path catalog text or user input'
+    Assert-CcodEqual 'Error.LanguageChange' $world.TrayErrors[0].Key 'tray recovery failure still shows the language error'
+    Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$world.TrayErrors[0].Catalog)) 'tray recovery failure still uses old validated catalog for the error'
+    Assert-CcodTrue ([object]::ReferenceEquals($controllerState,$hostState.State) -and [object]::ReferenceEquals($queue,$hostState.CommandQueue) -and $hostState.SessionState -ceq $session -and $hostState.BlockAutomaticActions -eq $blocked) 'tray recovery failure leaves controller and Codex state unchanged'
+}
+
+Invoke-CcodTest 'contains combined preference and old-tray rollback failures with both stable recovery records' {
+    $recovery=New-CcodLanguageRecoveryFixture -PreferenceRollbackFailure AfterWrite -TrayRecoveryFailure $true;$fixture=$recovery.Fixture;$world=$recovery.World;$hostState=$recovery.Host
+    $oldCatalog=$hostState.UiCatalog;$controllerState=$hostState.State;$queue=$hostState.CommandQueue;$session=$hostState.SessionState;$blocked=$hostState.BlockAutomaticActions
+    $command=[pscustomobject][ordered]@{Kind='SetUiLanguage';Value='en-US';EnqueuedAtUtc='2026-08-05T00:00:00.0000000Z'}
+    Assert-CcodEqual 0 @(Invoke-CcodSupervisorCommand -Command $command -HostState $hostState -Adapters $fixture.Fake.Adapters).Count 'combined recovery failures are contained with no output'
+    Assert-CcodTrue ($world.Calls.Contains('Read:UiPreference:Recovery')) 'combined case confirms disk state after the throwing preference adapter'
+    Assert-CcodEqual 'System' $world.StoredLanguageMode 'after-write failure is confirmed as old mode on disk'
+    Assert-CcodEqual 'System' $hostState.UiLanguageMode 'host follows confirmed old disk mode'
+    Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$hostState.UiCatalog)) 'host catalog matches confirmed old disk mode'
+    Assert-CcodEqual 'LanguageChange|CCOD_UI_LANGUAGE_CHANGE_FAILED,LanguagePreferenceRollback|CCOD_UI_LANGUAGE_PREFERENCE_ROLLBACK_FAILED,LanguageTrayRollback|CCOD_UI_LANGUAGE_TRAY_ROLLBACK_FAILED' (($world.UiFailureRecords|ForEach-Object{"$($_.stage)|$($_.code)"})-join ',') 'combined recovery stages are independently and exactly logged'
+    Assert-CcodTrue (($world.UiFailureRecords|ConvertTo-Json -Compress) -cnotmatch 'PRIVATE|Fake|CodexControlOtherDevices|recovery-partial|en-US') 'combined recovery logs remain bounded and non-sensitive'
+    Assert-CcodEqual 1 $world.TrayErrors.Count 'combined recovery failure still attempts one old-catalog error dialog'
+    Assert-CcodTrue ([object]::ReferenceEquals($oldCatalog,$world.TrayErrors[0].Catalog)) 'combined recovery error uses old validated catalog'
+    Assert-CcodTrue ([object]::ReferenceEquals($controllerState,$hostState.State) -and [object]::ReferenceEquals($queue,$hostState.CommandQueue) -and $hostState.SessionState -ceq $session -and $hostState.BlockAutomaticActions -eq $blocked) 'combined recovery failures leave controller and Codex state unchanged'
 }
 
 Invoke-CcodTest 'rejects malformed language commands before catalog resolution or persistence' {

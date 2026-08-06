@@ -515,7 +515,7 @@ function Get-CcodSupervisorResourcesRoot {
 }
 
 function Write-CcodSupervisorUiFailure {
-    param($HostState,[hashtable]$Adapters,[ValidateSet('LanguageChange','ErrorDialog')][string]$Stage,[string]$Code)
+    param($HostState,[hashtable]$Adapters,[ValidateSet('LanguageChange','LanguagePreferenceRollback','LanguageTrayRollback','ErrorDialog')][string]$Stage,[string]$Code)
     try{
         $now=Invoke-CcodSupervisorAdapter $Adapters.GetUtcNow @() 1
         if($now -is [DateTimeOffset]){$timestamp=$now.UtcDateTime.ToString('o',[Globalization.CultureInfo]::InvariantCulture)}
@@ -565,10 +565,28 @@ function Invoke-CcodSupervisorCommand {
             $trayUpdateAttempted=$true
             Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters $culture
         }catch{
-            $HostState.UiLanguageMode=$oldMode;$HostState.UiCatalog=$oldCatalog
-            if($persisted){try{Invoke-CcodSupervisorAdapter $Adapters.SetUiLanguageMode @($HostState.Layout.StateRoot,$oldMode) 0}catch{}}
-            if($trayUpdateAttempted){try{Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters $culture}catch{}}
+            $recoveryMode=$oldMode;$recoveryCatalog=$oldCatalog;$preferenceRollbackFailed=$false;$preferenceConfirmationFailed=$false;$trayRollbackFailed=$false
+            if($persisted){
+                try{Invoke-CcodSupervisorAdapter $Adapters.SetUiLanguageMode @($HostState.Layout.StateRoot,$oldMode) 0}
+                catch{
+                    $preferenceRollbackFailed=$true
+                    try{
+                        $confirmedPreference=Invoke-CcodSupervisorAdapter $Adapters.ReadUiPreference @($HostState.Layout.StateRoot) 1
+                        if(-not (Test-CcodSupervisorUiPreference $confirmedPreference) -or $confirmedPreference.FallbackUsed -or
+                           -not [string]::IsNullOrEmpty([string]$confirmedPreference.ErrorCode) -or
+                           @($oldMode,$Command.Value) -cnotcontains $confirmedPreference.LanguageMode){throw 'UI preference confirmation is invalid'}
+                        if($confirmedPreference.LanguageMode -ceq $Command.Value){$recoveryMode=$Command.Value;$recoveryCatalog=$newCatalog}
+                    }catch{$preferenceConfirmationFailed=$true}
+                }
+            }
+            $HostState.UiLanguageMode=$recoveryMode;$HostState.UiCatalog=$recoveryCatalog
+            if($trayUpdateAttempted){
+                try{Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters $culture}
+                catch{$trayRollbackFailed=$true}
+            }
             Write-CcodSupervisorUiFailure $HostState $Adapters 'LanguageChange' 'CCOD_UI_LANGUAGE_CHANGE_FAILED'
+            if($preferenceRollbackFailed -or $preferenceConfirmationFailed){Write-CcodSupervisorUiFailure $HostState $Adapters 'LanguagePreferenceRollback' 'CCOD_UI_LANGUAGE_PREFERENCE_ROLLBACK_FAILED'}
+            if($trayRollbackFailed){Write-CcodSupervisorUiFailure $HostState $Adapters 'LanguageTrayRollback' 'CCOD_UI_LANGUAGE_TRAY_ROLLBACK_FAILED'}
             try{Invoke-CcodSupervisorAdapter $Adapters.ShowTrayError @($HostState.Tray,$oldCatalog,'Error.LanguageChange') 0}catch{Write-CcodSupervisorUiFailure $HostState $Adapters 'ErrorDialog' 'CCOD_UI_ERROR_DIALOG_FAILED'}
         }
         return
