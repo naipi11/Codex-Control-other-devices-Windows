@@ -750,41 +750,44 @@ function Get-CcodTrayPresentation {
     if ($null -ne $Reason -and ($Reason -isnot [string] -or $Reason -cnotmatch '^[A-Za-z][A-Za-z0-9_.-]{0,62}$')) {
         Throw-CcodSupervisorError $code 'Tray reason is invalid' $Reason
     }
-    $color = 'Gray'
-    $tooltip = 'Waiting for Codex'
-    $statusText = 'Waiting for Codex'
-    switch ($SessionState) {
-        'Inspecting' { $tooltip='Inspecting current Codex'; $statusText=$tooltip }
-        'Transitioning' { $tooltip='Applying compatibility bridge'; $statusText=$tooltip }
-        'Active' {
-            $color='Green'
-            if ($AutomationEnabled) {
-                $tooltip='Current Codex session is fixed'
-                $statusText=$tooltip
-            } else {
-                $tooltip='Current session remains fixed; future automation is paused'
-                $statusText=$tooltip
-            }
-        }
-        'Suppressed' { $color='Yellow'; $tooltip='Compatibility action is suppressed'; $statusText=$tooltip }
-        'Recovered' { $color='Red'; $tooltip='Ordinary Codex restored after safe recovery'; $statusText=$tooltip }
-        'Error' { $color='Red'; $tooltip='Automatic actions blocked; review logs'; $statusText=$tooltip }
+    $stateTable = [ordered]@{
+        Waiting = @{ Color='Gray'; StateKey='Waiting' }
+        Inspecting = @{ Color='Gray'; StateKey='Inspecting' }
+        Transitioning = @{ Color='Gray'; StateKey='Transitioning' }
+        Active = @{ Color='Green'; StateKey='Active' }
+        Suppressed = @{ Color='Yellow'; StateKey='Suppressed' }
+        Recovered = @{ Color='Red'; StateKey='Recovered' }
+        Error = @{ Color='Red'; StateKey='Error' }
     }
-    $applyNowEnabled = $HasOrdinary -and -not $ControllerRunning -and -not $StateDamageBlocksActions -and -not $HasActiveTransaction
-    $manualRetryEnabled = @('Suppressed','Recovered','Error') -ccontains $SessionState -and -not $ControllerRunning
+    $stateProjection = $stateTable[$SessionState]
+    if ($null -eq $stateProjection) {
+        Throw-CcodSupervisorError 'CCOD_TRAY_PRESENTATION_INVALID' 'Tray presentation state is invalid' $SessionState
+    }
+    $stateKey = $stateProjection.StateKey
+    if ($SessionState -ceq 'Active' -and -not $AutomationEnabled) { $stateKey = 'ActivePaused' }
+    $transitioning = @('Inspecting','Transitioning') -ccontains $SessionState
+    $busy = $ControllerRunning -or $HasActiveTransaction -or $transitioning
+    $actionsBlocked = $busy -or $StateDamageBlocksActions
+    $sessionReadyVisible = $SessionState -ceq 'Active'
+    $applyNowVisible = $HasOrdinary
+    $applyNowEnabled = $applyNowVisible -and -not $actionsBlocked
+    $manualRetryVisible = @('Suppressed','Recovered','Error') -ccontains $SessionState
+    $manualRetryEnabled = $manualRetryVisible -and -not $actionsBlocked
     return [pscustomobject][ordered]@{
-        Color=$color
-        Tooltip=$tooltip
-        StatusText=$statusText
+        Color=$stateProjection.Color
+        StateKey=$stateKey
+        SessionReadyVisible=[bool]$sessionReadyVisible
+        ApplyNowVisible=[bool]$applyNowVisible
         ApplyNowEnabled=[bool]$applyNowEnabled
+        ManualRetryVisible=[bool]$manualRetryVisible
         ManualRetryEnabled=[bool]$manualRetryEnabled
-        AutomationToggleEnabled=$true
+        AutomationToggleEnabled=[bool]$true
         AutomationChecked=[bool]$AutomationEnabled
-        CandidateOptInToggleEnabled=$true
+        CandidateOptInToggleEnabled=[bool]$true
         CandidateOptInChecked=[bool]$CandidateCompatibleOptIn
-        OpenLogsEnabled=$true
-        UninstallEnabled=[bool](-not $ControllerRunning)
-        Busy=[bool]$ControllerRunning
+        OpenLogsEnabled=[bool]$true
+        UninstallEnabled=[bool](-not $busy)
+        Busy=[bool]$busy
     }
 }
 

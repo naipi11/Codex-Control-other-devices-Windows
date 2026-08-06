@@ -547,40 +547,66 @@ $results += Invoke-CcodTest 'reduces explicit null and empty completion inputs w
     }
 }
 
-$results += Invoke-CcodTest 'renders stable colors tooltips and independent tray controls' {
-    $expectedColors=@{Waiting='Gray';Inspecting='Gray';Transitioning='Gray';Active='Green';Suppressed='Yellow';Recovered='Red';Error='Red'}
-    foreach($state in @('Waiting','Inspecting','Transitioning','Active','Suppressed','Recovered','Error')){
-        $view=Get-CcodTrayPresentation -SessionState $state -AutomationEnabled $true -CandidateCompatibleOptIn $false -HasOrdinary $true -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $false
-        Assert-CcodPropertyOrder $view @('Color','Tooltip','StatusText','ApplyNowEnabled','ManualRetryEnabled','AutomationToggleEnabled','AutomationChecked','CandidateOptInToggleEnabled','CandidateOptInChecked','OpenLogsEnabled','UninstallEnabled','Busy') 'tray schema order'
-        Assert-CcodExactEqual $expectedColors[$state] $view.Color "$state color is stable"
-        Assert-CcodTrue ($view.Tooltip.Length -le 63 -and $view.Tooltip -notmatch '[\r\n]') "$state tooltip is Windows-safe"
-        Assert-CcodExactEqual $true $view.AutomationChecked 'automation checked mirrors input'
-        Assert-CcodExactEqual $false $view.CandidateOptInChecked 'candidate opt-in remains independent'
+$results += Invoke-CcodTest 'projects the complete semantic tray state matrix with a closed typed schema' {
+    $fields=@('Color','StateKey','SessionReadyVisible','ApplyNowVisible','ApplyNowEnabled','ManualRetryVisible','ManualRetryEnabled','AutomationToggleEnabled','AutomationChecked','CandidateOptInToggleEnabled','CandidateOptInChecked','OpenLogsEnabled','UninstallEnabled','Busy')
+    $matrix=@(
+        @{State='Waiting';Color='Gray';StateKey='Waiting';Ready=$false;Apply=$true;Retry=$false;Busy=$false},
+        @{State='Inspecting';Color='Gray';StateKey='Inspecting';Ready=$false;Apply=$true;Retry=$false;Busy=$true},
+        @{State='Transitioning';Color='Gray';StateKey='Transitioning';Ready=$false;Apply=$true;Retry=$false;Busy=$true},
+        @{State='Active';Color='Green';StateKey='Active';Ready=$true;Apply=$false;Retry=$false;Busy=$false},
+        @{State='Suppressed';Color='Yellow';StateKey='Suppressed';Ready=$false;Apply=$true;Retry=$true;Busy=$false},
+        @{State='Recovered';Color='Red';StateKey='Recovered';Ready=$false;Apply=$true;Retry=$true;Busy=$false},
+        @{State='Error';Color='Red';StateKey='Error';Ready=$false;Apply=$true;Retry=$true;Busy=$false}
+    )
+    foreach($case in $matrix){
+        $view=Get-CcodTrayPresentation -SessionState $case.State -AutomationEnabled $true -CandidateCompatibleOptIn $false -HasOrdinary $case.Apply -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $false
+        Assert-CcodPropertyOrder $view $fields "$($case.State) semantic tray schema order"
+        Assert-CcodExactEqual $case.Color $view.Color "$($case.State) color"
+        Assert-CcodExactEqual $case.StateKey $view.StateKey "$($case.State) localization key suffix"
+        Assert-CcodExactEqual $case.Ready $view.SessionReadyVisible "$($case.State) ready row visibility"
+        Assert-CcodExactEqual $case.Apply $view.ApplyNowVisible "$($case.State) apply visibility"
+        Assert-CcodExactEqual $case.Retry $view.ManualRetryVisible "$($case.State) retry visibility"
+        Assert-CcodExactEqual $case.Busy $view.Busy "$($case.State) busy state"
+        Assert-CcodTrue (@('Waiting','Inspecting','Transitioning','Active','ActivePaused','Suppressed','Recovered','Error') -ccontains $view.StateKey) "$($case.State) StateKey is closed"
+        Assert-CcodTrue (@('Gray','Green','Yellow','Red') -ccontains $view.Color) "$($case.State) Color is closed"
+        foreach($field in $fields | Where-Object { $_ -notin @('Color','StateKey') }) { Assert-CcodTrue ($view.$field -is [bool]) "$($case.State) $field is Boolean" }
     }
 
     $paused=Get-CcodTrayPresentation -SessionState Active -AutomationEnabled $false -CandidateCompatibleOptIn $true -HasOrdinary $false -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $false
-    Assert-CcodExactEqual 'Green' $paused.Color 'active remains green while future automation paused'
-    Assert-CcodTrue ($paused.Tooltip -cmatch 'session remains fixed' -and $paused.Tooltip -cmatch 'automation is paused') 'paused active tooltip states both conditions'
-    Assert-CcodTrue ($paused.StatusText -cmatch 'session remains fixed' -and $paused.StatusText -cmatch 'automation is paused') 'paused active status states both conditions'
+    Assert-CcodExactEqual 'Green' $paused.Color 'paused active color'
+    Assert-CcodExactEqual 'ActivePaused' $paused.StateKey 'paused active localization key suffix'
+    Assert-CcodExactEqual $true $paused.SessionReadyVisible 'paused active keeps ready row shown'
+    Assert-CcodExactEqual $false $paused.ApplyNowVisible 'paused active hides irrelevant apply action'
+    Assert-CcodExactEqual $false $paused.AutomationChecked 'paused active mirrors automation input'
+    Assert-CcodExactEqual $true $paused.CandidateOptInChecked 'paused active keeps candidate opt-in independent'
 }
 
-$results += Invoke-CcodTest 'gates apply retry uninstall and busy tray actions from exact safety facts' {
+$results += Invoke-CcodTest 'keeps tray action presentation safe through busy transitions and suppression' {
     $busy=Get-CcodTrayPresentation -SessionState Recovered -AutomationEnabled $true -CandidateCompatibleOptIn $true -HasOrdinary $true -ControllerRunning $true -StateDamageBlocksActions $false -HasActiveTransaction $false
     Assert-CcodExactEqual $false $busy.ApplyNowEnabled 'busy worker disables apply now'
+    Assert-CcodExactEqual $true $busy.ManualRetryVisible 'failed repair remains represented while busy'
     Assert-CcodExactEqual $false $busy.ManualRetryEnabled 'busy worker disables manual retry'
     Assert-CcodExactEqual $false $busy.UninstallEnabled 'busy worker disables uninstall'
-    Assert-CcodExactEqual $true $busy.Busy 'busy mirrors exact flag'
+    Assert-CcodExactEqual $true $busy.Busy 'busy mirrors worker activity'
     Assert-CcodExactEqual $true $busy.AutomationToggleEnabled 'automation toggle remains independently enabled'
     Assert-CcodExactEqual $true $busy.CandidateOptInToggleEnabled 'candidate toggle remains independently enabled'
     Assert-CcodExactEqual $true $busy.OpenLogsEnabled 'logs remain available'
 
+    $transition=Get-CcodTrayPresentation -SessionState Transitioning -AutomationEnabled $true -CandidateCompatibleOptIn $true -HasOrdinary $true -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $false
+    Assert-CcodExactEqual $true $transition.Busy 'transition state is busy without a worker race'
+    Assert-CcodExactEqual $false $transition.ApplyNowEnabled 'transition state disables apply now'
+    Assert-CcodExactEqual $false $transition.ManualRetryEnabled 'transition state disables manual retry'
+    Assert-CcodExactEqual $false $transition.UninstallEnabled 'transition state disables uninstall'
+
     $transaction=Get-CcodTrayPresentation -SessionState Suppressed -AutomationEnabled $false -CandidateCompatibleOptIn $true -HasOrdinary $true -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $true
+    Assert-CcodExactEqual $true $transaction.Busy 'active transaction is busy'
     Assert-CcodExactEqual $false $transaction.ApplyNowEnabled 'active transaction disables apply now'
-    Assert-CcodExactEqual $true $transaction.ManualRetryEnabled 'suppressed idle state permits retry'
+    Assert-CcodExactEqual $false $transaction.ManualRetryEnabled 'active transaction disables retry'
+    Assert-CcodExactEqual $false $transaction.UninstallEnabled 'active transaction disables uninstall'
 
     $damaged=Get-CcodTrayPresentation -SessionState Error -AutomationEnabled $true -CandidateCompatibleOptIn $false -HasOrdinary $true -ControllerRunning $false -StateDamageBlocksActions $true -HasActiveTransaction $false -Reason 'StateDamaged'
     Assert-CcodExactEqual $false $damaged.ApplyNowEnabled 'state damage disables apply now'
-    Assert-CcodTrue ($damaged.Tooltip -cnotmatch 'StateDamaged') 'caller reason is not embedded in tooltip'
+    Assert-CcodExactEqual $false $damaged.ManualRetryEnabled 'safety suppression does not become retryable through presentation'
 }
 
 $results += Invoke-CcodTest 'rejects case-variant tray states coercive flags and unsafe reasons' {
