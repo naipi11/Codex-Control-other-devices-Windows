@@ -867,6 +867,35 @@ Invoke-CcodTest 'replays every durable completion crash window without duplicate
     }
 }
 
+Invoke-CcodTest 'clears a terminal receipt left active after recovery supersedes its stage' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-terminal-recovery-' + [guid]::NewGuid().ToString('N'))
+    $completedUtc = [DateTime]::Parse('2030-02-03T04:06:00.0000000Z').ToUniversalTime()
+    try {
+        $path = Join-Path $root 'state\transition.json'
+        $logPath = Join-Path $root 'logs\transactions.log'
+        $validated = New-CcodTransitionForStage -Stage Validated -WithPorts -WithSpecial
+        Write-CcodJournalJson -Path $path -Value ([ordered]@{ schemaVersion=1; activeTransaction=$validated })
+        Complete-CcodTransition -Path $path -LogPath $logPath -TransactionId $validated.transactionId -Disposition Activated -Adapters @{ UtcNow={ $completedUtc }.GetNewClosure() } | Out-Null
+
+        $recovered = Copy-CcodJournalValue $validated
+        $recovered.stage = 'Recovered'
+        $recovered.recoveryPid = 301
+        $recovered.recoveryCreationTimeUtc = '2030-02-03T04:05:09.0000000Z'
+        $recovered.updatedAtUtc = '2030-02-03T04:05:09.0000000Z'
+        Write-CcodJournalJson -Path $path -Value ([ordered]@{ schemaVersion=1; activeTransaction=$recovered })
+
+        $result = Complete-CcodTransition -Path $path -LogPath $logPath -TransactionId $validated.transactionId -Disposition Recovered -Adapters @{ UtcNow={ $completedUtc }.GetNewClosure() }
+        Assert-CcodEqual 'Completed' $result.Outcome 'terminal receipt clears the stale active transaction'
+        Assert-CcodEqual 'PreviouslyWritten' $result.ArchiveState 'terminal receipt preserves its prior archive evidence'
+        Assert-CcodEqual $null (Read-CcodTransition -Path $path) 'terminal receipt leaves no replayable active transaction'
+        $records = @([IO.File]::ReadAllLines($logPath) | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert-CcodEqual 1 $records.Count 'terminal receipt does not duplicate the archive record'
+        Assert-CcodEqual 'Activated' $records[0].disposition 'terminal receipt retains its original completed disposition'
+    } finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
 Invoke-CcodTest 'durably records archive failures and still clears the active transaction' {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-log-failures-' + [guid]::NewGuid().ToString('N'))
     $completedUtc = [DateTime]::Parse('2030-02-03T04:06:00.0000000Z').ToUniversalTime()

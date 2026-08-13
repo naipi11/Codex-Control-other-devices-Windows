@@ -1049,15 +1049,20 @@ function Complete-CcodTransition {
     }
     Assert-CcodCompletionRequest -Transition $transition -TransactionId $TransactionId -Disposition $Disposition
     if ($null -ne $receipt -and $receipt.transactionId -ceq $TransactionId) {
-        if ($receipt.disposition -cne $Disposition -or $receipt.terminalStage -cne $transition.stage) {
-            Throw-CcodTransitionError 'CCOD_TRANSITION_RECEIPT_INVALID' 'Existing completion receipt conflicts with the active transition' $receipt
-        }
+        # A terminal receipt is committed evidence that must win over an active
+        # transaction left behind by a crash. Recovery may have advanced that
+        # stale transaction to a different legal terminal stage before it gets
+        # here; comparing its new disposition to the committed receipt would
+        # turn a completed operation into an endless replay loop.
         if (@('Archived', 'ArchiveFailed') -ccontains $receipt.state) {
             & $adapter.WriteJson $Path ([ordered]@{ schemaVersion=1; activeTransaction=$null })
             & $adapter.Checkpoint 'AfterClear'
             $errorId = if ($receipt.state -ceq 'ArchiveFailed') { 'CCOD_TRANSITION_ARCHIVE_FAILED' } else { $null }
             $resumedArchiveState = if ($receipt.state -ceq 'ArchiveFailed') { 'WriteFailed' } else { 'PreviouslyWritten' }
             return New-CcodCompletionResult -Outcome 'Completed' -ArchiveState $resumedArchiveState -ArchiveErrorId $errorId
+        }
+        if ($receipt.disposition -cne $Disposition -or $receipt.terminalStage -cne $transition.stage) {
+            Throw-CcodTransitionError 'CCOD_TRANSITION_RECEIPT_INVALID' 'Existing completion receipt conflicts with the active transition' $receipt
         }
         $completedAtUtc = $receipt.completedAtUtc
     } else {

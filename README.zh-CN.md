@@ -20,11 +20,10 @@
 
 1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载最新安装包并核对 SHA-256。
 2. 运行 `CodexControlOtherDevices-<version>-setup.exe`，无需管理员权限。
-3. 托盘守护程序会自动启动。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
+3. 托盘守护程序会自动启动，并创建桌面快捷方式 **Codex 设备连接 (Device Connection)**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
-最新版本：[v2.1.0](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/tag/v2.1.0) —
-[CodexControlOtherDevices-2.1.0-setup.exe](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/download/v2.1.0/CodexControlOtherDevices-2.1.0-setup.exe)
-· SHA-256：`383d595aa11513c4ae1b57ef49b1ec55b3d3d1b7703f169bbdcb8503fdb37516`
+当前安装包及其 SHA-256 校验值始终发布在
+[Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 页面。
 
 升级时直接运行新版安装包即可，现有设置与设备密钥会保留。
 
@@ -34,10 +33,12 @@
 ## 日常使用
 
 - 登录后计划任务 `Codex Control Other Devices Supervisor` 自动启动托盘守护程序，无需手动操作。
+- 若未看到托盘图标，可双击桌面上的 **Codex 设备连接 (Device Connection)** 启动托盘守护程序；它本身不会启动修复，也不会改变当前 Codex 会话。
 - 托盘图标为绿色时，当前会话已生效；打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 - 新版 Codex 正常启动自带 `--remote-debugging-port`（没有 `--inspect`），守护程序已能识别这种启动方式并自动完成接管。
 - 托盘菜单支持跟随系统、中文、English，切换即时生效，无需重启。
 - 升级本项目或 Codex 后无需重装守护程序本体，安装器只会原子切换版本化运行时。
+- 如需显式修复，Codex 可能会关闭并重新启动一次。请从托盘菜单选择 **重试上次修复**；已有设备配对和授权会被保留。
 
 ## 发布（Releases）
 
@@ -95,7 +96,7 @@ External renderer 的 `pause` 标记会跳过集成。External renderer 状态�
 
 External renderer 未附加到已经运行的会话？
 
-退出 Codex，从开始菜单启动托盘守护程序（**Open the tray supervisor**），
+退出 Codex，双击桌面 **Codex 设备连接 (Device Connection)** 启动托盘守护程序，
 然后重新启动 Codex。
 
 ## 卸载

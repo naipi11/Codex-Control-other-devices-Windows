@@ -648,8 +648,18 @@ Invoke-CcodTest 'keeps production defaults lazy and source free of forbidden dir
     foreach($forbidden in @('Get-AppxPackage','Stop-Process','Start-Process','schtasks.exe','Set-ItemProperty','New-ItemProperty','netsh.exe')){
         Assert-CcodEqual 0 @($commands|Where-Object{$_ -ceq $forbidden}).Count "$forbidden is absent from Supervisor AST"
     }
-    $loadedSystemTypes=@('System.Windows.Forms.Application'|Where-Object{$_ -as [type]})
-    Assert-CcodEqual 0 $loadedSystemTypes.Count 'fake tests do not load WinForms'
+}
+
+Invoke-CcodTest 'loading the supervisor keeps WinForms deferred until the UI context runs' {
+    $escapedPath = $supervisorPath.Replace("'", "''")
+    $probe = @"
+`$ErrorActionPreference = 'Stop'
+. '$escapedPath' -ReadyToken ('a' * 64)
+`$loaded = @([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { `$_.GetName().Name -ceq 'System.Windows.Forms' })
+if (`$loaded.Count -ne 0) { exit 17 }
+"@
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $probe
+    Assert-CcodEqual 0 $LASTEXITCODE 'supervisor loading does not initialize the tray UI assembly'
 }
 
 Invoke-CcodTest 'production worker identity adapter avoids the read-only PID variable collision' {

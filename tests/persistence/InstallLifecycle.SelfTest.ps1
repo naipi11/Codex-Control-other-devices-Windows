@@ -862,4 +862,18 @@ $results += Invoke-CcodTest 'default adapters keep module session state for priv
     $commandNames = @($adapters.GetProjectVersion.Ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
     Assert-CcodTrue ($commandNames -contains 'Get-CcodLifecycleProjectVersion') 'default GetProjectVersion still targets the private helper'
 }
+
+$results += Invoke-CcodTest 'installer exposes a desktop entry that only starts the stable tray bootstrap' {
+    $installerScript = Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss'
+    $entries = @(Get-Content -LiteralPath $installerScript | Where-Object { $_ -cmatch '^Name: "\{userdesktop\}\\' })
+    Assert-CcodEqual 1 $entries.Count 'installer defines exactly one desktop entry'
+    $entry = [string]$entries[0]
+    Assert-CcodTrue ($entry -cmatch 'Name: "\{userdesktop\}\\Codex 设备连接 \(Device Connection\)"') 'desktop entry has the bilingual product name'
+    Assert-CcodTrue ($entry -cmatch 'Filename: "\{sys\}\\WindowsPowerShell\\v1\.0\\powershell\.exe"') 'desktop entry uses the Windows PowerShell host'
+    Assert-CcodTrue ($entry -cmatch '-WindowStyle Hidden') 'desktop entry hides the bootstrap host window'
+    Assert-CcodTrue ($entry -cmatch '\{localappdata\}\\CodexControlOtherDevices\\bootstrap\.ps1') 'desktop entry targets the stable bootstrap'
+    Assert-CcodTrue ($entry -cmatch '-InstallRoot ""\{localappdata\}\\CodexControlOtherDevices""') 'desktop entry supplies the stable install root'
+    Assert-CcodTrue ($entry -cnotmatch 'Start-CodexControlOtherDevices\.ps1') 'desktop entry never invokes a direct repair session'
+}
+
 Write-Output "Install lifecycle self-tests passed: $($results.Count)"

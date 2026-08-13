@@ -54,6 +54,7 @@ Name: "{group}\Codex Control other devices for Windows"; Filename: "{app}\README
 Name: "{group}\Open the tray supervisor"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-CodexControlOtherDevices.ps1"""; WorkingDir: "{app}"
 Name: "{group}\Compatibility check"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Test-CodexControlOtherDevices.ps1"""; WorkingDir: "{app}"
 Name: "{group}\Uninstall Codex Control other devices"; Filename: "{app}\unins000.exe"
+Name: "{userdesktop}\Codex 设备连接 (Device Connection)"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{localappdata}\CodexControlOtherDevices\bootstrap.ps1"" -InstallRoot ""{localappdata}\CodexControlOtherDevices"""; WorkingDir: "{localappdata}\CodexControlOtherDevices"
 
 [Code]
 function IsAppInstalled(): Boolean;

@@ -22,11 +22,10 @@ manages everything automatically.
 
 1. Download the latest installer from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page and verify its SHA-256.
 2. Run `CodexControlOtherDevices-<version>-setup.exe`; no administrator rights are required.
-3. The tray supervisor starts automatically. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
+3. The tray supervisor starts automatically and creates the desktop shortcut **Codex 设备连接 (Device Connection)**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
-Latest release: [v2.1.0](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/tag/v2.1.0) —
-[CodexControlOtherDevices-2.1.0-setup.exe](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/download/v2.1.0/CodexControlOtherDevices-2.1.0-setup.exe)
-· SHA-256: `383d595aa11513c4ae1b57ef49b1ec55b3d3d1b7703f169bbdcb8503fdb37516`
+The current installer and its SHA-256 checksum are always published on the
+[Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page.
 
 To upgrade, run the new installer over the previous installation. Existing settings and device
 keys are preserved.
@@ -37,10 +36,12 @@ the tab, controller enrollment, device list, and remote projects are all working
 ## Everyday use
 
 - The logon task `Codex Control Other Devices Supervisor` starts the tray supervisor automatically; no manual steps are needed.
+- The desktop shortcut **Codex 设备连接 (Device Connection)** is an optional way to start the tray supervisor if its icon is not visible. It does not start a repair or change a Codex session by itself.
 - A green tray icon means the current session is active. Open **Settings → Connections → Control other devices** to enroll or use it.
 - New Codex builds start with `--remote-debugging-port` but no `--inspect`; the supervisor recognizes that launch shape and performs the takeover automatically.
 - The tray menu supports Follow system, Chinese, and English; switching applies immediately without restarting anything.
 - Updating this project or Codex does not require reinstalling the supervisor; the installer atomically switches versioned runtimes.
+- If an explicit repair is needed, Codex may close and relaunch once. Use **Retry last repair** from the tray menu; existing device pairing and authorization are preserved.
 
 ## Releases
 
@@ -100,8 +101,7 @@ Enrollment or authorization fails?
 
 External renderer did not attach to an already-running session?
 
-Exit Codex, start the tray supervisor from the Start menu (**Open the tray supervisor**),
-then relaunch Codex.
+Exit Codex, open **Codex 设备连接 (Device Connection)** from the desktop, then relaunch Codex.
 
 ## Uninstall
 
