@@ -1,6 +1,6 @@
 # Codex Control other devices for Windows
 
-Language / 语言：English · [简体中文](README.zh-CN.md)
+Language / 语言: English · [简体中文](README.zh-CN.md)
 
 Enables the UI that ships with Codex Desktop for Windows but is hidden by a runtime defect:
 
@@ -8,51 +8,35 @@ Enables the UI that ships with Codex Desktop for Windows but is hidden by a runt
 
 This project does not modify `ChatGPT.exe`, `app.asar`, or anything under
 `C:\Program Files\WindowsApps`. After installation, a persistent tray supervisor
-manages everything automatically; manual mode remains a conservative fallback.
+manages everything automatically.
 
 > [!IMPORTANT]
 > Complete the MFA, SSO, or passkey checks required by your account or workspace before enrolling a device.
->
+
 > [!WARNING]
 > This is an unofficial runtime compatibility project. It enables Chromium debugging on a random
-> `127.0.0.1` port. Run it only on a trusted Windows machine and re-run the compatibility check
+> `127.0.0.1` port. Run it only on a trusted Windows machine, and re-run the compatibility check
 > after every Codex update.
 
 ## Quick start
 
-Run the read-only preflight and continue only when all three checks pass:
+1. Download the latest installer from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page and verify its SHA-256.
+2. Run `CodexControlOtherDevices-<version>-setup.exe`; no administrator rights are required.
+3. The tray supervisor starts automatically. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CodexControlOtherDevices.ps1
-```
+Latest release: [v2.1.0](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/tag/v2.1.0) —
+[CodexControlOtherDevices-2.1.0-setup.exe](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/download/v2.1.0/CodexControlOtherDevices-2.1.0-setup.exe)
+· SHA-256: `383d595aa11513c4ae1b57ef49b1ec55b3d3d1b7703f169bbdcb8503fdb37516`
 
-```text
-Ready: True
-Node.js: 22 or newer
-Heuristic match: True
-```
-
-Prefer the release installer when you do not want a source checkout:
-
-1. Download `CodexControlOtherDevices-<version>-setup.exe` from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page and verify its SHA-256.
-2. Run the installer. It places the support files under `%LOCALAPPDATA%\CodexControlOtherDevices-installer` and installs or upgrades the persistent tray supervisor under `%LOCALAPPDATA%\CodexControlOtherDevices`.
-3. Existing settings and device keys are preserved on upgrade. The tray supervisor starts automatically at the next logon (or immediately).
-
-Install the persistent supervisor and explicitly opt in to candidate-compatible trials:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -EnableCandidateCompatibleUpdates
-```
-
-The install root is `%LOCALAPPDATA%\CodexControlOtherDevices`. During the first takeover, a
-normal Codex launch may close and reopen once, so save unfinished work first.
+To upgrade, run the new installer over the previous installation. Existing settings and device
+keys are preserved.
 
 Verified on Windows 11 · Codex Desktop `26.803.10989.0` · Node.js `22.23.1`:
 the tab, controller enrollment, device list, and remote projects are all working.
 
 ## Everyday use
 
-- The logon task `Codex Control Other Devices Supervisor` starts the tray supervisor automatically; no manual scripts are needed.
+- The logon task `Codex Control Other Devices Supervisor` starts the tray supervisor automatically; no manual steps are needed.
 - A green tray icon means the current session is active. Open **Settings → Connections → Control other devices** to enroll or use it.
 - New Codex builds start with `--remote-debugging-port` but no `--inspect`; the supervisor recognizes that launch shape and performs the takeover automatically.
 - The tray menu supports Follow system, Chinese, and English; switching applies immediately without restarting anything.
@@ -60,18 +44,12 @@ the tab, controller enrollment, device list, and remote projects are all working
 
 ## Releases
 
-Every tagged release ships a signed-package-ready Windows installer and its
-SHA-256 checksum as release assets. The `.github/workflows/release.yml` workflow
-builds the installer from the tag automatically, so future releases always
-include a ready-to-run `CodexControlOtherDevices-<version>-setup.exe`.
-
-Latest release: [v2.1.0](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/tag/v2.1.0)
-
-- Installer: [CodexControlOtherDevices-2.1.0-setup.exe](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/download/v2.1.0/CodexControlOtherDevices-2.1.0-setup.exe)
-- SHA-256: `383d595aa11513c4ae1b57ef49b1ec55b3d3d1b7703f169bbdcb8503fdb37516`
+Every tagged release ships a Windows installer and its SHA-256 checksum as release assets.
+The `.github/workflows/release.yml` workflow builds the installer from the tag automatically,
+so future releases always include a ready-to-run `CodexControlOtherDevices-<version>-setup.exe`.
 
 After a Codex Desktop update, check the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
-page for a newer installer, or run the compatibility check from this repository
+page for a newer installer, or run the **Compatibility check** shortcut from the Start menu
 to confirm the current supervisor still matches.
 
 ## External renderer shared CDP
@@ -84,7 +62,7 @@ Inspector remains separate and is closed after bridge installation.
 
 If that preferred port is paused, unavailable, excluded because it is already
 the main Inspector port, or occupied by a non-Codex listener, Codex Control
-Other Devices selects a different dynamic loopback renderer port. A External renderer
+Other Devices selects a different dynamic loopback renderer port. An External renderer
 `pause` marker skips integration. Missing or invalid External renderer state, and a
 failed handoff, are handled safely without blocking the Codex session. The
 integration does not promise Browser-ID or port reuse in these fallback cases.
@@ -104,29 +82,33 @@ Automation, Candidate-compatible trial, Logs, and Uninstall. Uninstall always re
 | Yellow | RendererHandoff | External renderer handoff did not complete; the verified Codex session remains active |
 | Red | Recovered / Error | Ordinary Codex was safely restored, or automatic actions are blocked |
 
-## Maintenance
+## Troubleshooting
 
-Repair damaged state:
+Still no **Control other devices** tab?
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOtherDevices.ps1 -RepairState
-```
+1. Confirm the tray icon is green (gray means waiting for Codex or automation is paused).
+2. Run the **Compatibility check** shortcut from the Start menu and confirm `Ready: True`.
+3. Check the logs under `%LOCALAPPDATA%\CodexControlOtherDevices\logs\`.
+4. Make sure security software is not blocking `node.exe` from loopback access.
+5. Exit all Codex processes and retry; the supervisor restarts Codex at most once.
 
-Uninstall safely (device key store is preserved by default):
+Enrollment or authorization fails?
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-CodexControlOtherDevices.ps1
-```
+- Complete MFA/SSO/passkey required by the account or workspace.
+- Use the same ChatGPT account and workspace in Codex and the browser.
+- For organization workspaces, confirm the admin allows Remote Control.
 
-Options: `-BackupDeviceKeyStore` backs up the key; `-RemoveDeviceKeyStore` explicitly deletes it (mutually exclusive);
-`-KeepCurrentSpecialSession` keeps the current special session (renderer CDP stays open).
+External renderer did not attach to an already-running session?
 
-Manual per-session enable or restore (conservative fallback):
+Exit Codex, start the tray supervisor from the Start menu (**Open the tray supervisor**),
+then relaunch Codex.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-CodexControlOtherDevices.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Reset-CodexControlOtherDevices.ps1
-```
+## Uninstall
+
+Use the tray menu → **Uninstall**, or uninstall **Codex Control other devices** from
+Windows Settings → Apps → Installed apps. The device key store is preserved or backed up
+on uninstall; removing it locally does not revoke server authorization, so revoke the
+device in Codex first.
 
 ## What it fixes
 
@@ -157,49 +139,13 @@ See [SECURITY.md](SECURITY.md) and [docs/TECHNICAL.md](docs/TECHNICAL.md).
 Logs live in `%LOCALAPPDATA%\CodexControlOtherDevices\logs\`: `install.log`, `supervisor.log`,
 `bootstrap.log`, and `transactions.log`.
 
-## Troubleshooting
-
-Still no **Control other devices** tab?
-
-1. Confirm the tray icon is green (gray means waiting for Codex or automation is paused).
-2. Re-run the preflight and confirm `Ready: True`.
-3. Check `logs\supervisor.log` and `logs\install.log`.
-4. Make sure security software is not blocking `node.exe` from loopback access.
-5. Exit all Codex processes and retry; the supervisor restarts Codex at most once.
-
-Enrollment or authorization fails?
-
-- Complete MFA/SSO/passkey required by the account or workspace.
-- Use the same ChatGPT account and workspace in Codex and the browser.
-- For organization workspaces, confirm the admin allows Remote Control.
-
-External renderer did not attach to an already-running session?
-
-Rebind it manually with these commands, in this order:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Reset-CodexControlOtherDevices.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-CodexControlOtherDevices.ps1
-```
-
 ## Project layout
 
 ```text
-Install-CodexControlOtherDevices.ps1   Install/upgrade/repair CLI
-Uninstall-CodexControlOtherDevices.ps1 Safe uninstall CLI
-Start-CodexControlOtherDevices.ps1     Manual session start
-Reset-CodexControlOtherDevices.ps1     Manual stop / key backup
-Test-CodexControlOtherDevices.ps1      Read-only compatibility preflight
-src/persistence/                       Bootstrap, tray supervisor, session controller, static probe
-src/runtime/                           Clean-room bridge implementation
-tests/                                 Repository tests, persistence tests, visual gallery
-docs/                                  Technical docs, clean-room notes, bilingual screenshots
-```
-
-## Validation
-
-```powershell
-npm test
+src/persistence/   Tray supervisor, session controller, installer lifecycle
+src/runtime/       Clean-room bridge implementation
+tests/             Repository tests and persistence tests
+docs/              Technical docs, clean-room notes, bilingual screenshots
 ```
 
 ## License and provenance
