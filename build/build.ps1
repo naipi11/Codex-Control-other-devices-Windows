@@ -1,0 +1,51 @@
+[CmdletBinding()]
+param(
+    [string]$Version
+)
+
+$ErrorActionPreference = 'Stop'
+
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$package = Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = [string]$package.version
+}
+$Version = $Version.TrimStart('v')
+if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Invalid project version for the installer: $Version"
+}
+
+$isccCandidates = @(
+    (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+    (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
+)
+$iscc = $isccCandidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and [IO.File]::Exists($_) } | Select-Object -First 1
+if (-not $iscc) {
+    throw 'Inno Setup 6 (ISCC.exe) was not found. Install it with: winget install --id JRSoftware.InnoSetup --exact'
+}
+
+$scriptPath = Join-Path $PSScriptRoot 'CodexControlOtherDevices.iss'
+$dist = Join-Path $PSScriptRoot 'dist'
+New-Item -ItemType Directory -Path $dist -Force | Out-Null
+
+& $iscc "/DProjectVersion=$Version" "/O$dist\" $scriptPath
+if ($LASTEXITCODE -ne 0) {
+    throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
+}
+
+$exe = Join-Path $dist "CodexControlOtherDevices-$Version-setup.exe"
+if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+    throw "Inno Setup completed but the installer was not produced: $exe"
+}
+
+$hash = Get-FileHash -Algorithm SHA256 -LiteralPath $exe
+$sha256File = Join-Path $dist ("CodexControlOtherDevices-$Version-setup.exe.sha256.txt")
+Set-Content -LiteralPath $sha256File -Value ("{0} *{1}" -f $hash.Hash.ToLowerInvariant(), [IO.Path]::GetFileName($exe)) -Encoding ascii
+
+Write-Host ''
+Write-Host 'Installer build completed:' -ForegroundColor Green
+Write-Host ("  Setup:    {0}" -f $exe)
+Write-Host ("  SHA-256:  {0}" -f $sha256File)
+Write-Host ("  Hash:     {0}" -f $hash.Hash.ToLowerInvariant())
+Write-Host ''

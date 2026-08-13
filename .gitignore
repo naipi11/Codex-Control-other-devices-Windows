@@ -4,3 +4,6 @@
 Thumbs.db
 node_modules/
 .worktrees/
+build/dist/
+*.exe
+*.sha256.txt

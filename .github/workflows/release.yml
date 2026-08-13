@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Run repository validation
+        shell: pwsh
+        run: npm test
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: ./build/build.ps1
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: build/dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = $tag.TrimStart('v')
+          $exists = $null -ne (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null)
+          if (-not $exists) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "Codex Control other devices $version" --generate-notes
+          }
+          $assets = @(Get-ChildItem -LiteralPath (Join-Path $PWD 'build\dist') -File | Where-Object { $_.Extension -in @('.exe', '.txt') })
+          gh release upload $tag --repo $env:GITHUB_REPOSITORY $assets.FullName --clobber
