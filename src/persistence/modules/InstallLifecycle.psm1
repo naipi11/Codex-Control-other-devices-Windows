@@ -48,6 +48,22 @@ function Test-CcodLifecycleReparse {
     return (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
+function Get-CcodLifecycleFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 function Test-CcodLifecycleAlternateDataStreams {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -264,8 +280,8 @@ function Copy-CcodLifecycleStaging {
         }
         foreach ($file in $Files) {
             $destination = [IO.Path]::GetFullPath((Join-Path $stagingDirectory $file.Relative))
-            $expected = (Get-FileHash -LiteralPath $file.Source -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-            $actual = (Get-FileHash -LiteralPath $destination -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+            $expected = Get-CcodLifecycleFileSha256 -Path $file.Source
+            $actual = Get-CcodLifecycleFileSha256 -Path $destination
             if ($actual -cne $expected) {
                 Throw-CcodLifecycleError 'CCOD_INSTALL_FILE_HASH_MISMATCH' 'A staged runtime file failed its source hash comparison' $destination
             }

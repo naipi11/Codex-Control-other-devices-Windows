@@ -15,3 +15,18 @@ function Invoke-CcodTest([string]$Name, [scriptblock]$Action) {
     & $Action
     [pscustomobject]@{ Name = $Name; Ok = $true }
 }
+
+function Get-CcodTestFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha.Dispose()
+    }
+}

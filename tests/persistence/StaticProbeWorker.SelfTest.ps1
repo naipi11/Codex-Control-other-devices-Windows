@@ -168,7 +168,7 @@ function Get-CcodTestRuntimeRecords {
         $records.Add([pscustomobject][ordered]@{
             path = $file.FullName.Substring($RuntimeRoot.TrimEnd('\').Length + 1).Replace('\','/')
             length = [int64]$file.Length
-            sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = Get-CcodTestFileSha256 -Path $file.FullName
         })
     }
     $records.Sort([Comparison[object]]{param($left,$right)[StringComparer]::Ordinal.Compare([string]$left.path,[string]$right.path)})

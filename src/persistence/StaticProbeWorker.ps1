@@ -422,7 +422,13 @@ function Get-CcodStaticRuntimeIdFromRecords {
 
 function Get-CcodStaticFileSha256 {
     param([string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{
+        $stream=[IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
+        try{
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLowerInvariant()
+        }finally{$stream.Dispose()}
+    }finally{$sha.Dispose()}
 }
 
 function Get-CcodStaticProbeRuntimeAuthorization {

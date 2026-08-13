@@ -5,6 +5,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-CcodBuildFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $package = Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json
 if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -39,13 +55,13 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw "Inno Setup completed but the installer was not produced: $exe"
 }
 
-$hash = Get-FileHash -Algorithm SHA256 -LiteralPath $exe
+$hash = Get-CcodBuildFileSha256 -Path $exe
 $sha256File = Join-Path $dist ("CodexControlOtherDevices-$Version-setup.exe.sha256.txt")
-Set-Content -LiteralPath $sha256File -Value ("{0} *{1}" -f $hash.Hash.ToLowerInvariant(), [IO.Path]::GetFileName($exe)) -Encoding ascii
+Set-Content -LiteralPath $sha256File -Value ("{0} *{1}" -f $hash, [IO.Path]::GetFileName($exe)) -Encoding ascii
 
 Write-Host ''
 Write-Host 'Installer build completed:' -ForegroundColor Green
 Write-Host ("  Setup:    {0}" -f $exe)
 Write-Host ("  SHA-256:  {0}" -f $sha256File)
-Write-Host ("  Hash:     {0}" -f $hash.Hash.ToLowerInvariant())
+Write-Host ("  Hash:     {0}" -f $hash)
 Write-Host ''

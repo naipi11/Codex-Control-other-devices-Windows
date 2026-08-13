@@ -59,6 +59,22 @@ function Get-CcodRuntimeRoot {
     return $root
 }
 
+function Get-CcodRuntimeFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 function ConvertTo-CcodRuntimeRelativePath {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -104,7 +120,7 @@ function Get-CcodRuntimeFileRecords {
                 $records.Add([pscustomobject]@{
                     path = $relative
                     length = [int64]$item.Length
-                    sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                    sha256 = Get-CcodRuntimeFileSha256 -Path $item.FullName
                 })
             }
         }

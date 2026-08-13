@@ -105,7 +105,7 @@ function Add-CcodTestRuntime {
     $supervisorPath = Join-Path $supervisorDirectory 'Supervisor.ps1'
     [IO.File]::WriteAllText($supervisorPath, $SupervisorScript, [Text.UTF8Encoding]::new($false))
     if ([string]::IsNullOrWhiteSpace($RuntimeId)) {
-        $hash = (Get-FileHash -LiteralPath $supervisorPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-CcodTestFileSha256 -Path $supervisorPath
         $length = [int64](Get-Item -LiteralPath $supervisorPath).Length
         $files = @([pscustomobject]@{ path = 'src/persistence/Supervisor.ps1'; length = $length; sha256 = $hash })
         $RuntimeId = Get-CcodRuntimeId -ProjectVersion '0.0.0-bootstrap-test' -Files $files
@@ -124,7 +124,7 @@ function Add-CcodTestRuntime {
             [ordered]@{
                 path = 'src/persistence/Supervisor.ps1'
                 length = [int64](Get-Item -LiteralPath $supervisorPath).Length
-                sha256 = (Get-FileHash -LiteralPath $supervisorPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                sha256 = Get-CcodTestFileSha256 -Path $supervisorPath
             }
         )
     }
