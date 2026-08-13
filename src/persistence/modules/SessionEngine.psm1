@@ -6,6 +6,7 @@ Import-Module (Join-Path $moduleRoot 'CompatibilityProbe.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'PersistenceIO.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'StateStore.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'ProcessControl.psm1') -Force
+Import-Module (Join-Path $moduleRoot 'RendererIntegration.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'TransitionJournal.psm1') -Force
 
 $script:CcodSessionStableErrorCodes=@(
@@ -512,6 +513,7 @@ function Merge-CcodSessionAdapters($Adapters) {
             if($null -ne $RendererPort){$parameters.RendererPort=$RendererPort}; if($null -ne $MainPort){$parameters.MainPort=$MainPort}; Set-CcodTransitionStage @parameters }
         CompleteTransition={ param($Path,$LogPath,$TransactionId,$Disposition) Complete-CcodTransition -Path $Path -LogPath $LogPath -TransactionId $TransactionId -Disposition $Disposition }
         StopProcess={ param($Expected,$StatusEvidence,$TimeoutMilliseconds) Stop-CcodProcessIfMatch -Expected $Expected -StatusEvidence $StatusEvidence -TimeoutMilliseconds $TimeoutMilliseconds }
+        GetPreferredRendererPort={ param($Excluded) Get-CcodRendererPreferredPort -ExcludedPorts $Excluded }
         GetPort={ param($Excluded) Get-CcodAvailableLoopbackPort -ExcludedPorts $Excluded }
         StartSpecial={ param($RendererPort,$MainPort,$TimeoutMilliseconds) Start-CcodProcess -Mode Special -RendererPort $RendererPort -MainPort $MainPort -StartupTimeoutMilliseconds $TimeoutMilliseconds }
         InvokeNode={ param($NodePath,$Arguments) Invoke-CcodManagedNode -NodePath $NodePath -Arguments @($Arguments) }
@@ -893,7 +895,9 @@ function Invoke-CcodApplySession {
         }
         $currentStage='OrdinaryStopped';$special=$null;$renderer=$Request.rendererPort;$main=$Request.mainPort;$recoveryAttempted=$false
         try {
-            if($null -eq $renderer){$renderer=& $adapter.GetPort @()}
+            $rendererExcluded=if($null -eq $main){@()}else{@($main)}
+            if($null -eq $renderer){$renderer=& $adapter.GetPreferredRendererPort @rendererExcluded}
+            if($null -eq $renderer){$renderer=& $adapter.GetPort @rendererExcluded}
             if($null -eq $main){$main=& $adapter.GetPort @($renderer)}
             if($null -eq $renderer -or $null -eq $main -or $renderer -eq $main){Throw-CcodSessionError 'CCOD_PORT_UNAVAILABLE' 'Two distinct loopback ports are required' $null}
             $result.stage='SpecialLaunchRequested';$transition=& $adapter.SetTransition $Paths.TransitionPath $Request.transactionId 'OrdinaryStopped' 'SpecialLaunchRequested' $null $null $renderer $main;$currentStage='SpecialLaunchRequested'

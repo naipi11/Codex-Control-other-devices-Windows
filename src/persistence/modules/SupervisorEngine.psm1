@@ -764,7 +764,13 @@ function Get-CcodTrayPresentation {
         Throw-CcodSupervisorError 'CCOD_TRAY_PRESENTATION_INVALID' 'Tray presentation state is invalid' $SessionState
     }
     $stateKey = $stateProjection.StateKey
-    if ($SessionState -ceq 'Active' -and -not $AutomationEnabled) { $stateKey = 'ActivePaused' }
+    $color = $stateProjection.Color
+    if ($SessionState -ceq 'Active' -and $Reason -ceq 'RendererHandoff') {
+        $stateKey = 'RendererHandoff'
+        $color = 'Yellow'
+    } elseif ($SessionState -ceq 'Active' -and -not $AutomationEnabled) {
+        $stateKey = 'ActivePaused'
+    }
     $transitioning = @('Inspecting','Transitioning') -ccontains $SessionState
     $busy = $ControllerRunning -or $HasActiveTransaction -or $transitioning
     $actionsBlocked = $busy -or $StateDamageBlocksActions
@@ -774,7 +780,7 @@ function Get-CcodTrayPresentation {
     $manualRetryVisible = @('Suppressed','Recovered','Error') -ccontains $SessionState
     $manualRetryEnabled = $manualRetryVisible -and -not $actionsBlocked
     return [pscustomobject][ordered]@{
-        Color=$stateProjection.Color
+        Color=$color
         StateKey=$stateKey
         SessionReadyVisible=[bool]$sessionReadyVisible
         ApplyNowVisible=[bool]$applyNowVisible

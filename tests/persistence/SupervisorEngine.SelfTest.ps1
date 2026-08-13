@@ -580,6 +580,12 @@ $results += Invoke-CcodTest 'projects the complete semantic tray state matrix wi
     Assert-CcodExactEqual $false $paused.AutomationChecked 'paused active mirrors automation input'
     Assert-CcodExactEqual $true $paused.CandidateOptInChecked 'paused active keeps candidate opt-in independent'
 
+    $handoff=Get-CcodTrayPresentation -SessionState Active -AutomationEnabled $true -CandidateCompatibleOptIn $false -HasOrdinary $false -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $false -Reason 'RendererHandoff'
+    Assert-CcodExactEqual 'Yellow' $handoff.Color 'failed optional External renderer handoff uses a warning color'
+    Assert-CcodExactEqual 'RendererHandoff' $handoff.StateKey 'failed optional External renderer handoff exposes its localized status key'
+    Assert-CcodExactEqual $true $handoff.SessionReadyVisible 'failed optional External renderer handoff keeps the session ready'
+    Assert-CcodExactEqual $false $handoff.Busy 'failed optional External renderer handoff is not a controller busy state'
+
     $waiting=Get-CcodTrayPresentation -SessionState Waiting -AutomationEnabled $true -CandidateCompatibleOptIn $false -HasOrdinary $true -ControllerRunning $false -StateDamageBlocksActions $false -HasActiveTransaction $false
     Assert-CcodExactEqual $true $waiting.ApplyNowEnabled 'waiting enables an available explicit check'
 

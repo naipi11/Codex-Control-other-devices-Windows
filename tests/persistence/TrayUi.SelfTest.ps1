@@ -533,6 +533,20 @@ $results.Add((Invoke-CcodTest 'renders the exact presentation without policy or 
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
+$results.Add((Invoke-CcodTest 'renders the optional External renderer handoff warning while keeping the active tooltip' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        $presentation=New-CcodValidPresentation
+        $presentation.Color='Yellow'
+        $presentation.StateKey='RendererHandoff'
+        Set-CcodTrayPresentation -Context $context -Presentation $presentation -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        Assert-CcodEqual 'External renderer handoff was not completed; Codex remains active' $context.Rows.Status.Properties.Text 'External renderer warning uses the localized status string'
+        Assert-CcodEqual 'Codex device connection: working' $context.NotifyIcon.Properties.Text 'External renderer warning keeps the active tooltip'
+        Assert-CcodEqual 'Yellow' $context.NotifyIcon.Properties.Icon.Color 'External renderer warning uses the yellow icon'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
 $results.Add((Invoke-CcodTest 'rejects an invalid presentation color before NotifyIcon mutation or icon allocation' {
     $fake=New-CcodTrayFakeAdapters;$context=$null
     try{
@@ -1107,6 +1121,11 @@ $results += Invoke-CcodTest 'production AttachUiCallback handlers capture the ca
     Assert-CcodTrue ($index -ge 0) 'event handler needle is present'
     $tail = $text.Substring($index + $needle.Length, [Math]::Min(24, $text.Length - $index - $needle.Length))
     Assert-CcodTrue ($tail.StartsWith('.GetNewClosure()')) 'every event handler needle is immediately closed over'
+}
+
+$results += Invoke-CcodTest 'accepts the External renderer handoff status key from the validated UI catalog' {
+    $localized=& (Get-Module TrayUi) {param($Catalog)Resolve-CcodTrayLocalizedStrings -Catalog $Catalog -LanguageMode en-US -SystemCultureName en-US} $script:TestEnglishCatalog
+    Assert-CcodEqual 'External renderer handoff was not completed; Codex remains active' $localized['Status.RendererHandoff'] 'tray resolves the validated optional handoff status key'
 }
 
 $results|ForEach-Object{"PASS $($_.Name)"}

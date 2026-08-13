@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 
 $script:CcodUiModes=@('System','zh-CN','en-US')
 $script:CcodUiKeys=@(
-  'Tray.Title','Status.Waiting','Status.Inspecting','Status.Transitioning','Status.Active','Status.ActivePaused','Status.Suppressed','Status.Recovered','Status.Error',
+  'Tray.Title','Status.Waiting','Status.Inspecting','Status.Transitioning','Status.Active','Status.ActivePaused','Status.Suppressed','Status.Recovered','Status.Error','Status.RendererHandoff',
   'Tooltip.Waiting','Tooltip.Inspecting','Tooltip.Transitioning','Tooltip.Active','Tooltip.ActivePaused','Tooltip.Suppressed','Tooltip.Recovered','Tooltip.Error',
   'Menu.SessionReady','Menu.ApplyNow','Menu.ManualRetry','Menu.Automation','Menu.CandidateOptIn','Menu.Language','Menu.FollowSystem','Menu.Chinese','Menu.English','Menu.OpenLogs','Menu.Uninstall',
   'Dialog.UninstallTitle','Dialog.UninstallMessage','Error.UninstallStart','Error.LanguageChange'
@@ -17,6 +17,7 @@ $script:CcodUiEmergencyEnglish=[ordered]@{
   'Status.Suppressed'='Compatibility action is suppressed'
   'Status.Recovered'='Ordinary Codex restored after safe recovery'
   'Status.Error'='Automatic actions blocked; review logs'
+  'Status.RendererHandoff'='External renderer handoff was not completed; Codex remains active'
   'Tooltip.Waiting'='Codex device connection: waiting'
   'Tooltip.Inspecting'='Codex device connection: inspecting'
   'Tooltip.Transitioning'='Codex device connection: applying bridge'

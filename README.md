@@ -32,6 +32,12 @@ Node.js: 22 or newer
 Heuristic match: True
 ```
 
+Prefer the release installer when you do not want a source checkout:
+
+1. Download `CodexControlOtherDevices-<version>-setup.exe` from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page and verify its SHA-256.
+2. Run the installer. It places the support files under `%LOCALAPPDATA%\CodexControlOtherDevices-installer` and installs or upgrades the persistent tray supervisor under `%LOCALAPPDATA%\CodexControlOtherDevices`.
+3. Existing settings and device keys are preserved on upgrade. The tray supervisor starts automatically at the next logon (or immediately).
+
 Install the persistent supervisor and explicitly opt in to candidate-compatible trials:
 
 ```powershell
@@ -41,7 +47,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOt
 The install root is `%LOCALAPPDATA%\CodexControlOtherDevices`. During the first takeover, a
 normal Codex launch may close and reopen once, so save unfinished work first.
 
-Verified on Windows 11 · Codex Desktop `26.730.8199.0` · Node.js `22.23.1`:
+Verified on Windows 11 · Codex Desktop `26.803.10989.0` · Node.js `22.23.1`:
 the tab, controller enrollment, device list, and remote projects are all working.
 
 ## Everyday use
@@ -51,6 +57,34 @@ the tab, controller enrollment, device list, and remote projects are all working
 - New Codex builds start with `--remote-debugging-port` but no `--inspect`; the supervisor recognizes that launch shape and performs the takeover automatically.
 - The tray menu supports Follow system, Chinese, and English; switching applies immediately without restarting anything.
 - Updating this project or Codex does not require reinstalling the supervisor; the installer atomically switches versioned runtimes.
+
+## Releases
+
+Every tagged release ships a signed-package-ready Windows installer and its
+SHA-256 checksum as release assets. The `.github/workflows/release.yml` workflow
+builds the installer from the tag automatically, so future releases always
+include a ready-to-run `CodexControlOtherDevices-<version>-setup.exe`.
+
+After a Codex Desktop update, check the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
+page for a newer installer, or run the compatibility check from this repository
+to confirm the current supervisor still matches.
+
+## External renderer shared CDP
+
+When the External renderer Windows runtime is installed, the supervisor automatically
+uses its saved renderer port, or `9335` when no saved state exists, if that
+loopback port is available for the special Codex session. The renderer CDP port
+can therefore be shared with External renderer; the temporary Electron main-process
+Inspector remains separate and is closed after bridge installation.
+
+If that preferred port is paused, unavailable, excluded because it is already
+the main Inspector port, or occupied by a non-Codex listener, Codex Control
+Other Devices selects a different dynamic loopback renderer port. A External renderer
+`pause` marker skips integration. Missing or invalid External renderer state, and a
+failed handoff, are handled safely without blocking the Codex session. The
+integration does not promise Browser-ID or port reuse in these fallback cases.
+
+Neither Codex nor External renderer installation files are modified.
 
 ## Tray menu
 
@@ -62,6 +96,7 @@ Automation, Candidate-compatible trial, Logs, and Uninstall. Uninstall always re
 | Gray | Waiting / Inspecting / Transitioning | Waiting for Codex, inspecting the current session, or applying the bridge |
 | Green | Active / ActivePaused | Current session is verified and usable |
 | Yellow | Suppressed | Compatibility action is suppressed until a manual retry or a new runtime |
+| Yellow | RendererHandoff | External renderer handoff did not complete; the verified Codex session remains active |
 | Red | Recovered / Error | Ordinary Codex was safely restored, or automatic actions are blocked |
 
 ## Maintenance
@@ -132,6 +167,15 @@ Enrollment or authorization fails?
 - Complete MFA/SSO/passkey required by the account or workspace.
 - Use the same ChatGPT account and workspace in Codex and the browser.
 - For organization workspaces, confirm the admin allows Remote Control.
+
+External renderer did not attach to an already-running session?
+
+Rebind it manually with these commands, in this order:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Reset-CodexControlOtherDevices.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-CodexControlOtherDevices.ps1
+```
 
 ## Project layout
 

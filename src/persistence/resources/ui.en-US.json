@@ -11,6 +11,7 @@
     "Status.Suppressed": "Compatibility action is suppressed",
     "Status.Recovered": "Ordinary Codex restored after safe recovery",
     "Status.Error": "Automatic actions blocked; review logs",
+    "Status.RendererHandoff": "External renderer handoff was not completed; Codex remains active",
     "Tooltip.Waiting": "Codex device connection: waiting",
     "Tooltip.Inspecting": "Codex device connection: inspecting",
     "Tooltip.Transitioning": "Codex device connection: applying bridge",

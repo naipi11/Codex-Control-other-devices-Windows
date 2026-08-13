@@ -40,6 +40,15 @@ reuse upstream runtime text. The runtime bridge remains the isolated
 clean-room implementation described above; the supervisor and controller
 invoke it through stable JSON contracts and the documented CLI.
 
+Its implementation inventory includes `RendererIntegration.psm1`, an optional
+handoff boundary for a separately installed local External renderer runtime. It only
+reads the integration's local state and starts its documented runtime script;
+it never changes Codex or External renderer installation files. It can prefer a
+validated saved renderer port (or `9335` without saved state), but unavailable,
+paused, or invalid state falls back safely to the normal dynamically selected
+renderer-port path. The main-process Inspector remains a separate temporary
+endpoint, and a handoff failure does not invalidate the verified Codex session.
+
 The installed runtime is assembled only from the source checkout allowlist,
 hashed file-by-file against the source, and validated through
 `manifest.json` before it can become active. `active.json` switches are

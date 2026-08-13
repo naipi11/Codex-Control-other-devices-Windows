@@ -284,7 +284,8 @@ function New-CcodEngineAdapters {
             $eventsValue.Add('StopProcess')
             [pscustomobject]@{ Outcome=$stopValue; StoppedByController=($stopValue -ceq 'Stopped'); Snapshot=if($stopValue -ceq 'SourceExited'){$null}else{$Expected} }
         }.GetNewClosure()
-        GetPort={ param($Excluded) if(@($Excluded) -contains 41001){41002}else{41001} }
+        GetPreferredRendererPort={ param($Excluded) 9335 }
+        GetPort={ param($Excluded) if(@($Excluded) -contains 9335 -or @($Excluded) -contains 41001){41002}else{41001} }
         StartSpecial={
             param($RendererPort,$MainPort,$TimeoutMilliseconds)
             $eventsValue.Add('StartSpecial'); $counts.SpecialStart++
@@ -648,6 +649,58 @@ try {
         Assert-CcodEqual '782640499' $result.probes.renderer.probe.targetGate 'exact gate proof is retained'
         Assert-CcodTrue (($result.probes|ConvertTo-Json -Depth 16 -Compress) -cnotmatch 'payloadReport') 'raw main payload reports never enter the public result envelope'
         Assert-CcodEngineResultContract $result '5f496d99-c839-4458-a6a2-d37ea1afdbda' 'successful apply'
+    }
+
+    Invoke-CcodTest 'selects the External renderer preferred renderer port when no explicit renderer port is requested' {
+        $source=New-CcodEngineSnapshot
+        $result=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source -ExistingOnly $true) -Paths $paths -Adapters (New-CcodEngineAdapters -Processes @($source))
+        Assert-CcodEqual 9335 $result.special.rendererPort 'External renderer preferred renderer port is selected'
+        Assert-CcodEqual 41002 $result.special.mainPort 'main Inspector remains distinct'
+    }
+
+    Invoke-CcodTest 'falls back to a dynamic renderer port when the External renderer port is unavailable' {
+        $source=New-CcodEngineSnapshot
+        $startedRenderer=[pscustomobject]@{Value=$null}
+        $adapters=New-CcodEngineAdapters -Processes @($source)
+        $adapters.GetPreferredRendererPort={param($Excluded)$null}
+        $adapters.GetPort={param($Excluded)if(@($Excluded) -contains 41001){41002}else{41001}}
+        $adapters.StartSpecial={
+            param($RendererPort,$MainPort,$TimeoutMilliseconds)
+            $startedRenderer.Value=$RendererPort
+            [pscustomobject]@{Outcome='Started';Snapshot=(New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort $RendererPort -MainPort $MainPort);Process=[pscustomobject]@{Id=201}}
+        }.GetNewClosure()
+        $result=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source -ExistingOnly $true) -Paths $paths -Adapters $adapters
+        Assert-CcodEqual 'Activated' $result.outcome 'unavailable shared port still activates with a dynamic port'
+        Assert-CcodEqual 41001 $result.special.rendererPort 'dynamic renderer port is selected after shared-port rejection'
+        Assert-CcodTrue ($startedRenderer.Value -ne 9335) 'StartSpecial never receives the unavailable External renderer port'
+    }
+
+    Invoke-CcodTest 'excludes an explicit main port before selecting the External renderer renderer port' {
+        $source=New-CcodEngineSnapshot
+        $preferred=[pscustomobject]@{Excluded=$null;Calls=0}
+        $adapters=New-CcodEngineAdapters -Processes @($source)
+        $adapters.GetPreferredRendererPort={
+            param($Excluded)
+            $preferred.Calls++;$preferred.Excluded=@($Excluded)
+            if(@($Excluded) -contains 9335){$null}else{9335}
+        }.GetNewClosure()
+        $adapters.GetPort={param($Excluded)if(@($Excluded) -contains 9335){41001}else{throw 'dynamic renderer must exclude explicit main port'}}
+        $result=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source -ExistingOnly $true -MainPort 9335) -Paths $paths -Adapters $adapters
+        Assert-CcodEqual 'Activated' $result.outcome 'explicit main port remains usable when it matches External renderer preference'
+        Assert-CcodEqual 1 $preferred.Calls 'preferred renderer adapter is called once'
+        Assert-CcodEqual 9335 $preferred.Excluded[0] 'preferred renderer adapter excludes the explicit main port'
+        Assert-CcodEqual 41001 $result.special.rendererPort 'dynamic renderer fallback avoids the explicit main port'
+        Assert-CcodEqual 9335 $result.special.mainPort 'explicit main port remains unchanged'
+    }
+
+    Invoke-CcodTest 'does not call the preferred renderer adapter for an explicit renderer port' {
+        $source=New-CcodEngineSnapshot
+        $preferred=[pscustomobject]@{Calls=0}
+        $adapters=New-CcodEngineAdapters -Processes @($source)
+        $adapters.GetPreferredRendererPort={param($Excluded)$preferred.Calls++;9335}.GetNewClosure()
+        $result=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source -ExistingOnly $true -RendererPort 41001 -MainPort 41002) -Paths $paths -Adapters $adapters
+        Assert-CcodEqual 'Activated' $result.outcome 'explicit renderer and main ports retain existing behavior'
+        Assert-CcodEqual 0 $preferred.Calls 'explicit renderer does not call the preferred renderer adapter'
     }
 
     Invoke-CcodTest 'passes the exact request timeout through every real orchestrator parser child boundary' {

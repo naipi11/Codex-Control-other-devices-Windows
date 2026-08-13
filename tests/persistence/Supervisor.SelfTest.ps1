@@ -709,4 +709,227 @@ Invoke-CcodTest 'worker request ids are canonical D-format GUIDs for probe frami
     Assert-CcodTrue ($slot.RequestPath.EndsWith("static-probe-$($slot.RequestId).request.json")) 'request path matches StaticProbeWorker framing'
 }
 
+Invoke-CcodTest 'hands External renderer back only after a verified shared-renderer controller result' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $handoffCalls=[Collections.Generic.List[object]]::new()
+    $fixture.Fake.Adapters.HandoffRenderer={
+        param($Result,$RendererPort)
+        $world.Calls.Add('HandoffRenderer')
+        $handoffCalls.Add([pscustomobject][ordered]@{Result=$Result;RendererPort=$RendererPort})
+        [pscustomobject][ordered]@{Outcome='Started';Code='CCOD_RENDERER_HANDOFF_STARTED';ProcessId=[int]77}
+    }.GetNewClosure()
+    $runResult={
+        param($Action,$Result)
+        $world.WorkerResult=$Result
+        $stdout=$Result|ConvertTo-Json -Depth 20 -Compress
+        $world.Poll=[pscustomobject][ordered]@{Completed=$true;ExitCode=[int]0;StdoutText=$stdout;StdoutByteCount=[int]$stdout.Length;StdoutOverflow=$false;StderrByteCount=[int]0;StderrOverflow=$false}
+        Start-CcodSupervisorWorkerSlot $hostState $fixture.Fake.Adapters 'Controller' $Action $(if($Action -ceq 'Apply'){New-CcodSupervisorTestSnapshot}else{$null})|Out-Null
+        Invoke-CcodSupervisorPollSlot $hostState $fixture.Fake.Adapters
+    }
+    $result=[pscustomobject][ordered]@{ok=$true;outcome='Activated';safeState='SpecialValidated';special=[pscustomobject][ordered]@{rendererPort=[int]9335}}
+    & $runResult 'Apply' $result
+    Assert-CcodEqual 1 $handoffCalls.Count 'verified Apply hands the shared renderer to External renderer once'
+    Assert-CcodTrue ([object]::ReferenceEquals($result,$handoffCalls[0].Result)) 'handoff receives the worker result'
+    Assert-CcodEqual 9335 $handoffCalls[0].RendererPort 'handoff receives the shared renderer port'
+    $eventOrder=@($world.Calls|Where-Object{$_ -in @('Read:WorkerResult','Reduce:Apply','HandoffRenderer','Dispose:501')})
+    Assert-CcodEqual @('Read:WorkerResult','Reduce:Apply','HandoffRenderer','Dispose:501') $eventOrder 'handoff runs after reduction and before worker disposal'
+
+    $world.Calls.Clear();$handoffCalls.Clear()
+    $failed=[pscustomobject][ordered]@{ok=$false;outcome='Failed';safeState='Error';special=$null}
+    & $runResult 'RepairRenderer' $failed
+    Assert-CcodEqual 0 $handoffCalls.Count 'failed controller results do not hand off External renderer'
+
+    $world.Calls.Clear();$handoffCalls.Clear()
+    $ordinary=[pscustomobject][ordered]@{ok=$true;outcome='Recovered';safeState='Ordinary';special=[pscustomobject][ordered]@{rendererPort=[int]9335}}
+    & $runResult 'Recover' $ordinary
+    Assert-CcodEqual 0 $handoffCalls.Count 'ordinary recovery results do not hand off External renderer'
+}
+
+Invoke-CcodTest 'default External renderer handoff skips paused and invalid saved state and rebinds after a dead injector' {
+    $temporaryLocalAppData=Join-Path ([IO.Path]::GetTempPath()) ('ccod-supervisor-renderer-'+[guid]::NewGuid().ToString('N'))
+    $previousLocalAppData=$env:LOCALAPPDATA
+    try{
+        $env:LOCALAPPDATA=$temporaryLocalAppData
+        $root=Join-Path $temporaryLocalAppData 'CodexRenderer'
+        New-Item -ItemType Directory -Path (Join-Path $root 'engine\scripts') -Force|Out-Null
+        [IO.File]::WriteAllText((Join-Path $root 'engine\scripts\start-renderer.ps1'),'# test fixture',[Text.UTF8Encoding]::new($false))
+        $defaults=Get-CcodSupervisorDefaultAdapters
+        [IO.File]::WriteAllText((Join-Path $root 'paused'),'',[Text.UTF8Encoding]::new($false))
+        $paused=& $defaults.HandoffRenderer $null 9444
+        Assert-CcodEqual 'Skipped' $paused.Outcome 'pause marker skips the real default handoff adapter'
+        Assert-CcodEqual 'CCOD_RENDERER_PAUSED' $paused.Code 'pause marker skip code is stable'
+        Remove-Item -LiteralPath (Join-Path $root 'paused') -Force
+        [IO.File]::WriteAllText((Join-Path $root 'state.json'),'{not-json',[Text.UTF8Encoding]::new($false))
+        $invalid=& $defaults.HandoffRenderer $null 9444
+        Assert-CcodEqual 'Skipped' $invalid.Outcome 'invalid saved state leaves optional handoff unavailable'
+        Assert-CcodEqual 'CCOD_RENDERER_STATE_UNAVAILABLE' $invalid.Code 'invalid saved state has a stable skip code'
+        Remove-Item -LiteralPath (Join-Path $root 'state.json') -Force
+        New-Item -ItemType Directory -Path (Join-Path $root 'state.json') -Force|Out-Null
+        $directoryState=& $defaults.HandoffRenderer $null 9444
+        Assert-CcodEqual 'Skipped' $directoryState.Outcome 'a directory at state.json leaves optional handoff unavailable'
+        Assert-CcodEqual 'CCOD_RENDERER_STATE_UNAVAILABLE' $directoryState.Code 'a state-path directory has the stable skip code'
+        Remove-Item -LiteralPath (Join-Path $root 'state.json') -Recurse -Force
+        $codexExe=(Join-Path $PSHOME 'powershell.exe')
+        $validState=[ordered]@{port=[int]9335;browserId='browser-previous';injectorPid=[int]999999;codexExe=$codexExe}|ConvertTo-Json -Compress
+        [IO.File]::WriteAllText((Join-Path $root 'state.json'),$validState,[Text.UTF8Encoding]::new($false))
+        $identityUnavailable=& $defaults.HandoffRenderer $null 9444
+        Assert-CcodEqual 'Skipped' $identityUnavailable.Outcome 'valid saved state skips when the current Browser ID cannot be read'
+        Assert-CcodEqual 'CCOD_RENDERER_IDENTITY_UNAVAILABLE' $identityUnavailable.Code 'identity-unavailable skip avoids a port-only idempotency guess'
+    }finally{
+        $env:LOCALAPPDATA=$previousLocalAppData
+        if([IO.Directory]::Exists($temporaryLocalAppData)){Remove-Item -LiteralPath $temporaryLocalAppData -Recurse -Force}
+    }
+}
+
+Invoke-CcodTest 'default External renderer handoff rebinds after the saved injector died even when the renderer port changed' {
+    $temporaryLocalAppData=Join-Path ([IO.Path]::GetTempPath()) ('ccod-supervisor-renderer-rebind-'+[guid]::NewGuid().ToString('N'))
+    $previousLocalAppData=$env:LOCALAPPDATA
+    try{
+        $env:LOCALAPPDATA=$temporaryLocalAppData
+        $root=Join-Path $temporaryLocalAppData 'CodexRenderer'
+        $marker=Join-Path $temporaryLocalAppData 'received-port.txt'
+        New-Item -ItemType Directory -Path (Join-Path $root 'engine\scripts') -Force|Out-Null
+        $escapedMarker=$marker.Replace("'","''")
+        $scriptText="param([int]`$Port)`n[IO.File]::WriteAllText('$escapedMarker',[string]`$Port,[Text.UTF8Encoding]::new(`$false))"
+        [IO.File]::WriteAllText((Join-Path $root 'engine\scripts\start-renderer.ps1'),$scriptText,[Text.UTF8Encoding]::new($false))
+        $codexExe=(Join-Path $PSHOME 'powershell.exe')
+        $validState=[ordered]@{port=[int]9335;browserId='browser-previous';injectorPid=[int]999999;codexExe=$codexExe}|ConvertTo-Json -Compress
+        [IO.File]::WriteAllText((Join-Path $root 'state.json'),$validState,[Text.UTF8Encoding]::new($false))
+        $reserve=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
+        $reserve.Start()
+        try{$port=([Net.IPEndPoint]$reserve.LocalEndpoint).Port}finally{$reserve.Stop()}
+        $server=Start-Job -ScriptBlock {
+            param([int]$Port)
+            $listener=[Net.HttpListener]::new()
+            try{
+                $listener.Prefixes.Add(('http://127.0.0.1:{0}/' -f $Port))
+                $listener.Start()
+                Write-Output 'READY'
+                $context=$listener.GetContext()
+                if($context.Request.RawUrl -cne '/json/version'){throw 'unexpected request path'}
+                $body='{"Browser":"Chrome/Test","webSocketDebuggerUrl":"ws://127.0.0.1:'+$Port+'/devtools/browser/browser-current"}'
+                $bytes=[Text.UTF8Encoding]::new($false).GetBytes($body)
+                $context.Response.StatusCode=200
+                $context.Response.ContentType='application/json'
+                $context.Response.ContentLength64=$bytes.Length
+                $context.Response.OutputStream.Write($bytes,0,$bytes.Length)
+                $context.Response.OutputStream.Close()
+            }finally{
+                if($listener.IsListening){$listener.Stop()}
+                $listener.Close()
+            }
+        } -ArgumentList $port
+        try{
+            $readyDeadline=[DateTime]::UtcNow.AddSeconds(5)
+            while([DateTime]::UtcNow -lt $readyDeadline -and -not (@(Receive-Job -Job $server -Keep) -ccontains 'READY')){
+                if($server.State -in @('Failed','Stopped','Completed')){break}
+                Start-Sleep -Milliseconds 50
+            }
+            Assert-CcodTrue (@(Receive-Job -Job $server -Keep) -ccontains 'READY') 'rebind HTTP fixture starts'
+            $defaults=Get-CcodSupervisorDefaultAdapters
+            $started=& $defaults.HandoffRenderer $null $port
+            Assert-CcodEqual 'Started' $started.Outcome 'dead saved injector allows a fresh handoff to the current renderer'
+            Assert-CcodEqual 'CCOD_RENDERER_HANDOFF_STARTED' $started.Code 'dead saved injector rebind code is stable'
+            $deadline=[DateTime]::UtcNow.AddSeconds(5)
+            while(-not [IO.File]::Exists($marker) -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 50}
+            Assert-CcodTrue ([IO.File]::Exists($marker)) 'dead saved injector rebind launches the official script'
+            Assert-CcodEqual ([string]$port) ([IO.File]::ReadAllText($marker,[Text.UTF8Encoding]::new($false))) 'rebind uses the current renderer port, not the stale saved port'
+        }finally{
+            if($server.State -notin @('Completed','Failed','Stopped')){Stop-Job -Job $server -ErrorAction SilentlyContinue}
+            Remove-Job -Job $server -Force -ErrorAction SilentlyContinue
+        }
+    }finally{
+        $env:LOCALAPPDATA=$previousLocalAppData
+        if([IO.Directory]::Exists($temporaryLocalAppData)){Remove-Item -LiteralPath $temporaryLocalAppData -Recurse -Force}
+    }
+}
+
+Invoke-CcodTest 'default External renderer handoff stays attached when the saved injector is alive with the same Browser ID' {
+    $temporaryLocalAppData=Join-Path ([IO.Path]::GetTempPath()) ('ccod-supervisor-renderer-attached-'+[guid]::NewGuid().ToString('N'))
+    $previousLocalAppData=$env:LOCALAPPDATA
+    try{
+        $env:LOCALAPPDATA=$temporaryLocalAppData
+        $root=Join-Path $temporaryLocalAppData 'CodexRenderer'
+        New-Item -ItemType Directory -Path (Join-Path $root 'engine\scripts') -Force|Out-Null
+        [IO.File]::WriteAllText((Join-Path $root 'engine\scripts\start-renderer.ps1'),'# test fixture',[Text.UTF8Encoding]::new($false))
+        $current=[Diagnostics.Process]::GetCurrentProcess()
+        try{
+            $validState=[ordered]@{port=[int]9335;browserId='browser-current';injectorPid=[int]$current.Id;codexExe=(Join-Path $PSHOME 'powershell.exe')}|ConvertTo-Json -Compress
+            [IO.File]::WriteAllText((Join-Path $root 'state.json'),$validState,[Text.UTF8Encoding]::new($false))
+            $reserve=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
+            $reserve.Start()
+            try{$port=([Net.IPEndPoint]$reserve.LocalEndpoint).Port}finally{$reserve.Stop()}
+            $server=Start-Job -ScriptBlock {
+                param([int]$Port)
+                $listener=[Net.HttpListener]::new()
+                try{
+                    $listener.Prefixes.Add(('http://127.0.0.1:{0}/' -f $Port))
+                    $listener.Start()
+                    Write-Output 'READY'
+                    $context=$listener.GetContext()
+                    if($context.Request.RawUrl -cne '/json/version'){throw 'unexpected request path'}
+                    $body='{"Browser":"Chrome/Test","webSocketDebuggerUrl":"ws://127.0.0.1:'+$Port+'/devtools/browser/browser-current"}'
+                    $bytes=[Text.UTF8Encoding]::new($false).GetBytes($body)
+                    $context.Response.StatusCode=200
+                    $context.Response.ContentType='application/json'
+                    $context.Response.ContentLength64=$bytes.Length
+                    $context.Response.OutputStream.Write($bytes,0,$bytes.Length)
+                    $context.Response.OutputStream.Close()
+                }finally{
+                    if($listener.IsListening){$listener.Stop()}
+                    $listener.Close()
+                }
+            } -ArgumentList $port
+            try{
+                $readyDeadline=[DateTime]::UtcNow.AddSeconds(5)
+                while([DateTime]::UtcNow -lt $readyDeadline -and -not (@(Receive-Job -Job $server -Keep) -ccontains 'READY')){
+                    if($server.State -in @('Failed','Stopped','Completed')){break}
+                    Start-Sleep -Milliseconds 50
+                }
+                Assert-CcodTrue (@(Receive-Job -Job $server -Keep) -ccontains 'READY') 'attached HTTP fixture starts'
+                $defaults=Get-CcodSupervisorDefaultAdapters
+                $started=& $defaults.HandoffRenderer $null $port
+                Assert-CcodEqual 'Skipped' $started.Outcome 'same Browser ID with a live saved injector stays attached'
+                Assert-CcodEqual 'CCOD_RENDERER_ALREADY_ATTACHED' $started.Code 'same Browser ID with a live saved injector is idempotent'
+            }finally{
+                if($server.State -notin @('Completed','Failed','Stopped')){Stop-Job -Job $server -ErrorAction SilentlyContinue}
+                Remove-Job -Job $server -Force -ErrorAction SilentlyContinue
+            }
+        }finally{$current.Dispose()}
+    }finally{
+        $env:LOCALAPPDATA=$previousLocalAppData
+        if([IO.Directory]::Exists($temporaryLocalAppData)){Remove-Item -LiteralPath $temporaryLocalAppData -Recurse -Force}
+    }
+}
+
+Invoke-CcodTest 'records a bounded handoff failure without changing the verified session state' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $fixture.Fake.Adapters.HandoffRenderer={param($Result,$RendererPort)[pscustomobject][ordered]@{Outcome='Failed';Code='CCOD_RENDERER_HANDOFF_FAILED';ProcessId=$null}}
+    $hostState.SessionState='Active';$hostState.BlockAutomaticActions=$false;$hostState.Reason='SpecialValidated'
+    $slot=[pscustomobject][ordered]@{Action='RepairRenderer'}
+    $result=[pscustomobject][ordered]@{ok=$true;safeState='SpecialValidated';special=[pscustomobject][ordered]@{rendererPort=[int]9335}}
+    Invoke-CcodSupervisorRendererHandoff $hostState $slot $result $fixture.Fake.Adapters
+    Assert-CcodEqual 1 $world.UiFailureRecords.Count 'failed receipt records one bounded handoff diagnostic'
+    Assert-CcodEqual 'CCOD_RENDERER_HANDOFF_FAILED' $world.UiFailureRecords[0].code 'failed receipt log code is stable'
+    Assert-CcodEqual 'Active' $hostState.SessionState 'failed optional handoff preserves verified controller state'
+    Assert-CcodEqual $false $hostState.BlockAutomaticActions 'failed optional handoff does not block controller actions'
+    Assert-CcodEqual 'RendererHandoff' $hostState.Reason 'failed optional handoff exposes the tray status reason'
+}
+
+Invoke-CcodTest 'keeps the External renderer handoff warning visible across ordinary active reconciliation' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $hostState.SessionState='Active';$hostState.Reason='RendererHandoff';$hostState.ForceReconcile=$false;$hostState.NextReconcileMilliseconds=[long]3000
+    $world.Elapsed.Enqueue([long]0)
+    $world.Decision=[pscustomobject][ordered]@{Action='KeepSpecial';Reason='SpecialActive';Target=$null;AttemptKey=$null;SuppressionKey=$null;EffectiveClassification='Verified';RequiresController=$false}
+    $seen=[pscustomobject]@{Reason=$null}
+    $fixture.Fake.Adapters.GetTrayPresentation={
+        param($Arguments)
+        $seen.Reason=$Arguments.Reason
+        [pscustomobject][ordered]@{Color='Yellow';StateKey='RendererHandoff';SessionReadyVisible=$true;ApplyNowVisible=$false;ApplyNowEnabled=$false;ManualRetryVisible=$false;ManualRetryEnabled=$false;AutomationToggleEnabled=$true;AutomationChecked=$true;CandidateOptInToggleEnabled=$true;CandidateOptInChecked=$false;OpenLogsEnabled=$true;UninstallEnabled=$true;Busy=$false}
+    }.GetNewClosure()
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual 'RendererHandoff' $hostState.Reason 'ordinary active reconciliation does not erase the handoff warning'
+    Assert-CcodEqual 'RendererHandoff' $seen.Reason 'tray projection receives the persisted handoff warning'
+}
+
 Write-Output "Supervisor self-tests passed: $($results.Count)"

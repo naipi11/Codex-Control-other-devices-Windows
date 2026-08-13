@@ -397,6 +397,25 @@ event hints only reduce latency.
   family, executable path, session, user, and debug-token tuple; PID reuse is
   rejected.
 
+### External renderer shared CDP handoff
+
+`RendererIntegration.psm1` is an optional persistence-layer boundary for a
+locally installed External renderer Windows runtime. Before special launch, the
+SessionEngine may prefer the validated port from External renderer state, or its
+default port `9335` when state is absent. It uses a dynamically selected
+loopback renderer port instead when that preferred port is unavailable,
+excluded by the separate main Inspector port, paused, or associated state is
+invalid. This is port selection, not a guarantee that a Browser-ID or port can
+be reused.
+
+After a successful, validated special session, the supervisor attempts the
+handoff only when External renderer is installed and not marked with its `pause`
+file. If saved state exists, it checks the local CDP identity before invoking
+External renderer's own start script; unavailable or already-attached identity skips
+the handoff. Missing or invalid state and any handoff failure are contained to
+the optional integration and leave the Codex session usable. This boundary
+does not write Codex or External renderer installation files.
+
 ### Device-key bridge boundary
 
 The device-key bridge is unchanged by the persistence layer. Keys remain

@@ -12,7 +12,7 @@ $script:TrayAdapterNames=@(
 )
 $script:TrayUiLanguageModes=@('System','zh-CN','en-US')
 $script:TrayUiCatalogKeys=@(
-    'Tray.Title','Status.Waiting','Status.Inspecting','Status.Transitioning','Status.Active','Status.ActivePaused','Status.Suppressed','Status.Recovered','Status.Error',
+    'Tray.Title','Status.Waiting','Status.Inspecting','Status.Transitioning','Status.Active','Status.ActivePaused','Status.Suppressed','Status.Recovered','Status.Error','Status.RendererHandoff',
     'Tooltip.Waiting','Tooltip.Inspecting','Tooltip.Transitioning','Tooltip.Active','Tooltip.ActivePaused','Tooltip.Suppressed','Tooltip.Recovered','Tooltip.Error',
     'Menu.SessionReady','Menu.ApplyNow','Menu.ManualRetry','Menu.Automation','Menu.CandidateOptIn','Menu.Language','Menu.FollowSystem','Menu.Chinese','Menu.English','Menu.OpenLogs','Menu.Uninstall',
     'Dialog.UninstallTitle','Dialog.UninstallMessage','Error.UninstallStart','Error.LanguageChange'
@@ -613,7 +613,8 @@ function Set-CcodTrayLocalizedControlText {
     $adapter=$Context.Adapters
     Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Rows.Title,'Text',$Strings['Tray.Title']) 0 $FailureCode 'Tray'
     Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Rows.Status,'Text',$Strings['Status.'+$StateKey]) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.NotifyIcon,'Text',$Strings['Tooltip.'+$StateKey]) 0 $FailureCode 'Tray'
+    $tooltipStateKey=if($StateKey -ceq 'RendererHandoff'){'Active'}else{$StateKey}
+    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.NotifyIcon,'Text',$Strings['Tooltip.'+$tooltipStateKey]) 0 $FailureCode 'Tray'
     $keys=[ordered]@{
         SessionReady='Menu.SessionReady';ApplyNow='Menu.ApplyNow';ManualRetry='Menu.ManualRetry';SetAutomationEnabled='Menu.Automation'
         SetCandidateCompatibleOptIn='Menu.CandidateOptIn';Language='Menu.Language';OpenLogs='Menu.OpenLogs';Uninstall='Menu.Uninstall'
@@ -863,7 +864,7 @@ function Assert-CcodTrayPresentation {
     $names=@('Color','StateKey','SessionReadyVisible','ApplyNowVisible','ApplyNowEnabled','ManualRetryVisible','ManualRetryEnabled','AutomationToggleEnabled','AutomationChecked','CandidateOptInToggleEnabled','CandidateOptInChecked','OpenLogsEnabled','UninstallEnabled','Busy')
     if(-not (Test-CcodExactProperties $Presentation $names)){Throw-CcodTrayError 'CCOD_TRAY_INPUT_INVALID' 'Tray'}
     if($Presentation.Color -isnot [string] -or @('Gray','Green','Yellow','Red') -cnotcontains $Presentation.Color){Throw-CcodTrayError 'CCOD_TRAY_INPUT_INVALID' 'Tray'}
-    if($Presentation.StateKey -isnot [string] -or @('Waiting','Inspecting','Transitioning','Active','ActivePaused','Suppressed','Recovered','Error') -cnotcontains $Presentation.StateKey){Throw-CcodTrayError 'CCOD_TRAY_INPUT_INVALID' 'Tray'}
+    if($Presentation.StateKey -isnot [string] -or @('Waiting','Inspecting','Transitioning','Active','ActivePaused','RendererHandoff','Suppressed','Recovered','Error') -cnotcontains $Presentation.StateKey){Throw-CcodTrayError 'CCOD_TRAY_INPUT_INVALID' 'Tray'}
     foreach($name in $names[2..13]){if($Presentation.$name -isnot [bool]){Throw-CcodTrayError 'CCOD_TRAY_INPUT_INVALID' 'Tray'}}
 }
 

@@ -29,6 +29,12 @@ Node.js: 22 或更高
 Heuristic match: True
 ```
 
+不想使用源码检出时，请优先使用发布安装包：
+
+1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载 `CodexControlOtherDevices-<version>-setup.exe` 并核对 SHA-256。
+2. 运行安装包：支持文件会解包到 `%LOCALAPPDATA%\CodexControlOtherDevices-installer`，并在 `%LOCALAPPDATA%\CodexControlOtherDevices` 安装或升级常驻托盘守护程序。
+3. 升级会保留现有设置与设备密钥，守护程序在下次登录时（或立即）自动启动。
+
 安装常驻守护并允许兼容更新试运行：
 
 ```powershell
@@ -37,7 +43,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOt
 
 安装目录固定为 `%LOCALAPPDATA%\CodexControlOtherDevices`。首次接管时，Codex 可能被自动关闭并立即重开一次，请先保存未提交的输入或前台工作。
 
-已验证：Windows 11 · Codex Desktop `26.730.8199.0` · Node.js `22.23.1`；标签显示、控制器授权、设备列表、远程项目均可用。
+已验证：Windows 11 · Codex Desktop `26.803.10989.0` · Node.js `22.23.1`；标签显示、控制器授权、设备列表、远程项目均可用。
 
 ## 日常使用
 
@@ -46,6 +52,30 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOt
 - 新版 Codex 正常启动自带 `--remote-debugging-port`（没有 `--inspect`），守护程序已能识别这种启动方式并自动完成接管。
 - 托盘菜单支持跟随系统、中文、English，切换即时生效，无需重启。
 - 升级本项目或 Codex 后无需重装守护程序本体，安装器只会原子切换版本化运行时。
+
+## 发布（Releases）
+
+每个带 tag 的发布都会附带 Windows 安装包及其 SHA-256 校验文件。
+`.github/workflows/release.yml` 会在 tag 上自动构建安装包，因此后续每次更新都会
+提供可直接运行的 `CodexControlOtherDevices-<version>-setup.exe`。
+
+Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
+查看是否有更新安装包；也可以从本仓库运行兼容性检查，确认当前守护程序仍匹配。
+
+## External renderer 共享 CDP
+
+当已安装 External renderer Windows 运行时时，守护程序会自动使用其已保存的 renderer
+端口；如果没有已保存状态，则在该回环端口可用于特殊 Codex 会话时使用 `9335`。
+因此 renderer CDP 端口可以与 External renderer 共享；临时的 Electron 主进程 Inspector
+保持独立，并会在桥接安装后关闭。
+
+如果首选端口处于暂停状态、不可用、因已作为主进程 Inspector 端口而被排除，或被非
+Codex 监听器占用，Codex Control Other Devices 会选择不同的动态回环 renderer 端口。
+External renderer 的 `pause` 标记会跳过集成。External renderer 状态缺失或无效，以及 handoff
+失败，都会安全处理而不会阻止 Codex 会话；在这些回退场景中，集成不保证 Browser-ID
+或端口复用。
+
+不会修改 Codex 或 External renderer 的安装文件。
 
 ## 托盘菜单
 
@@ -56,6 +86,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOt
 | 灰色 | Waiting / Inspecting / Transitioning | 等待 Codex、检查当前会话或正在应用桥接 |
 | 绿色 | Active / ActivePaused | 当前会话已验证可用 |
 | 黄色 | Suppressed | 兼容操作被抑制，需手动重试或新运行时 |
+| 黄色 | RendererHandoff | External renderer handoff 未完成；已验证的 Codex 会话仍保持可用 |
 | 红色 | Recovered / Error | 已安全恢复普通 Codex，或自动操作被阻止 |
 
 ## 维护命令
@@ -120,6 +151,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Reset-CodexControlOthe
 - 完成账号或工作区要求的 MFA/SSO/passkey。
 - 确认 Codex 与浏览器使用同一 ChatGPT 账号和工作区。
 - 组织工作区请确认管理员允许 Remote Control。
+
+External renderer 未附加到已经运行的会话？
+
+请按以下顺序手动重新绑定：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Reset-CodexControlOtherDevices.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-CodexControlOtherDevices.ps1
+```
 
 ## 项目结构
 

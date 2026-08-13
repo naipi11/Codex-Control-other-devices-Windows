@@ -3,6 +3,8 @@ $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\PersistenceIO.psm1') -Force
+$installLifecycleModule = Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\InstallLifecycle.psm1') -PassThru
+Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\PersistenceIO.psm1') -Force
 Import-Module (Join-Path $repositoryRoot 'src\persistence\modules\RuntimeManifest.psm1') -Force
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ("ccod-runtime-manifest-" + [guid]::NewGuid().ToString('N'))
@@ -30,6 +32,14 @@ function New-CcodRuntimeFixture {
 }
 
 try {
+    Invoke-CcodTest 'includes the External renderer integration module in the staged runtime manifest input' {
+        $sourceFiles = @(& $installLifecycleModule { param($sourceRoot) Get-CcodLifecycleSourceFiles -SourceRoot $sourceRoot } $repositoryRoot)
+        $rendererModule = @($sourceFiles | Where-Object { $_.Relative -ceq 'src\persistence\modules\RendererIntegration.psm1' })
+
+        Assert-CcodEqual 1 $rendererModule.Count 'External renderer integration module must be copied into every staged runtime'
+        Assert-CcodTrue ([IO.File]::Exists($rendererModule[0].Source)) 'External renderer integration manifest input must resolve to a regular source file'
+    }
+
     Invoke-CcodTest 'creates a stable sorted manifest that excludes itself' {
         $runtime = Join-Path $root 'standalone'
         New-Item -ItemType Directory -Path $runtime | Out-Null

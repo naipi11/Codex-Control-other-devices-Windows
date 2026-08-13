@@ -11,14 +11,14 @@ $script:CcodSupervisorLogPath=$null
 $script:CcodSupervisorAdapterNames=@(
     'GetIdentity','ResolveLayout','StartClock','GetElapsedMilliseconds','GetUtcNow',
     'EnterLease','ExitLease','OpenReadyEvent','OpenShutdownEvent','IsEventSignaled','SignalEvent','CloseEvent',
-    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','StartUninstall','EnumerateProcessIds','GetProcessSnapshot','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','GetTrayPresentation',
+    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','StartUninstall','EnumerateProcessIds','GetProcessSnapshot','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','HandoffRenderer','GetTrayPresentation',
     'NewQueue','GetQueueCount','TryDequeue','NewTray','SetTrayPresentation','StopTrayTimer','RequestUiExit','CloseTray','NewWatcher','StopWatcher',
     'GetWorkerLeafState','WriteWorkerRequest','StartWorker','PollWorker','ReadWorkerResult','WaitWorker','GetWorkerIdentity','TerminateWorker','DisposeWorker','DeleteWorkerFile',
     'ClearFailedAttempt','SetAutomationEnabled','SetCandidateOptIn','OpenLogs','WriteLog','RunUiContext'
 )
 $script:CcodSupervisorUiLanguageModes=@('System','zh-CN','en-US')
 $script:CcodSupervisorUiKeys=@(
-    'Tray.Title','Status.Waiting','Status.Inspecting','Status.Transitioning','Status.Active','Status.ActivePaused','Status.Suppressed','Status.Recovered','Status.Error',
+    'Tray.Title','Status.Waiting','Status.Inspecting','Status.Transitioning','Status.Active','Status.ActivePaused','Status.Suppressed','Status.Recovered','Status.Error','Status.RendererHandoff',
     'Tooltip.Waiting','Tooltip.Inspecting','Tooltip.Transitioning','Tooltip.Active','Tooltip.ActivePaused','Tooltip.Suppressed','Tooltip.Recovered','Tooltip.Error',
     'Menu.SessionReady','Menu.ApplyNow','Menu.ManualRetry','Menu.Automation','Menu.CandidateOptIn','Menu.Language','Menu.FollowSystem','Menu.Chinese','Menu.English','Menu.OpenLogs','Menu.Uninstall',
     'Dialog.UninstallTitle','Dialog.UninstallMessage','Error.UninstallStart','Error.LanguageChange'
@@ -150,7 +150,7 @@ function Invoke-CcodSupervisorNullableAdapter {
 function Import-CcodSupervisorModules {
     if($null -eq $script:CcodSupervisorScriptPath){throw 'supervisor script path is unavailable'}
     $moduleRoot=Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'modules'
-    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','SupervisorEngine.psm1','UiLocalization.psm1','UiPreferences.psm1','TrayUi.psm1','UiActions.psm1','WorkerRuntime.psm1')){
+    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','RendererIntegration.psm1','SupervisorEngine.psm1','UiLocalization.psm1','UiPreferences.psm1','TrayUi.psm1','UiActions.psm1','WorkerRuntime.psm1')){
         Import-Module -Name (Join-Path $moduleRoot $leaf) -Force -ErrorAction Stop
     }
 }
@@ -210,6 +210,18 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.GetSupervisorDecision={param($Context)Get-CcodSupervisorDecision -Context $Context}
     $defaults.AddObservedEvent={param($Observed,$ProcessId,$Created)Add-CcodObservedEvent -ObservedKeys $Observed -ProcessId $ProcessId -CreationTimeUtc $Created}
     $defaults.CompleteControllerRun={param($Result,$TransactionId,$Action,$RuntimeId)Complete-CcodControllerRun -Result $Result -ExpectedTransactionId $TransactionId -ExpectedAction $Action -ExpectedRuntimeId $RuntimeId}
+    $defaults.HandoffRenderer={
+        param($Result,$RendererPort)
+        $layout=Get-CcodRendererLayout
+        if(-not $layout.Installed){return [pscustomobject][ordered]@{Outcome='Skipped';Code='CCOD_RENDERER_NOT_INSTALLED';ProcessId=$null}}
+        if(Test-CcodRendererPaused -Layout $layout){return [pscustomobject][ordered]@{Outcome='Skipped';Code='CCOD_RENDERER_PAUSED';ProcessId=$null}}
+        $state=Read-CcodRendererState -Layout $layout
+        if($null -eq $state -and ([IO.File]::Exists($layout.StatePath) -or [IO.Directory]::Exists($layout.StatePath))){return [pscustomobject][ordered]@{Outcome='Skipped';Code='CCOD_RENDERER_STATE_UNAVAILABLE';ProcessId=$null}}
+        $currentBrowserId=Get-CcodRendererCurrentBrowserId -RendererPort $RendererPort
+        if($null -eq $currentBrowserId){return [pscustomobject][ordered]@{Outcome='Skipped';Code='CCOD_RENDERER_IDENTITY_UNAVAILABLE';ProcessId=$null}}
+        if($null -ne $state -and $currentBrowserId -ceq $state.BrowserId -and $state.InjectorAlive){return [pscustomobject][ordered]@{Outcome='Skipped';Code='CCOD_RENDERER_ALREADY_ATTACHED';ProcessId=$null}}
+        return Start-CcodRendererHandoff -RendererPort $RendererPort -Layout $layout
+    }
     $defaults.GetTrayPresentation={param($Arguments)Get-CcodTrayPresentation @Arguments}
     $defaults.NewQueue={param($Kind)Write-Output -NoEnumerate ([Collections.Concurrent.ConcurrentQueue[object]]::new())}
     $defaults.GetQueueCount={param($Queue)[int]$Queue.Count}
@@ -471,6 +483,32 @@ function Clear-CcodSupervisorWorkerSlot {
     $HostState.WorkerSlot=$null
 }
 
+function Write-CcodSupervisorRendererHandoffFailure {
+    param($HostState,[hashtable]$Adapters)
+    try{
+        $record=[pscustomobject][ordered]@{schemaVersion=1;timestampUtc=[DateTime]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture);component='Supervisor';stage='RendererHandoff';code='CCOD_RENDERER_HANDOFF_FAILED';outcome='Failed'}
+        Invoke-CcodSupervisorAdapter $Adapters.WriteLog @($record) 0
+    }catch{}
+    if($null -ne $HostState -and $HostState.SessionState -ceq 'Active'){$HostState.Reason='RendererHandoff'}
+}
+
+function Invoke-CcodSupervisorRendererHandoff {
+    param($HostState,$Slot,$Result,[hashtable]$Adapters)
+    try{
+        if($null -eq $Result -or @('Apply','RepairRenderer','Recover') -cnotcontains $Slot.Action -or
+           $null -eq $Result.PSObject.Properties['ok'] -or $Result.ok -isnot [bool] -or -not $Result.ok -or
+           $null -eq $Result.PSObject.Properties['safeState'] -or $Result.safeState -cne 'SpecialValidated' -or
+           $null -eq $Result.PSObject.Properties['special'] -or $null -eq $Result.special -or
+           $null -eq $Result.special.PSObject.Properties['rendererPort']){return}
+        $rendererPort=$Result.special.rendererPort
+        if(($rendererPort -isnot [int] -and $rendererPort -isnot [long]) -or $rendererPort -lt 1 -or $rendererPort -gt 65535){return}
+        $receipt=Invoke-CcodSupervisorAdapter $Adapters.HandoffRenderer @($Result,[int]$rendererPort) 1
+        if(-not (Test-CcodSupervisorExactProperties $receipt @('Outcome','Code','ProcessId')) -or $receipt.Outcome -isnot [string] -or
+           $receipt.Code -isnot [string] -or @('Started','Skipped','Failed') -cnotcontains $receipt.Outcome -or
+           ($receipt.Outcome -ceq 'Failed')){Write-CcodSupervisorRendererHandoffFailure $HostState $Adapters}
+    }catch{Write-CcodSupervisorRendererHandoffFailure $HostState $Adapters}
+}
+
 function Invoke-CcodSupervisorPollSlot {
     param($HostState,[hashtable]$Adapters)
     $slot=$HostState.WorkerSlot
@@ -497,6 +535,7 @@ function Invoke-CcodSupervisorPollSlot {
                     if(-not [string]::IsNullOrWhiteSpace([string]$reduced.RecoveryIgnoreKey)){$HostState.RecoveryIgnoreKeys[[string]$reduced.RecoveryIgnoreKey]=$true}
                     if(-not [string]::IsNullOrWhiteSpace([string]$reduced.SuppressionKey)){$HostState.SuppressionKeys[[string]$reduced.SuppressionKey]=$true}
                 }
+                Invoke-CcodSupervisorRendererHandoff $HostState $slot $result $Adapters
             }elseif($slot.Kind -ceq 'StaticProbe'){
                 if($result.ok -and $null -ne $result.probe){
                     $HostState.PackageFullName=[string]$result.probe.packageFullName
@@ -719,7 +758,10 @@ function Invoke-CcodSupervisorTick {
     $context=New-CcodSupervisorEngineContext $HostState
     $decision=Invoke-CcodSupervisorAdapter $Adapters.GetSupervisorDecision @($context) 1
     if(-not (Test-CcodSupervisorExactProperties $decision @('Action','Reason','Target','AttemptKey','SuppressionKey','EffectiveClassification','RequiresController'))){throw 'supervisor decision is invalid'}
-    $HostState.LastDecision=$decision;$HostState.Reason=[string]$decision.Reason
+    $HostState.LastDecision=$decision
+    if($HostState.SessionState -cne 'Active' -or $HostState.Reason -cne 'RendererHandoff'){
+        $HostState.Reason=[string]$decision.Reason
+    }
     Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters
     switch($decision.Action){
         'RepairRenderer' {Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'RepairRenderer' $decision.Target|Out-Null;return}
