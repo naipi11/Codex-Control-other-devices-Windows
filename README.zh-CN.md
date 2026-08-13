@@ -59,6 +59,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-CodexControlOt
 `.github/workflows/release.yml` 会在 tag 上自动构建安装包，因此后续每次更新都会
 提供可直接运行的 `CodexControlOtherDevices-<version>-setup.exe`。
 
+最新版本：[v2.1.0](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/tag/v2.1.0)
+
+- 安装包：[CodexControlOtherDevices-2.1.0-setup.exe](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/download/v2.1.0/CodexControlOtherDevices-2.1.0-setup.exe)
+- SHA-256：`383d595aa11513c4ae1b57ef49b1ec55b3d3d1b7703f169bbdcb8503fdb37516`
+
 Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
 查看是否有更新安装包；也可以从本仓库运行兼容性检查，确认当前守护程序仍匹配。
 

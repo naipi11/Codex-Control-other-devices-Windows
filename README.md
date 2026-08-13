@@ -65,6 +65,11 @@ SHA-256 checksum as release assets. The `.github/workflows/release.yml` workflow
 builds the installer from the tag automatically, so future releases always
 include a ready-to-run `CodexControlOtherDevices-<version>-setup.exe`.
 
+Latest release: [v2.1.0](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/tag/v2.1.0)
+
+- Installer: [CodexControlOtherDevices-2.1.0-setup.exe](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases/download/v2.1.0/CodexControlOtherDevices-2.1.0-setup.exe)
+- SHA-256: `383d595aa11513c4ae1b57ef49b1ec55b3d3d1b7703f169bbdcb8503fdb37516`
+
 After a Codex Desktop update, check the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
 page for a newer installer, or run the compatibility check from this repository
 to confirm the current supervisor still matches.
