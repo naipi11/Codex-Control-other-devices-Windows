@@ -896,6 +896,27 @@ Invoke-CcodTest 'clears a terminal receipt left active after recovery supersedes
     }
 }
 
+Invoke-CcodTest 'refuses to clear a recovered transaction without its terminal receipt' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-recovery-receipt-required-' + [guid]::NewGuid().ToString('N'))
+    try {
+        $path = Join-Path $root 'state\transition.json'
+        $logPath = Join-Path $root 'logs\transactions.log'
+        $recovered = New-CcodTransitionForStage -Stage RecoveryLaunchRequested -WithPorts -WithSpecial
+        $recovered.stage = 'Recovered'
+        $recovered.recoveryPid = 301
+        $recovered.recoveryCreationTimeUtc = '2030-02-03T04:05:09.0000000Z'
+        $recovered.updatedAtUtc = '2030-02-03T04:05:09.0000000Z'
+        Write-CcodJournalJson -Path $path -Value ([ordered]@{ schemaVersion=1; activeTransaction=$recovered })
+
+        $result = Complete-CcodTransition -Path $path -LogPath $logPath -TransactionId $recovered.transactionId -Disposition Recovered -RequireTerminalReceipt
+        Assert-CcodEqual 'NoCommittedReceipt' $result.Outcome 'receipt-only completion refuses an uncommitted recovery'
+        Assert-CcodEqual $recovered.transactionId (Read-CcodTransition -Path $path).transactionId 'uncommitted recovery remains active'
+        Assert-CcodEqual $false (Test-Path -LiteralPath (Join-Path $root 'logs\transaction-completion.receipt.json')) 'receipt-only completion does not write a receipt'
+    } finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
 Invoke-CcodTest 'durably records archive failures and still clears the active transaction' {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-journal-log-failures-' + [guid]::NewGuid().ToString('N'))
     $completedUtc = [DateTime]::Parse('2030-02-03T04:06:00.0000000Z').ToUniversalTime()

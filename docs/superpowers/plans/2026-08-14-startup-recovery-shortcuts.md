@@ -63,6 +63,16 @@ git add src/persistence/modules/TransitionJournal.psm1 tests/persistence/Transit
 git commit -m "fix: scope completion receipts to their transaction"
 ```
 
+### Task 5: Installer upgrade completion
+
+**Root cause:** The v2.1.1 installer ran `tests\Validate.ps1` from its extracted payload, but that payload omitted `build\CodexControlOtherDevices.iss`, which the validation script requires. The installer therefore exited with code 1 after unpacking and never switched the active runtime.
+
+- [x] Add an installer-contract regression test requiring the validation input in the payload.
+- [x] Include `build\CodexControlOtherDevices.iss` in the installer payload.
+- [x] Verify a clean extracted payload runs its full self-validation.
+- [x] Add a cross-runtime recovery test: only a matching terminal receipt can clear a legacy `Recovered` transaction before replay.
+- [x] Publish this additional fix as v2.1.2.
+
 ### Task 2: Stable desktop tray shortcut
 
 **Files:**
@@ -163,3 +173,14 @@ Expected: non-empty `CodexControlOtherDevices-2.1.1-setup.exe` and its SHA-256 f
 git add package.json
 git commit -m "chore: release 2.1.1"
 ```
+
+### Task 6: Take over a legacy statusless supervisor during upgrade
+
+**Root cause:** A legacy supervisor can have a valid process but a `status.json` with `session: null`. The upgrade path previously trusted only that status identity, so it could not signal the old supervisor. The scheduled task then remained occupied by the old runtime.
+
+**Safety boundary:** The fallback accepts exactly one process only when it is a child of this install root's stable `bootstrap.ps1`, its command line points to a runtime under this install root and includes a valid 64-hex `-ReadyToken`, and both processes run in the current Windows session under the current user's SID. A missing, ambiguous, or non-matching result is ignored.
+
+- [x] Add a failing lifecycle test for a statusless legacy supervisor.
+- [x] Add the restricted fallback identity adapter and use it for upgrade and uninstall paths.
+- [x] Verify the lifecycle suite passes (37 tests).
+- [x] Build and install v2.1.4 locally; verify it replaces the live legacy supervisor, clears the stale transaction, and restarts from the scheduled task.

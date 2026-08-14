@@ -28,7 +28,9 @@ The current installer and its SHA-256 checksum are always published on the
 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page.
 
 To upgrade, run the new installer over the previous installation. Existing settings and device
-keys are preserved.
+keys are preserved. The installer also replaces a legacy supervisor that did not record its
+session state, including one left behind by an earlier interrupted upgrade, so a restart is not
+needed after upgrading.
 
 Verified on Windows 11 · Codex Desktop `26.803.10989.0` · Node.js `22.23.1`:
 the tab, controller enrollment, device list, and remote projects are all working.
@@ -41,7 +43,7 @@ the tab, controller enrollment, device list, and remote projects are all working
 - New Codex builds start with `--remote-debugging-port` but no `--inspect`; the supervisor recognizes that launch shape and performs the takeover automatically.
 - The tray menu supports Follow system, Chinese, and English; switching applies immediately without restarting anything.
 - Updating this project or Codex does not require reinstalling the supervisor; the installer atomically switches versioned runtimes.
-- If an explicit repair is needed, Codex may close and relaunch once. Use **Retry last repair** from the tray menu; existing device pairing and authorization are preserved.
+- If an explicit repair is needed, Codex may close and relaunch once. Use **Retry last repair** from the tray menu; existing device pairing and authorization are preserved. A completed recovery left behind by an interrupted upgrade is cleared safely on the next supervisor start.
 
 ## Releases
 

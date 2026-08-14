@@ -88,6 +88,8 @@ function New-CcodLifecycleFake {
         WaitSupervisorExit = $true
         TerminateSupervisorCalls = 0
         LastTerminateIdentity = $null
+        FallbackSupervisor = $null
+        FallbackSupervisorLookups = 0
         NormalizeReceipt = New-CcodLifecycleNormalizeReceipt -SpecialPresent $false -Normalized $false
         NormalizeCalls = 0
         KeyPath = $null
@@ -108,6 +110,7 @@ function New-CcodLifecycleFake {
     $adapters.RemoveSupervisorTask = { $world.Calls.Add('RemoveTask'); $world.TaskRemoved++ }.GetNewClosure()
     $adapters.StartSupervisorTask = { $world.Calls.Add('StartTask'); $world.TaskStarted++ }.GetNewClosure()
     $adapters.SignalSupervisorShutdown = { param($UserSid, $SessionId) $world.Calls.Add("SignalShutdown:${UserSid}:${SessionId}"); $world.ShutdownSignaled++ }.GetNewClosure()
+    $adapters.FindSupervisorFallback = { param($InstallRoot, $Identity) $world.Calls.Add("FindSupervisorFallback:$([IO.Path]::GetFileName($InstallRoot)):$($Identity.UserSid):$($Identity.SessionId)"); $world.FallbackSupervisorLookups++; $world.FallbackSupervisor }.GetNewClosure()
     $adapters.WaitSupervisorExit = { param($SupervisorIdentity, $TimeoutMilliseconds) $world.Calls.Add("WaitSupervisor:$($SupervisorIdentity.Pid):$TimeoutMilliseconds"); [bool]$world.WaitSupervisorExit }.GetNewClosure()
     $adapters.TerminateSupervisor = { param($SupervisorIdentity) $world.Calls.Add("TerminateSupervisor:$($SupervisorIdentity.Pid)"); $world.TerminateSupervisorCalls++; $world.LastTerminateIdentity = $SupervisorIdentity; $true }.GetNewClosure()
     $adapters.NormalizeSpecialSession = { param($InstallRoot, $RuntimeId, $Identity) $world.Calls.Add("Normalize:$RuntimeId"); $world.NormalizeCalls++; $world.NormalizeReceipt }.GetNewClosure()
@@ -863,6 +866,104 @@ $results += Invoke-CcodTest 'default adapters keep module session state for priv
     Assert-CcodTrue ($commandNames -contains 'Get-CcodLifecycleProjectVersion') 'default GetProjectVersion still targets the private helper'
 }
 
+$results += Invoke-CcodTest 'upgrade stops a verified fallback supervisor when status has no session identity' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source -Version '2.0.0-fallback' | Out-Null
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $first = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters (New-CcodLifecycleFake -NodePath $nodePath).Adapters
+        $status = Read-CcodStatus -StateRoot (Join-Path $install 'state')
+        Assert-CcodTrue ($null -eq $status.session) 'fixture reproduces the legacy status without a supervisor identity'
+        [IO.File]::WriteAllText((Join-Path $source 'src\runtime\main-payload.js'), "module.exports = 'fixture-fallback-v2';`n", [Text.UTF8Encoding]::new($false))
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        $fake.World.FallbackSupervisor = [pscustomobject][ordered]@{
+            Pid = 97
+            CreationTimeUtc = '2030-02-03T03:00:00.0000000Z'
+            SessionId = $fake.World.Identity.SessionId
+            UserSid = $fake.World.Identity.UserSid
+        }
+        $upgrade = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters
+        Assert-CcodEqual 'Upgraded' $upgrade.Outcome 'fallback upgrade outcome'
+        Assert-CcodEqual 1 $fake.World.FallbackSupervisorLookups 'legacy status triggers one verified fallback lookup'
+        Assert-CcodEqual 1 $fake.World.ShutdownSignaled 'verified fallback supervisor receives shutdown signal'
+        Assert-CcodTrue ($fake.World.Calls -contains 'WaitSupervisor:97:10000') 'upgrade waits for the verified fallback pid'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
+$results += Invoke-CcodTest 'fallback accepts a deleted legacy runtime only through the exact stable bootstrap parent' {
+    $install = New-CcodLifecycleTempRoot
+    try {
+        $identity = New-CcodLifecycleIdentity
+        New-Item -ItemType Directory -Path $install -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $install 'bootstrap.ps1'), '# fixture bootstrap', [Text.UTF8Encoding]::new($false))
+        $oldSupervisor = Join-Path $install 'runtime\2.1.1-deleted\src\persistence\Supervisor.ps1'
+        $bootstrap = Join-Path $install 'bootstrap.ps1'
+        $processes = @(
+            [pscustomobject][ordered]@{
+                ProcessId = 97
+                ParentProcessId = 96
+                SessionId = $identity.SessionId
+                CreationDate = [DateTime]::Parse('2030-02-03T03:00:00Z').ToUniversalTime()
+                CommandLine = "powershell.exe -File `"$oldSupervisor`" -ReadyToken $('a' * 64)"
+            },
+            [pscustomobject][ordered]@{
+                ProcessId = 96
+                ParentProcessId = 1
+                SessionId = $identity.SessionId
+                CreationDate = [DateTime]::Parse('2030-02-03T02:59:59Z').ToUniversalTime()
+                CommandLine = "powershell.exe -File `"$bootstrap`" -InstallRoot `"$install`""
+            }
+        )
+        $module = Get-Module InstallLifecycle
+        $fallback = & $module {
+            param($Root, $CurrentIdentity, $Snapshots)
+            Get-CcodLifecycleVerifiedSupervisorFallback -InstallRoot $Root -Identity $CurrentIdentity -ProcessEnumerator { param($Ignored) $Snapshots } -OwnerSidResolver { param($Process) [pscustomobject]@{ ReturnValue = 0; Sid = $CurrentIdentity.UserSid } }
+        } $install $identity $processes
+        Assert-CcodEqual 97 $fallback.Pid 'legacy runtime process is accepted only with the exact bootstrap parent'
+        Assert-CcodEqual $identity.UserSid $fallback.UserSid 'fallback carries the verified owner SID'
+    } finally {
+        if (Test-Path -LiteralPath $install) { Remove-Item -LiteralPath $install -Recurse -Force }
+    }
+}
+
+$results += Invoke-CcodTest 'fallback rejects a legacy runtime whose parent is not the stable bootstrap' {
+    $install = New-CcodLifecycleTempRoot
+    try {
+        $identity = New-CcodLifecycleIdentity
+        New-Item -ItemType Directory -Path $install -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $install 'bootstrap.ps1'), '# fixture bootstrap', [Text.UTF8Encoding]::new($false))
+        $oldSupervisor = Join-Path $install 'runtime\2.1.1-deleted\src\persistence\Supervisor.ps1'
+        $processes = @(
+            [pscustomobject][ordered]@{
+                ProcessId = 97
+                ParentProcessId = 96
+                SessionId = $identity.SessionId
+                CreationDate = [DateTime]::Parse('2030-02-03T03:00:00Z').ToUniversalTime()
+                CommandLine = "powershell.exe -File `"$oldSupervisor`" -ReadyToken $('a' * 64)"
+            },
+            [pscustomobject][ordered]@{
+                ProcessId = 96
+                ParentProcessId = 1
+                SessionId = $identity.SessionId
+                CreationDate = [DateTime]::Parse('2030-02-03T02:59:59Z').ToUniversalTime()
+                CommandLine = "powershell.exe -File `"C:\unrelated\bootstrap.ps1`" -InstallRoot `"$install`""
+            }
+        )
+        $module = Get-Module InstallLifecycle
+        $fallback = & $module {
+            param($Root, $CurrentIdentity, $Snapshots)
+            Get-CcodLifecycleVerifiedSupervisorFallback -InstallRoot $Root -Identity $CurrentIdentity -ProcessEnumerator { param($Ignored) $Snapshots } -OwnerSidResolver { param($Process) [pscustomobject]@{ ReturnValue = 0; Sid = $CurrentIdentity.UserSid } }
+        } $install $identity $processes
+        Assert-CcodTrue ($null -eq $fallback) 'lookalike parent does not authorize fallback termination'
+    } finally {
+        if (Test-Path -LiteralPath $install) { Remove-Item -LiteralPath $install -Recurse -Force }
+    }
+}
+
 $results += Invoke-CcodTest 'installer exposes a desktop entry that only starts the stable tray bootstrap' {
     $installerScript = Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss'
     $entries = @(Get-Content -LiteralPath $installerScript | Where-Object { $_ -cmatch '^Name: "\{userdesktop\}\\' })
@@ -874,6 +975,12 @@ $results += Invoke-CcodTest 'installer exposes a desktop entry that only starts 
     Assert-CcodTrue ($entry -cmatch '\{localappdata\}\\CodexControlOtherDevices\\bootstrap\.ps1') 'desktop entry targets the stable bootstrap'
     Assert-CcodTrue ($entry -cmatch '-InstallRoot ""\{localappdata\}\\CodexControlOtherDevices""') 'desktop entry supplies the stable install root'
     Assert-CcodTrue ($entry -cnotmatch 'Start-CodexControlOtherDevices\.ps1') 'desktop entry never invokes a direct repair session'
+}
+
+$results += Invoke-CcodTest 'installer carries the Inno contract needed by its self-validation' {
+    $installerScript = Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss'
+    $sourceEntries = @(Get-Content -LiteralPath $installerScript | Where-Object { $_ -cmatch '^Source: "\.\.\\build\\CodexControlOtherDevices\.iss"; DestDir: "\{app\}\\build";' })
+    Assert-CcodEqual 1 $sourceEntries.Count 'installer carries the build contract used by Validate.ps1'
 }
 
 Write-Output "Install lifecycle self-tests passed: $($results.Count)"

@@ -1207,6 +1207,26 @@ try {
         Assert-CcodEqual 1 $counters.OrdinaryStart 'normal Recover launches ordinary exactly once'
     }
 
+    Invoke-CcodTest 'Recover clears a committed stale recovery before cross-runtime replay' {
+        $transaction = New-CcodEngineTransition -Stage Recovered -WithPorts -WithSpecial -WithRecovery -TransactionId 'aa891d93-27b2-4dc4-8f78-1714f7a3b65c'
+        $transaction.runtimeId = 'runtime-old'
+        $state = New-CcodEngineState -ActiveTransaction $transaction
+        $ordinary = New-CcodEngineSnapshot
+        $clearCalls = [Collections.Generic.List[string]]::new()
+        $adapters = New-CcodEngineAdapters -State $state -Processes @($ordinary)
+        $adapters.ClearCommittedTransition = {
+            param($Path,$LogPath,$TransactionId,$Disposition)
+            $clearCalls.Add("$TransactionId|$Disposition")
+            $state.Transition.activeTransaction = $null
+            [pscustomobject][ordered]@{ Outcome='Completed'; ArchiveState='PreviouslyWritten'; ArchiveErrorId=$null }
+        }.GetNewClosure()
+
+        $result = Invoke-CcodRecoverSession -Request (New-CcodEngineRequest -Action Recover -RuntimeId 'runtime-1' -TransactionId '96ab45cf-5c63-4c0e-a958-76d5bc514813') -Paths $paths -Adapters $adapters
+        Assert-CcodEqual "$($transaction.transactionId)|Recovered" ($clearCalls -join ',') 'recovery clears only the matching committed transaction'
+        Assert-CcodEqual 'NoAction' $result.outcome 'recovery continues after clearing the stale committed transaction'
+        Assert-CcodEqual 'OrdinaryRunning' $result.safeState 'recovery re-evaluates the current ordinary session'
+    }
+
     Invoke-CcodTest 'renderer repair failure normalizes once and suppresses the failed runtime' {
         $status=New-CcodEngineActiveStatus -RuntimeId 'runtime-old'
         $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002;$alive=@{201=$special}

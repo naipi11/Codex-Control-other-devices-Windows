@@ -1,6 +1,6 @@
 {
   "name": "codex-control-other-devices-windows",
-  "version": "2.1.1",
+  "version": "2.1.4",
   "private": true,
   "description": "Persistent current-user tray supervisor for Codex Control other devices on Windows",
   "license": "MIT",

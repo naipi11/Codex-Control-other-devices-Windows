@@ -1020,6 +1020,7 @@ function Complete-CcodTransition {
         [Parameter(Mandatory)][string]$LogPath,
         [Parameter(Mandatory)][string]$TransactionId,
         [Parameter(Mandatory)][string]$Disposition,
+        [switch]$RequireTerminalReceipt,
         [hashtable]$Adapters
     )
 
@@ -1048,6 +1049,16 @@ function Complete-CcodTransition {
         Throw-CcodTransitionError 'CCOD_TRANSITION_COMPLETION_INVALID' 'No active or durably completed matching transaction exists' $TransactionId
     }
     Assert-CcodCompletionRequest -Transition $transition -TransactionId $TransactionId -Disposition $Disposition
+    if ($RequireTerminalReceipt) {
+        if ($null -eq $receipt -or $receipt.transactionId -cne $TransactionId -or @('Archived', 'ArchiveFailed') -cnotcontains $receipt.state) {
+            return New-CcodCompletionResult -Outcome 'NoCommittedReceipt' -ArchiveState 'NotWritten' -ArchiveErrorId $null
+        }
+        & $adapter.WriteJson $Path ([ordered]@{ schemaVersion=1; activeTransaction=$null })
+        & $adapter.Checkpoint 'AfterClear'
+        $errorId = if ($receipt.state -ceq 'ArchiveFailed') { 'CCOD_TRANSITION_ARCHIVE_FAILED' } else { $null }
+        $resumedArchiveState = if ($receipt.state -ceq 'ArchiveFailed') { 'WriteFailed' } else { 'PreviouslyWritten' }
+        return New-CcodCompletionResult -Outcome 'Completed' -ArchiveState $resumedArchiveState -ArchiveErrorId $errorId
+    }
     if ($null -ne $receipt -and $receipt.transactionId -ceq $TransactionId) {
         # A terminal receipt is committed evidence that must win over an active
         # transaction left behind by a crash. Recovery may have advanced that

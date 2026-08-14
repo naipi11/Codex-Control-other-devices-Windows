@@ -375,29 +375,95 @@ function Write-CcodLifecycleLog {
 function Get-CcodLifecycleSupervisorIdentity {
     param(
         [Parameter(Mandatory)][string]$InstallRoot,
-        $Identity
+        $Identity,
+        [Parameter(Mandatory)][hashtable]$Adapters
     )
 
     $stateRoot = Join-Path $InstallRoot 'state'
-    if (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'status.json') -PathType Leaf)) { return $null }
+    if (Test-Path -LiteralPath (Join-Path $stateRoot 'status.json') -PathType Leaf) {
+        try {
+            $status = Read-CcodStatus -StateRoot $stateRoot
+        } catch {
+            $status = $null
+        }
+        if ($null -ne $status -and $null -ne $status.session -and
+            $status.session.supervisorPid -is [int] -and $status.session.supervisorPid -ge 1 -and
+            $status.session.supervisorCreationTimeUtc -is [string] -and -not [string]::IsNullOrWhiteSpace($status.session.supervisorCreationTimeUtc) -and
+            $status.session.sessionId -is [string]) {
+            $sessionId = 0
+            if ([int]::TryParse($status.session.sessionId, [ref]$sessionId)) {
+                return [pscustomobject][ordered]@{
+                    Pid = [int]$status.session.supervisorPid
+                    CreationTimeUtc = [string]$status.session.supervisorCreationTimeUtc
+                    SessionId = [int]$sessionId
+                    UserSid = [string]$Identity.UserSid
+                }
+            }
+        }
+    }
+    return (& $Adapters.FindSupervisorFallback $InstallRoot $Identity)
+}
+
+function Get-CcodLifecycleVerifiedSupervisorFallback {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        $Identity,
+        [Parameter(Mandatory)][scriptblock]$ProcessEnumerator,
+        [Parameter(Mandatory)][scriptblock]$OwnerSidResolver
+    )
+
     try {
-        $status = Read-CcodStatus -StateRoot $stateRoot
+        if ($null -eq $Identity -or $Identity.UserSid -isnot [string] -or [string]::IsNullOrWhiteSpace($Identity.UserSid)) { return $null }
+        $expectedSessionId = [int]$Identity.SessionId
+        $root = Get-CcodLifecycleCanonicalRoot -Path $InstallRoot -Kind 'Install root'
+        $bootstrapPath = [IO.Path]::GetFullPath((Join-Path $root 'bootstrap.ps1'))
+        if (-not [IO.File]::Exists($bootstrapPath) -or (Test-CcodLifecycleReparse -Path $bootstrapPath)) { return $null }
+        $runtimeRoot = Get-CcodLifecycleCanonicalRoot -Path (Join-Path $root 'runtime') -Kind 'Runtime root'
+        $runtimePrefix = $runtimeRoot.TrimEnd('\') + '\'
+        $bootstrapFilePattern = '(?i)(?:^|\s)-File\s+"' + [regex]::Escape($bootstrapPath) + '"(?=\s|$)'
+        $bootstrapRootPattern = '(?i)(?:^|\s)-InstallRoot\s+"' + [regex]::Escape($root) + '"(?=\s|$)'
+        $supervisorFilePattern = '(?i)(?:^|\s)-File\s+"(?<path>' + [regex]::Escape($runtimeRoot) + '\\[^"\\]+\\src\\persistence\\Supervisor\.ps1)"(?=\s|$)'
+        $tokenPattern = '(?i)(?:^|\s)-ReadyToken\s+[0-9a-f]{64}(?=\s|$)'
+        $processes = @(& $ProcessEnumerator)
+        $byPid = @{}
+        foreach ($process in $processes) {
+            if ($null -eq $process -or $null -eq $process.PSObject.Properties['ProcessId']) { continue }
+            $pid = 0
+            if (-not [int]::TryParse([string]$process.ProcessId, [ref]$pid) -or $pid -lt 1) { continue }
+            if ($byPid.ContainsKey($pid)) { return $null }
+            $byPid[$pid] = $process
+        }
+        $matches = [Collections.Generic.List[object]]::new()
+        foreach ($process in $byPid.Values) {
+            if ($null -eq $process.PSObject.Properties['SessionId'] -or $null -eq $process.PSObject.Properties['ParentProcessId'] -or
+                [int]$process.SessionId -ne $expectedSessionId -or [string]::IsNullOrWhiteSpace([string]$process.CommandLine)) { continue }
+            $supervisorMatch = [regex]::Match([string]$process.CommandLine, $supervisorFilePattern)
+            if (-not $supervisorMatch.Success -or -not [regex]::IsMatch([string]$process.CommandLine, $tokenPattern)) { continue }
+            $supervisorPath = [IO.Path]::GetFullPath($supervisorMatch.Groups['path'].Value)
+            if (-not $supervisorPath.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $parentPid = [int]$process.ParentProcessId
+            if ($parentPid -lt 1 -or -not $byPid.ContainsKey($parentPid)) { continue }
+            $parent = $byPid[$parentPid]
+            if ([int]$parent.SessionId -ne $expectedSessionId -or [string]::IsNullOrWhiteSpace([string]$parent.CommandLine) -or
+                -not [regex]::IsMatch([string]$parent.CommandLine, $bootstrapFilePattern) -or
+                -not [regex]::IsMatch([string]$parent.CommandLine, $bootstrapRootPattern)) { continue }
+            $supervisorOwner = & $OwnerSidResolver $process
+            $parentOwner = & $OwnerSidResolver $parent
+            if ($null -eq $supervisorOwner -or $null -eq $parentOwner -or
+                [int]$supervisorOwner.ReturnValue -ne 0 -or [int]$parentOwner.ReturnValue -ne 0 -or
+                [string]$supervisorOwner.Sid -cne [string]$Identity.UserSid -or [string]$parentOwner.Sid -cne [string]$Identity.UserSid) { continue }
+            $creation = ([datetime]$process.CreationDate).ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $matches.Add([pscustomobject][ordered]@{
+                Pid = [int]$process.ProcessId
+                CreationTimeUtc = $creation
+                SessionId = [int]$process.SessionId
+                UserSid = [string]$supervisorOwner.Sid
+            })
+        }
+        if ($matches.Count -ne 1) { return $null }
+        return $matches[0]
     } catch {
         return $null
-    }
-    if ($null -eq $status -or $null -eq $status.session -or
-        $status.session.supervisorPid -isnot [int] -or $status.session.supervisorPid -lt 1 -or
-        $status.session.supervisorCreationTimeUtc -isnot [string] -or [string]::IsNullOrWhiteSpace($status.session.supervisorCreationTimeUtc) -or
-        $status.session.sessionId -isnot [string]) {
-        return $null
-    }
-    $sessionId = 0
-    if (-not [int]::TryParse($status.session.sessionId, [ref]$sessionId)) { return $null }
-    return [pscustomobject][ordered]@{
-        Pid = [int]$status.session.supervisorPid
-        CreationTimeUtc = [string]$status.session.supervisorCreationTimeUtc
-        SessionId = [int]$sessionId
-        UserSid = [string]$Identity.UserSid
     }
 }
 
@@ -538,6 +604,15 @@ function Get-CcodLifecycleAdapters {
             } finally {
                 if ($null -ne $process) { $process.Dispose() }
                 if ($null -ne $windowsIdentity) { $windowsIdentity.Dispose() }
+            }
+        }
+        FindSupervisorFallback = {
+            param($InstallRoot, $Identity)
+            Get-CcodLifecycleVerifiedSupervisorFallback -InstallRoot $InstallRoot -Identity $Identity -ProcessEnumerator {
+                Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction Stop
+            } -OwnerSidResolver {
+                param($Process)
+                Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid -ErrorAction Stop
             }
         }
         UtcNow = { [DateTime]::UtcNow }
@@ -805,7 +880,7 @@ function Invoke-CcodInstall {
         }
         $pointer = Set-CcodActiveRuntime -InstallRoot $root -NewRuntimeId $runtimeId
         if ($upgrade) {
-            $oldSupervisor = Get-CcodLifecycleSupervisorIdentity -InstallRoot $root -Identity $identity
+            $oldSupervisor = Get-CcodLifecycleSupervisorIdentity -InstallRoot $root -Identity $identity -Adapters $adapters
             if ($null -ne $oldSupervisor) {
                 Stop-CcodLifecycleSupervisor -InstallRoot $root -Adapters $adapters -Identity $oldSupervisor
             }
@@ -869,7 +944,7 @@ function Invoke-CcodUninstall {
     }
     $pointer = Read-CcodActiveRuntime -InstallRoot $root
     $identity = & $adapters.GetCurrentIdentity
-    $supervisor = Get-CcodLifecycleSupervisorIdentity -InstallRoot $root -Identity $identity
+    $supervisor = Get-CcodLifecycleSupervisorIdentity -InstallRoot $root -Identity $identity -Adapters $adapters
     $lease = $null
     $keptKeyStore = $false
     $backupPath = $null

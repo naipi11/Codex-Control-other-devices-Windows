@@ -512,6 +512,7 @@ function Merge-CcodSessionAdapters($Adapters) {
             if($null -ne $SpecialIdentity){$parameters.SpecialIdentity=$SpecialIdentity}; if($null -ne $RecoveryIdentity){$parameters.RecoveryIdentity=$RecoveryIdentity}
             if($null -ne $RendererPort){$parameters.RendererPort=$RendererPort}; if($null -ne $MainPort){$parameters.MainPort=$MainPort}; Set-CcodTransitionStage @parameters }
         CompleteTransition={ param($Path,$LogPath,$TransactionId,$Disposition) Complete-CcodTransition -Path $Path -LogPath $LogPath -TransactionId $TransactionId -Disposition $Disposition }
+        ClearCommittedTransition={ param($Path,$LogPath,$TransactionId,$Disposition) Complete-CcodTransition -Path $Path -LogPath $LogPath -TransactionId $TransactionId -Disposition $Disposition -RequireTerminalReceipt }
         StopProcess={ param($Expected,$StatusEvidence,$TimeoutMilliseconds) Stop-CcodProcessIfMatch -Expected $Expected -StatusEvidence $StatusEvidence -TimeoutMilliseconds $TimeoutMilliseconds }
         GetPreferredRendererPort={ param($Excluded) Get-CcodRendererPreferredPort -ExcludedPorts $Excluded }
         GetPort={ param($Excluded) Get-CcodAvailableLoopbackPort -ExcludedPorts $Excluded }
@@ -990,10 +991,22 @@ function Invoke-CcodRecoverSession {
         $result.stage='RecoverState';$state=& $adapter.ReadState $Paths.StateRoot $null
         if(-not $state.TransitionActionsAllowed){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'State damage blocks recovery' $state.Damage}
         if($null -ne $state.Transition.activeTransaction){
-            $replayed=Invoke-CcodReplayTransition -Request $Request -Paths $Paths -Transition $state.Transition.activeTransaction -Adapters $adapter
-            if($Request.restartOrdinary -or -not $replayed.ok){return $replayed}
-            $state=& $adapter.ReadState $Paths.StateRoot $null
-            if($null -ne $state.Transition.activeTransaction){Throw-CcodSessionError 'CCOD_CLOSE_UNPROVEN' 'Older transaction did not clear before separate close intent' $state.Transition.activeTransaction}
+            $activeTransaction = $state.Transition.activeTransaction
+            if($activeTransaction.stage -ceq 'Recovered' -and $activeTransaction.runtimeId -cne $Request.runtimeId){
+                $cleared = & $adapter.ClearCommittedTransition $Paths.TransitionPath $Paths.TransitionLogPath $activeTransaction.transactionId 'Recovered'
+                if($null -eq $cleared -or $cleared.Outcome -ne 'Completed'){
+                    Throw-CcodSessionError 'CCOD_RECOVERY_UNPROVEN' 'A prior recovery from another runtime is not durably complete' $activeTransaction
+                }
+                $state=& $adapter.ReadState $Paths.StateRoot $null
+                if($null -ne $state.Transition.activeTransaction){
+                    Throw-CcodSessionError 'CCOD_RECOVERY_UNPROVEN' 'A committed prior recovery did not clear the active transition' $state.Transition.activeTransaction
+                }
+            } else {
+                $replayed=Invoke-CcodReplayTransition -Request $Request -Paths $Paths -Transition $activeTransaction -Adapters $adapter
+                if($Request.restartOrdinary -or -not $replayed.ok){return $replayed}
+                $state=& $adapter.ReadState $Paths.StateRoot $null
+                if($null -ne $state.Transition.activeTransaction){Throw-CcodSessionError 'CCOD_CLOSE_UNPROVEN' 'Older transaction did not clear before separate close intent' $state.Transition.activeTransaction}
+            }
         }
         $probe=& $adapter.StaticProbe $state.Settings.nodeCandidates $Paths.CheckerPath;$result.package=ConvertTo-CcodSessionPackage $probe
         $roots=@(Get-CcodCurrentPackageRoots $state.Status $probe $Request $adapter)
