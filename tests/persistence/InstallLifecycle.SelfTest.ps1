@@ -88,6 +88,13 @@ function New-CcodLifecycleFake {
         WaitSupervisorExit = $true
         TerminateSupervisorCalls = 0
         LastTerminateIdentity = $null
+        SupervisorIdentityCurrent = $true
+        SupervisorIdentityChecks = 0
+        InstallLeaseCalls = 0
+        InstallLeaseReleased = 0
+        InstallLeaseOutcome = 'Acquired'
+        ShutdownGateOpened = 0
+        ShutdownGateClosed = 0
         FallbackSupervisor = $null
         FallbackSupervisorLookups = 0
         NormalizeReceipt = New-CcodLifecycleNormalizeReceipt -SpecialPresent $false -Normalized $false
@@ -112,7 +119,31 @@ function New-CcodLifecycleFake {
     $adapters.SignalSupervisorShutdown = { param($UserSid, $SessionId) $world.Calls.Add("SignalShutdown:${UserSid}:${SessionId}"); $world.ShutdownSignaled++ }.GetNewClosure()
     $adapters.FindSupervisorFallback = { param($InstallRoot, $Identity) $world.Calls.Add("FindSupervisorFallback:$([IO.Path]::GetFileName($InstallRoot)):$($Identity.UserSid):$($Identity.SessionId)"); $world.FallbackSupervisorLookups++; $world.FallbackSupervisor }.GetNewClosure()
     $adapters.WaitSupervisorExit = { param($SupervisorIdentity, $TimeoutMilliseconds) $world.Calls.Add("WaitSupervisor:$($SupervisorIdentity.Pid):$TimeoutMilliseconds"); [bool]$world.WaitSupervisorExit }.GetNewClosure()
+    $adapters.IsSupervisorIdentityCurrent = { param($SupervisorIdentity) $world.Calls.Add("CheckSupervisor:$($SupervisorIdentity.Pid)"); $world.SupervisorIdentityChecks++; [bool]$world.SupervisorIdentityCurrent }.GetNewClosure()
     $adapters.TerminateSupervisor = { param($SupervisorIdentity) $world.Calls.Add("TerminateSupervisor:$($SupervisorIdentity.Pid)"); $world.TerminateSupervisorCalls++; $world.LastTerminateIdentity = $SupervisorIdentity; $true }.GetNewClosure()
+    $adapters.EnterInstallLease = {
+        param($UserSid)
+        $world.Calls.Add("EnterInstallLease:$UserSid")
+        $world.InstallLeaseCalls++
+        [pscustomobject][ordered]@{ Outcome = [string]$world.InstallLeaseOutcome }
+    }.GetNewClosure()
+    $adapters.ExitInstallLease = {
+        param($Lease)
+        $world.Calls.Add('ExitInstallLease')
+        $world.InstallLeaseReleased++
+        $true
+    }.GetNewClosure()
+    $adapters.CreateSupervisorShutdownGate = {
+        param($UserSid, $SessionId)
+        $world.Calls.Add("OpenShutdownGate:${UserSid}:$SessionId")
+        $world.ShutdownGateOpened++
+        [pscustomobject][ordered]@{ Gate = 'Fake' }
+    }.GetNewClosure()
+    $adapters.CloseSupervisorShutdownGate = {
+        param($Gate)
+        $world.Calls.Add('CloseShutdownGate')
+        $world.ShutdownGateClosed++
+    }.GetNewClosure()
     $adapters.NormalizeSpecialSession = { param($InstallRoot, $RuntimeId, $Identity) $world.Calls.Add("Normalize:$RuntimeId"); $world.NormalizeCalls++; $world.NormalizeReceipt }.GetNewClosure()
     $adapters.SetAutomationEnabled = { param($StateRoot, $Enabled) $world.Calls.Add("Automation:$Enabled"); $world.AutomationPaused++ }.GetNewClosure()
     $adapters.EnterTransitionLease = { param($UserSid, $SessionId) $world.Calls.Add("EnterTransitionLease"); $world.TransitionLeaseCalls++; [pscustomobject][ordered]@{ SchemaVersion = 1; Name = "Fake-Transition"; Kind = 'Transition'; Outcome = 'Acquired'; CreatedNew = $false; Abandoned = $false; Handle = [pscustomobject]@{ Kind = 'Mutex' }; OwnerManagedThreadId = [Threading.Thread]::CurrentThread.ManagedThreadId; Released = $false } }.GetNewClosure()
@@ -254,6 +285,11 @@ $results += Invoke-CcodTest 'upgrade retains one previous runtime and starts the
         Assert-CcodEqual 1 $fake2.World.TaskInstalled 'upgrade reinstalls task'
         Assert-CcodEqual 1 $fake2.World.ShutdownSignaled 'old supervisor shutdown signaled'
         Assert-CcodEqual 1 $fake2.World.WaitSupervisorExit 'old supervisor exit waited'
+        Assert-CcodEqual 1 $fake2.World.ShutdownGateOpened 'upgrade opens one shutdown gate before changing the active runtime'
+        Assert-CcodEqual 1 $fake2.World.ShutdownGateClosed 'upgrade closes the shutdown gate before its replacement supervisor starts'
+        [string[]]$calls = @($fake2.World.Calls)
+        $installCall = @($calls | Where-Object { $_ -like 'InstallTask:*' })[0]
+        Assert-CcodTrue ([Array]::IndexOf($calls, 'CloseShutdownGate') -lt [Array]::IndexOf($calls, $installCall)) 'shutdown gate closes before task replacement'
         $pointer = Read-CcodLifecycleActivePointer -Root $install
         Assert-CcodEqual $second.RuntimeId $pointer.activeRuntime 'active points at new runtime'
         Assert-CcodEqual $first.RuntimeId $pointer.previousRuntime 'previous points at old runtime'
@@ -866,6 +902,50 @@ $results += Invoke-CcodTest 'default adapters keep module session state for priv
     Assert-CcodTrue ($commandNames -contains 'Get-CcodLifecycleProjectVersion') 'default GetProjectVersion still targets the private helper'
 }
 
+$results += Invoke-CcodTest 'timed out supervisor shutdown never terminates a reused PID' {
+    $fake = New-CcodLifecycleFake
+    $fake.World.WaitSupervisorExit = $false
+    $fake.World.SupervisorIdentityCurrent = $false
+    $identity = [pscustomobject][ordered]@{
+        Pid = 97
+        CreationTimeUtc = '2030-02-03T03:00:00.0000000Z'
+        SessionId = $fake.World.Identity.SessionId
+        UserSid = $fake.World.Identity.UserSid
+    }
+    $module = Get-Module InstallLifecycle
+    $stopped = & $module { param($Adapters, $SupervisorIdentity) Stop-CcodLifecycleSupervisor -InstallRoot 'C:\ccod-test' -Adapters $Adapters -Identity $SupervisorIdentity } $fake.Adapters $identity
+    Assert-CcodEqual $true $stopped 'a changed process identity means the verified supervisor already exited'
+    Assert-CcodEqual 1 $fake.World.SupervisorIdentityChecks 'shutdown timeout rechecks the process identity before termination'
+    Assert-CcodEqual 0 $fake.World.TerminateSupervisorCalls 'a reused PID is never terminated'
+}
+
+$results += Invoke-CcodTest 'ambiguous legacy supervisor fallback aborts upgrade before pointer activation' {
+    $source = New-CcodLifecycleTempRoot
+    $install = New-CcodLifecycleTempRoot
+    $nodeRoot = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source -Version '2.0.0-ambiguous' | Out-Null
+        $nodePath = New-CcodLifecycleFakeNode -Root $nodeRoot
+        $first = Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters (New-CcodLifecycleFake -NodePath $nodePath).Adapters
+        [IO.File]::WriteAllText((Join-Path $source 'src\runtime\main-payload.js'), "module.exports = 'fixture-ambiguous-v2';`n", [Text.UTF8Encoding]::new($false))
+        $fake = New-CcodLifecycleFake -NodePath $nodePath
+        $fake.Adapters.FindSupervisorFallback = {
+            throw [Management.Automation.ErrorRecord]::new(
+                [InvalidOperationException]::new('Two verified legacy supervisors are present.'),
+                'CCOD_INSTALL_SUPERVISOR_AMBIGUOUS',
+                [Management.Automation.ErrorCategory]::ResourceBusy,
+                $null
+            )
+        }
+        Assert-CcodThrows { Invoke-CcodInstall -SourceRoot $source -InstallRoot $install -Adapters $fake.Adapters } 'CCOD_INSTALL_SUPERVISOR_AMBIGUOUS'
+        $pointer = Read-CcodLifecycleActivePointer -Root $install
+        Assert-CcodEqual $first.RuntimeId $pointer.activeRuntime 'ambiguous fallback leaves the active runtime pointer unchanged'
+        Assert-CcodEqual 0 $fake.World.TaskInstalled 'ambiguous fallback does not replace the task'
+    } finally {
+        foreach ($path in @($source, $install, $nodeRoot)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
+    }
+}
+
 $results += Invoke-CcodTest 'upgrade stops a verified fallback supervisor when status has no session identity' {
     $source = New-CcodLifecycleTempRoot
     $install = New-CcodLifecycleTempRoot
@@ -959,6 +1039,31 @@ $results += Invoke-CcodTest 'fallback rejects a legacy runtime whose parent is n
             Get-CcodLifecycleVerifiedSupervisorFallback -InstallRoot $Root -Identity $CurrentIdentity -ProcessEnumerator { param($Ignored) $Snapshots } -OwnerSidResolver { param($Process) [pscustomobject]@{ ReturnValue = 0; Sid = $CurrentIdentity.UserSid } }
         } $install $identity $processes
         Assert-CcodTrue ($null -eq $fallback) 'lookalike parent does not authorize fallback termination'
+    } finally {
+        if (Test-Path -LiteralPath $install) { Remove-Item -LiteralPath $install -Recurse -Force }
+    }
+}
+
+$results += Invoke-CcodTest 'fallback rejects two verified supervisor children as ambiguous' {
+    $install = New-CcodLifecycleTempRoot
+    try {
+        $identity = New-CcodLifecycleIdentity
+        New-Item -ItemType Directory -Path $install -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $install 'bootstrap.ps1'), '# fixture bootstrap', [Text.UTF8Encoding]::new($false))
+        $bootstrap = Join-Path $install 'bootstrap.ps1'
+        $runtimeRoot = Join-Path $install 'runtime'
+        $processes = @(
+            [pscustomobject]@{ ProcessId = 96; ParentProcessId = 1; SessionId = $identity.SessionId; CreationDate = [DateTime]::Parse('2030-02-03T02:59:59Z').ToUniversalTime(); CommandLine = "powershell.exe -File `"$bootstrap`" -InstallRoot `"$install`"" },
+            [pscustomobject]@{ ProcessId = 97; ParentProcessId = 96; SessionId = $identity.SessionId; CreationDate = [DateTime]::Parse('2030-02-03T03:00:00Z').ToUniversalTime(); CommandLine = "powershell.exe -File `"$runtimeRoot\2.1.1\src\persistence\Supervisor.ps1`" -ReadyToken $('a' * 64)" },
+            [pscustomobject]@{ ProcessId = 98; ParentProcessId = 96; SessionId = $identity.SessionId; CreationDate = [DateTime]::Parse('2030-02-03T03:00:01Z').ToUniversalTime(); CommandLine = "powershell.exe -File `"$runtimeRoot\2.1.2\src\persistence\Supervisor.ps1`" -ReadyToken $('b' * 64)" }
+        )
+        $module = Get-Module InstallLifecycle
+        Assert-CcodThrows {
+            & $module {
+                param($Root, $CurrentIdentity, $Snapshots)
+                Get-CcodLifecycleVerifiedSupervisorFallback -InstallRoot $Root -Identity $CurrentIdentity -ProcessEnumerator { param($Ignored) $Snapshots } -OwnerSidResolver { param($Process) [pscustomobject]@{ ReturnValue = 0; Sid = $CurrentIdentity.UserSid } }
+            } $install $identity $processes
+        } 'CCOD_INSTALL_SUPERVISOR_AMBIGUOUS'
     } finally {
         if (Test-Path -LiteralPath $install) { Remove-Item -LiteralPath $install -Recurse -Force }
     }

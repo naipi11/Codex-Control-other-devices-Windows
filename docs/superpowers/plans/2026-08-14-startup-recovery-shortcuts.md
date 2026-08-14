@@ -184,3 +184,5 @@ git commit -m "chore: release 2.1.1"
 - [x] Add the restricted fallback identity adapter and use it for upgrade and uninstall paths.
 - [x] Verify the lifecycle suite passes (37 tests).
 - [x] Build and install v2.1.4 locally; verify it replaces the live legacy supervisor, clears the stale transaction, and restarts from the scheduled task.
+- [x] Add review-driven guards: exact-handle termination after PID revalidation, a shutdown gate during pointer activation, and fail-closed ambiguity handling before an upgrade can replace the task or prune runtimes.
+- [ ] Publish the reviewed guard changes as v2.1.5.

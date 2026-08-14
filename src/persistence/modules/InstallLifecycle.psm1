@@ -460,9 +460,13 @@ function Get-CcodLifecycleVerifiedSupervisorFallback {
                 UserSid = [string]$supervisorOwner.Sid
             })
         }
-        if ($matches.Count -ne 1) { return $null }
+        if ($matches.Count -eq 0) { return $null }
+        if ($matches.Count -ne 1) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SUPERVISOR_AMBIGUOUS' 'More than one verified legacy supervisor is present; upgrade cannot safely choose one' $matches
+        }
         return $matches[0]
     } catch {
+        if (([string]$_.FullyQualifiedErrorId -split ',')[0] -ceq 'CCOD_INSTALL_SUPERVISOR_AMBIGUOUS') { throw }
         return $null
     }
 }
@@ -474,12 +478,14 @@ function Stop-CcodLifecycleSupervisor {
         $Identity
     )
 
-    if ($null -eq $Identity) { return }
+    if ($null -eq $Identity) { return $true }
     & $Adapters.SignalSupervisorShutdown $Identity.UserSid $Identity.SessionId
     $exited = & $Adapters.WaitSupervisorExit $Identity 10000
-    if (-not $exited) {
-        & $Adapters.TerminateSupervisor $Identity
+    if ($exited) { return $true }
+    if (-not (& $Adapters.IsSupervisorIdentityCurrent $Identity)) {
+        return $true
     }
+    return [bool](& $Adapters.TerminateSupervisor $Identity)
 }
 
 function Invoke-CcodLifecycleControllerRecover {
@@ -615,6 +621,16 @@ function Get-CcodLifecycleAdapters {
                 Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid -ErrorAction Stop
             }
         }
+        IsSupervisorIdentityCurrent = {
+            param($SupervisorIdentity)
+            try {
+                $process = Get-Process -Id $SupervisorIdentity.Pid -ErrorAction SilentlyContinue
+                if ($null -eq $process) { return $false }
+                try {
+                    return $process.StartTime.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture) -ceq $SupervisorIdentity.CreationTimeUtc
+                } finally { $process.Dispose() }
+            } catch { return $false }
+        }
         UtcNow = { [DateTime]::UtcNow }
         InstallSupervisorTask = {
             param($InstallRoot, $UserSid)
@@ -652,7 +668,31 @@ function Get-CcodLifecycleAdapters {
         }
         TerminateSupervisor = {
             param($SupervisorIdentity)
-            try { Stop-Process -Id $SupervisorIdentity.Pid -Force -ErrorAction Stop; return $true } catch { return $false }
+            $process = $null
+            try {
+                $process = Get-Process -Id $SupervisorIdentity.Pid -ErrorAction SilentlyContinue
+                if ($null -eq $process) { return $true }
+                if ($process.StartTime.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture) -cne $SupervisorIdentity.CreationTimeUtc) { return $true }
+                $process.Kill()
+                return $true
+            } catch { return $false } finally { if ($null -ne $process) { $process.Dispose() } }
+        }
+        EnterInstallLease = {
+            param($UserSid)
+            Enter-CcodMutex -Kind 'AccountTransition' -UserSid $UserSid -TimeoutMilliseconds 30000
+        }
+        ExitInstallLease = {
+            param($Lease)
+            Exit-CcodMutex -Lease $Lease
+        }
+        CreateSupervisorShutdownGate = {
+            param($UserSid, $SessionId)
+            $event = New-CcodEvent -Kind Shutdown -UserSid $UserSid -SessionId $SessionId
+            try { [void]$event.Handle.Set(); return $event } catch { $event.Handle.Dispose(); throw }
+        }
+        CloseSupervisorShutdownGate = {
+            param($Event)
+            $Event.Handle.Dispose()
         }
         NormalizeSpecialSession = {
             param($InstallRoot, $RuntimeId, $Identity)
@@ -845,6 +885,8 @@ function Invoke-CcodInstall {
     $stagingDirectory = $null
     $runtimeId = $null
     $upgrade = $false
+    $installLease = $null
+    $shutdownGate = $null
     try {
         $stagingDirectory = Copy-CcodLifecycleStaging -SourceRoot $sourceRoot -InstallRoot $root -Adapters $adapters -Files $files
         $manifest = New-CcodRuntimeManifest -RuntimeDirectory $stagingDirectory -ProjectVersion $projectVersion
@@ -878,12 +920,29 @@ function Invoke-CcodInstall {
             Initialize-CcodState -StateRoot $stateRoot -NodeCandidates $nodeCandidates -CandidateCompatibleOptIn ([bool]$EnableCandidateCompatibleUpdates)
             Initialize-CcodUiPreference -StateRoot $stateRoot | Out-Null
         }
-        $pointer = Set-CcodActiveRuntime -InstallRoot $root -NewRuntimeId $runtimeId
         if ($upgrade) {
+            $installLease = & $adapters.EnterInstallLease $identity.UserSid
+            if ($null -eq $installLease -or $installLease.Outcome -isnot [string] -or @('Acquired', 'TimedOut') -cnotcontains $installLease.Outcome) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_LEASE_INVALID' 'The installation lease contract is invalid' $installLease
+            }
+            if ($installLease.Outcome -ceq 'TimedOut') {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_BUSY' 'Another transition or bootstrap launch is in progress; retry the upgrade shortly' $root
+            }
+            $shutdownGate = & $adapters.CreateSupervisorShutdownGate $identity.UserSid $identity.SessionId
+            if ($null -eq $shutdownGate) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_SHUTDOWN_GATE_FAILED' 'The upgrade shutdown gate could not be created' $root
+            }
             $oldSupervisor = Get-CcodLifecycleSupervisorIdentity -InstallRoot $root -Identity $identity -Adapters $adapters
             if ($null -ne $oldSupervisor) {
-                Stop-CcodLifecycleSupervisor -InstallRoot $root -Adapters $adapters -Identity $oldSupervisor
+                if (-not (Stop-CcodLifecycleSupervisor -InstallRoot $root -Adapters $adapters -Identity $oldSupervisor)) {
+                    Throw-CcodLifecycleError 'CCOD_INSTALL_SUPERVISOR_STOP_FAILED' 'The verified legacy supervisor did not stop safely' $oldSupervisor
+                }
             }
+        }
+        $pointer = Set-CcodActiveRuntime -InstallRoot $root -NewRuntimeId $runtimeId
+        if ($null -ne $shutdownGate) {
+            & $adapters.CloseSupervisorShutdownGate $shutdownGate
+            $shutdownGate = $null
         }
         Install-CcodLifecycleTask -InstallRoot $root -Adapters $adapters -Identity $identity
         if (-not $DoNotStart) {
@@ -894,6 +953,12 @@ function Invoke-CcodInstall {
         }
         Write-CcodLifecycleLog -InstallRoot $root -Adapters $adapters -Stage $(if ($upgrade) { 'Upgrade' } else { 'Install' }) -Code 'CCOD_INSTALL_COMPLETED' -Outcome $(if ($upgrade) { 'Upgraded' } else { 'Installed' })
     } finally {
+        if ($null -ne $shutdownGate) {
+            try { & $adapters.CloseSupervisorShutdownGate $shutdownGate } catch { }
+        }
+        if ($null -ne $installLease -and $installLease.Outcome -ceq 'Acquired') {
+            try { [void](& $adapters.ExitInstallLease $installLease) } catch { }
+        }
         if ($null -ne $stagingDirectory -and [IO.Directory]::Exists($stagingDirectory)) {
             try { Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction Stop } catch { }
         }
