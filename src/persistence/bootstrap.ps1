@@ -321,6 +321,33 @@ function Test-CcodBootstrapRuntime {
     }
 }
 
+function Import-CcodBootstrapKernelObjects {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)]$Pointer
+    )
+
+    $candidates = @([string]$Pointer.ActiveRuntime)
+    if ($null -ne $Pointer.PreviousRuntime -and $Pointer.PreviousRuntime -cne $Pointer.ActiveRuntime) {
+        $candidates += [string]$Pointer.PreviousRuntime
+    }
+
+    foreach ($runtimeId in $candidates) {
+        $validation = Test-CcodBootstrapRuntime -InstallRoot $InstallRoot -RuntimeId $runtimeId
+        if (-not $validation.Valid) { continue }
+        $modulePath = Assert-CcodBootstrapContained -Root $validation.RuntimeDirectory -Path (Join-Path $validation.RuntimeDirectory 'src\persistence\modules\KernelObjects.psm1') -AllowMissingLeaf
+        if (-not [IO.File]::Exists($modulePath)) { continue }
+        try {
+            Import-Module -Name $modulePath -Force -ErrorAction Stop
+            return
+        } catch {
+            Throw-CcodBootstrapError 'CCOD_BOOTSTRAP_KERNEL_IMPORT_FAILED' 'The verified runtime kernel-object module could not be loaded' $modulePath
+        }
+    }
+
+    Throw-CcodBootstrapError 'CCOD_BOOTSTRAP_KERNEL_MISSING' 'No verified runtime contains the kernel-object module required for launch serialization' $InstallRoot
+}
+
 function New-CcodBootstrapReadyToken {
     $bytes = [byte[]]::new(32)
     $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -604,6 +631,7 @@ $exitCode = 1
 $root = $null
 $readyEvent = $null
 $child = $null
+$launchLease = $null
 $identity = $null
 $currentProcess = $null
 try {
@@ -617,6 +645,13 @@ try {
     if ([string]::IsNullOrWhiteSpace($token)) { $token = New-CcodBootstrapReadyToken }
     if ($token -cnotmatch '^[0-9a-f]{64}$') {
         Throw-CcodBootstrapError 'CCOD_BOOTSTRAP_INPUT_INVALID' 'ReadyToken must be 64 lowercase hex characters' $token
+    }
+
+    $initialPointer = Read-CcodBootstrapActivePointer -InstallRoot $root
+    Import-CcodBootstrapKernelObjects -InstallRoot $root -Pointer $initialPointer
+    $launchLease = Enter-CcodMutex -Kind 'AccountTransition' -UserSid $userSid -TimeoutMilliseconds ([int]($ReadyTimeoutSeconds * 1000))
+    if ($launchLease.Outcome -cne 'Acquired') {
+        Throw-CcodBootstrapError 'CCOD_BOOTSTRAP_LAUNCH_BUSY' 'An installation transition is in progress; bootstrap will retry through the scheduled task' $root
     }
 
     $readyEvent = New-CcodBootstrapReadyEvent -UserSid $userSid -SessionId $sessionId -Token $token
@@ -654,6 +689,10 @@ try {
                 Write-CcodBootstrapAtomicJson -Path (Join-Path $root 'active.json') -Value $updated
                 Write-CcodBootstrapLog -InstallRoot $root -Message ("Runtime {0} signaled ready; active pointer switched from {1}" -f $runtimeId, $pointer.ActiveRuntime)
             }
+            $released = Exit-CcodMutex -Lease $launchLease
+            if ($released -isnot [bool] -or -not $released) {
+                Throw-CcodBootstrapError 'CCOD_BOOTSTRAP_LAUNCH_RELEASE_FAILED' 'The launch serialization lease could not be released after Supervisor readiness' $root
+            }
             $exitCode = Wait-CcodBootstrapChild -Process $child
             $child = $null
             break
@@ -688,6 +727,9 @@ try {
     }
     if ($null -ne $readyEvent -and $null -ne $readyEvent.Handle) {
         try { $readyEvent.Handle.Dispose() } catch { }
+    }
+    if ($null -ne $launchLease -and $launchLease.Outcome -ceq 'Acquired' -and -not $launchLease.Released) {
+        try { Exit-CcodMutex -Lease $launchLease | Out-Null } catch { }
     }
     if ($null -ne $currentProcess) { $currentProcess.Dispose() }
     if ($null -ne $identity) { $identity.Dispose() }

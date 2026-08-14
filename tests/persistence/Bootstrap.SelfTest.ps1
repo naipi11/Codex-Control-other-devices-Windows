@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $bootstrapScript = Join-Path $repositoryRoot 'src\persistence\bootstrap.ps1'
 $runtimeManifestModule = Join-Path $repositoryRoot 'src\persistence\modules\RuntimeManifest.psm1'
+$kernelObjectsModule = Join-Path $repositoryRoot 'src\persistence\modules\KernelObjects.psm1'
 $powershellExecutable = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 if (-not (Test-Path -LiteralPath $bootstrapScript -PathType Leaf)) {
@@ -12,7 +13,11 @@ if (-not (Test-Path -LiteralPath $bootstrapScript -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $runtimeManifestModule -PathType Leaf)) {
     throw "Runtime manifest module is missing: $runtimeManifestModule"
 }
+if (-not (Test-Path -LiteralPath $kernelObjectsModule -PathType Leaf)) {
+    throw "Kernel object module is missing: $kernelObjectsModule"
+}
 Import-Module $runtimeManifestModule -Force
+Import-Module $kernelObjectsModule -Force
 
 function Assert-CcodExactEqual($Expected, $Actual, [string]$Message) {
     if (-not [object]::Equals($Expected, $Actual)) {
@@ -104,16 +109,22 @@ function Add-CcodTestRuntime {
     New-Item -ItemType Directory -Path $supervisorDirectory -Force | Out-Null
     $supervisorPath = Join-Path $supervisorDirectory 'Supervisor.ps1'
     [IO.File]::WriteAllText($supervisorPath, $SupervisorScript, [Text.UTF8Encoding]::new($false))
+    $kernelDirectory = Join-Path $runtimeDirectory 'src\persistence\modules'
+    New-Item -ItemType Directory -Path $kernelDirectory -Force | Out-Null
+    $kernelPath = Join-Path $kernelDirectory 'KernelObjects.psm1'
+    [IO.File]::Copy($kernelObjectsModule, $kernelPath, $true)
     if ([string]::IsNullOrWhiteSpace($RuntimeId)) {
-        $hash = Get-CcodTestFileSha256 -Path $supervisorPath
-        $length = [int64](Get-Item -LiteralPath $supervisorPath).Length
-        $files = @([pscustomobject]@{ path = 'src/persistence/Supervisor.ps1'; length = $length; sha256 = $hash })
+        $files = @(
+            [pscustomobject]@{ path = 'src/persistence/Supervisor.ps1'; length = [int64](Get-Item -LiteralPath $supervisorPath).Length; sha256 = Get-CcodTestFileSha256 -Path $supervisorPath },
+            [pscustomobject]@{ path = 'src/persistence/modules/KernelObjects.psm1'; length = [int64](Get-Item -LiteralPath $kernelPath).Length; sha256 = Get-CcodTestFileSha256 -Path $kernelPath }
+        )
         $RuntimeId = Get-CcodRuntimeId -ProjectVersion '0.0.0-bootstrap-test' -Files $files
         $targetDirectory = Join-Path $Root "runtime\$RuntimeId"
         if ($targetDirectory -cne $runtimeDirectory) {
             [IO.Directory]::Move($runtimeDirectory, $targetDirectory)
             $runtimeDirectory = $targetDirectory
             $supervisorPath = Join-Path $runtimeDirectory 'src\persistence\Supervisor.ps1'
+            $kernelPath = Join-Path $runtimeDirectory 'src\persistence\modules\KernelObjects.psm1'
         }
     }
     $manifest = [ordered]@{
@@ -121,11 +132,8 @@ function Add-CcodTestRuntime {
         projectVersion = '0.0.0-bootstrap-test'
         runtimeId = $RuntimeId
         files = @(
-            [ordered]@{
-                path = 'src/persistence/Supervisor.ps1'
-                length = [int64](Get-Item -LiteralPath $supervisorPath).Length
-                sha256 = Get-CcodTestFileSha256 -Path $supervisorPath
-            }
+            [ordered]@{ path = 'src/persistence/Supervisor.ps1'; length = [int64](Get-Item -LiteralPath $supervisorPath).Length; sha256 = Get-CcodTestFileSha256 -Path $supervisorPath },
+            [ordered]@{ path = 'src/persistence/modules/KernelObjects.psm1'; length = [int64](Get-Item -LiteralPath $kernelPath).Length; sha256 = Get-CcodTestFileSha256 -Path $kernelPath }
         )
     }
     [IO.File]::WriteAllText(
@@ -214,6 +222,26 @@ $results += Invoke-CcodTest 'keeps a ready active runtime and does not rewrite t
         $pointer = Read-CcodTestActivePointer -Root $root
         Assert-CcodExactEqual $activeId $pointer.activeRuntime 'active pointer is unchanged'
     } finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
+$results += Invoke-CcodTest 'does not launch a supervisor while the account transition lease is held' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ("ccod-bootstrap-" + [guid]::NewGuid().ToString('N'))
+    $lease = $null
+    try {
+        New-CcodBootstrapFixture -Root $root | Out-Null
+        $marker = Join-Path $root 'blocked.started'
+        $activeId = Add-CcodTestRuntime -Root $root -SupervisorScript (New-CcodTestSupervisorScript -Kind 'Ready' -MarkerPath $marker)
+        Set-CcodTestActivePointer -Root $root -ActiveRuntime $activeId -PreviousRuntime $null
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $lease = Enter-CcodMutex -Kind AccountTransition -UserSid $sid -TimeoutMilliseconds 1000
+        Assert-CcodExactEqual 'Acquired' $lease.Outcome 'test process owns the account transition lease'
+        $exitCode = Invoke-CcodBootstrapUnderTest -Root $root -ReadyToken (New-CcodBootstrapToken) -ReadyTimeoutSeconds 1
+        Assert-CcodTrue ($exitCode -ne 0) 'bootstrap reports a busy launch gate without starting a second supervisor'
+        Assert-CcodTrue (-not (Test-Path -LiteralPath $marker)) 'busy launch gate prevents the supervisor child from starting'
+    } finally {
+        if ($null -ne $lease -and $lease.Outcome -ceq 'Acquired') { Exit-CcodMutex -Lease $lease | Out-Null }
         if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
     }
 }
