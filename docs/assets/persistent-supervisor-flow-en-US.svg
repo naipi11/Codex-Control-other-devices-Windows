@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Control other devices persistence flow</title>
+  <desc id="desc">Install once, run the tray supervisor, survive Codex restarts or compatible updates, and keep Control other devices available.</desc>
+  <style>
+    .ui { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+    .eyebrow { fill: #8fc7ff; font-size: 14px; font-weight: 700; letter-spacing: 1.8px; }
+    .heading { fill: #f7f7f8; font-size: 38px; font-weight: 700; }
+    .subheading { fill: #aeb4bc; font-size: 18px; }
+    .step { fill: #aeb4bc; font-size: 13px; font-weight: 700; letter-spacing: 1px; }
+    .card-title { fill: #f7f7f8; font-size: 22px; font-weight: 650; text-anchor: middle; }
+    .card-copy { fill: #aeb4bc; font-size: 16px; text-anchor: middle; }
+    .success { fill: #8ff0bc; font-size: 15px; font-weight: 700; text-anchor: middle; }
+    .footer { fill: #aeb4bc; font-size: 15px; }
+  </style>
+
+  <rect width="1200" height="675" rx="32" fill="#111318"/>
+  <rect x="1" y="1" width="1198" height="673" rx="31" fill="none" stroke="#343a40" stroke-width="2"/>
+  <rect x="60" y="48" width="258" height="34" rx="17" fill="#152536" stroke="#264c70"/>
+  <text class="ui eyebrow" x="82" y="70">WINDOWS · CODEX DESKTOP</text>
+  <text class="ui heading" x="60" y="132">Install once. Keep the connection.</text>
+  <text class="ui subheading" x="60" y="169">The tray supervisor reapplies the verified integration after normal restarts and compatible updates.</text>
+
+  <path d="M315 358 H333" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M325 349 L334 358 L325 367" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M590 358 H608" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M600 349 L609 358 L600 367" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M865 358 H883" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M875 349 L884 358 L875 367" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g>
+    <rect x="60" y="210" width="255" height="300" rx="24" fill="#1a1d21" stroke="#343a40" stroke-width="2"/>
+    <circle cx="90" cy="242" r="16" fill="#20364b" stroke="#4ea1ff"/>
+    <text class="ui step" x="85" y="247">1</text>
+    <rect x="153" y="270" width="68" height="54" rx="9" fill="none" stroke="#4ea1ff" stroke-width="4"/>
+    <path d="M187 246 V291 M173 278 L187 292 L201 278" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M169 338 H205" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round"/>
+    <text class="ui card-title" x="187.5" y="399">Install once</text>
+    <text class="ui card-copy" x="187.5" y="433">One-click setup</text>
+  </g>
+
+  <g>
+    <rect x="335" y="210" width="255" height="300" rx="24" fill="#1a1d21" stroke="#343a40" stroke-width="2"/>
+    <circle cx="365" cy="242" r="16" fill="#20364b" stroke="#4ea1ff"/>
+    <text class="ui step" x="360" y="247">2</text>
+    <path d="M462 252 L511 270 V306 C511 333 491 352 462 363 C433 352 413 333 413 306 V270 Z" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M441 307 L455 321 L484 289" fill="none" stroke="#19c37d" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="ui card-title" x="462.5" y="399">Tray supervisor</text>
+    <text class="ui card-copy" x="462.5" y="433">Runs at sign-in</text>
+  </g>
+
+  <g>
+    <rect x="610" y="210" width="255" height="300" rx="24" fill="#1a1d21" stroke="#343a40" stroke-width="2"/>
+    <circle cx="640" cy="242" r="16" fill="#20364b" stroke="#4ea1ff"/>
+    <text class="ui step" x="635" y="247">3</text>
+    <path d="M753 267 A49 49 0 1 1 714 286" fill="none" stroke="#4ea1ff" stroke-width="5" stroke-linecap="round"/>
+    <path d="M704 266 L715 287 L737 277" fill="none" stroke="#4ea1ff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="737" cy="314" r="11" fill="#19c37d"/>
+    <text class="ui card-title" x="737.5" y="399">Codex restarts</text>
+    <text class="ui card-copy" x="737.5" y="433">or receives an update</text>
+  </g>
+
+  <g>
+    <rect x="885" y="210" width="255" height="300" rx="24" fill="#17251f" stroke="#19c37d" stroke-width="2"/>
+    <circle cx="915" cy="242" r="16" fill="#173d2a" stroke="#19c37d"/>
+    <text class="ui step" x="910" y="247">4</text>
+    <rect x="947" y="269" width="58" height="75" rx="8" fill="none" stroke="#19c37d" stroke-width="4"/>
+    <rect x="1030" y="281" width="46" height="65" rx="8" fill="none" stroke="#19c37d" stroke-width="4"/>
+    <path d="M1007 311 H1028" fill="none" stroke="#4ea1ff" stroke-width="4" stroke-linecap="round"/>
+    <path d="M1041 316 L1052 327 L1072 304" fill="none" stroke="#19c37d" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="ui card-title" x="1012.5" y="394">Control other devices</text>
+    <text class="ui card-copy" x="1012.5" y="429">stays available</text>
+    <text class="ui success" x="1012.5" y="474">ACTIVE</text>
+  </g>
+
+  <line x1="60" y1="562" x2="1140" y2="562" stroke="#2b3036" stroke-width="2"/>
+  <circle cx="70" cy="609" r="7" fill="#19c37d"/>
+  <text class="ui footer" x="88" y="614">No PowerShell setup</text>
+  <circle cx="333" cy="609" r="7" fill="#19c37d"/>
+  <text class="ui footer" x="351" y="614">No app.asar modification</text>
+  <circle cx="646" cy="609" r="7" fill="#19c37d"/>
+  <text class="ui footer" x="664" y="614">Automatic recovery after compatible Codex updates</text>
+</svg>

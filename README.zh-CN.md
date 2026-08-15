@@ -22,6 +22,10 @@
 2. 运行 `CodexControlOtherDevices-<version>-setup.exe`，无需管理员权限。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **Codex 设备连接 (Device Connection)**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
+![设置 → 连接 → 控制其他设备（中文）](docs/assets/control-other-devices-active-zh-CN.png)
+
+*示例界面；已移除账号、设备与环境信息。*
+
 当前安装包及其 SHA-256 校验值始终发布在
 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 页面。
 
@@ -31,6 +35,10 @@
 标签显示、控制器授权、设备列表、远程项目均可用。
 
 ## 日常使用
+
+![常驻托盘守护流程（中文）](docs/assets/persistent-supervisor-flow-zh-CN.svg)
+
+*示意图；为便于阅读已简化。*
 
 - 登录后计划任务 `Codex Control Other Devices Supervisor` 自动启动托盘守护程序，无需手动操作。
 - 若未看到托盘图标，可双击桌面上的 **Codex 设备连接 (Device Connection)** 启动托盘守护程序；它本身不会启动修复，也不会改变当前 Codex 会话。
@@ -66,6 +74,10 @@ External renderer 的 `pause` 标记会跳过集成。External renderer 状态�
 不会修改 Codex 或 External renderer 的安装文件。
 
 ## 托盘菜单
+
+![托盘菜单（中文）](docs/assets/tray-menu-zh-CN.png)
+
+*示例菜单；未展示系统托盘与其他应用。*
 
 原生 WinForms 菜单按语义状态显示或隐藏操作：立即应用、重试、自动化开关、兼容更新试用、日志、卸载。
 卸载必须先确认。
