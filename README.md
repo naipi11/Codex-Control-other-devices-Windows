@@ -24,6 +24,10 @@ manages everything automatically.
 2. Run `CodexControlOtherDevices-<version>-setup.exe`; no administrator rights are required.
 3. The tray supervisor starts automatically and creates the desktop shortcut **Codex 设备连接 (Device Connection)**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
+![Settings → Connections → Control other devices (English)](docs/assets/control-other-devices-active-en-US.png)
+
+*Example screen; account, device, and environment details have been removed.*
+
 The current installer and its SHA-256 checksum are always published on the
 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page.
 
@@ -36,6 +40,10 @@ Verified on Windows 11 · Codex Desktop `26.803.10989.0` · Node.js `22.23.1`:
 the tab, controller enrollment, device list, and remote projects are all working.
 
 ## Everyday use
+
+![Persistent tray supervisor flow (English)](docs/assets/persistent-supervisor-flow-en-US.svg)
+
+*Illustration; simplified for readability.*
 
 - The logon task `Codex Control Other Devices Supervisor` starts the tray supervisor automatically; no manual steps are needed.
 - The desktop shortcut **Codex 设备连接 (Device Connection)** is an optional way to start the tray supervisor if its icon is not visible. It does not start a repair or change a Codex session by itself.
@@ -73,6 +81,10 @@ integration does not promise Browser-ID or port reuse in these fallback cases.
 Neither Codex nor External renderer installation files are modified.
 
 ## Tray menu
+
+![Tray menu (English)](docs/assets/tray-menu-en-US.png)
+
+*Example menu; the system tray and other applications are not shown.*
 
 The native WinForms menu shows actions only when their semantic state allows them: Apply now, Retry,
 Automation, Candidate-compatible trial, Logs, and Uninstall. Uninstall always requires explicit confirmation.
