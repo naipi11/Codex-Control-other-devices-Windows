@@ -82,4 +82,3 @@ compatibility details.
    bootstrap targets, and CodexRemote-fix naming.
 5. Full validation, installer compilation, and local upgrade verify tray,
    shortcuts, compatibility state, and retained pairing.
-
