@@ -782,14 +782,14 @@ try {
         $adapters.WaitProcessExit={param($Expected,$StatusEvidence,$TimeoutMilliseconds)$state.Waits++;$events.Add('WaitExit');if($state.Alive){[pscustomobject]@{Outcome='StillRunning';Snapshot=$Expected}}else{[pscustomobject]@{Outcome='SourceExited';Snapshot=$null}}}.GetNewClosure()
         $adapters.StopProcess={param($Expected,$StatusEvidence,$TimeoutMilliseconds)$state.Stops++;$events.Add('StopStale');$state.Alive=$false;[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
         $adapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$state.Starts++;$events.Add('StartSpecial');[pscustomobject]@{Outcome='Started';Snapshot=(& $snapshotFactory -Pid 201 -Mode Unrelated -RendererPort $RendererPort -MainPort $MainPort);Process=[pscustomobject]@{Id=201}}}.GetNewClosure()
-        $activated=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $null -ExistingOnly $true) -Paths $paths -Adapters $adapters
+        $activated=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $null -ExistingOnly $false) -Paths $paths -Adapters $adapters
         Assert-CcodEqual 'Activated' $activated.outcome 'one exact old-package remote root is closed before launch'
         Assert-CcodEqual 'GracefulClose,WaitExit,StopStale,WaitExit,StartSpecial' (($events | Where-Object { $_ -in @('GracefulClose','WaitExit','StopStale','StartSpecial') }) -join ',') 'graceful close and exact-exit proof precede special launch'
         Assert-CcodEqual 1 $state.Stops 'force termination occurs only after the graceful wait did not exit'
 
         $other=$old|Select-Object *;$other.Pid=4597;$other.CreationTimeUtc='2030-02-03T04:00:01.0000000Z'
         $ambiguousEvents=[Collections.Generic.List[string]]::new();$ambiguousAdapters=New-CcodEngineAdapters -Probe $probe -Processes @($old,$other) -Events $ambiguousEvents
-        $ambiguous=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $true -TransactionId '8394cc7a-69dc-4da0-b229-6fcffb32ec50') -Paths $paths -Adapters $ambiguousAdapters
+        $ambiguous=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $false -TransactionId '8394cc7a-69dc-4da0-b229-6fcffb32ec50') -Paths $paths -Adapters $ambiguousAdapters
         Assert-CcodEqual 'CCOD_STALE_PACKAGE_AMBIGUOUS' $ambiguous.error.code 'multiple stale same-family roots block special launch'
         Assert-CcodTrue ($ambiguousEvents -cnotcontains 'StartSpecial') 'ambiguity never launches a second special root'
     }
@@ -900,7 +900,7 @@ try {
         $adapters.Delay={param($Milliseconds)$clock.Delayed+=$Milliseconds}.GetNewClosure()
         $adapters.ListProcesses={param($StatusEvidence)$clock.Polls++;if($clock.Polls -ge 4){@($ordinary)}else{@()}}.GetNewClosure()
         $adopted=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source) -Paths $paths -Adapters $adapters
-        Assert-CcodEqual 3000 $clock.Delayed 'ordinary appearing in the fourth poll is adopted after three fake seconds'
+        Assert-CcodEqual 2000 $clock.Delayed 'one pre-launch stale-root scan precedes recovery observation, then ordinary is adopted after two fake seconds'
         Assert-CcodEqual 0 $counters.OrdinaryStart 'adoption avoids an ordinary launch'
         Assert-CcodEqual 301 $adopted.recovery.pid 'adoption returns the exact ordinary snapshot'
 
