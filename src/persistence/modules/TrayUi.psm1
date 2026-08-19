@@ -6,7 +6,7 @@ $script:TrayWpfLoaded=$false
 
 $script:TrayAdapterNames=@(
     'GetUtcNow','GetQueueCount','TryEnqueue','TryDequeue','GetManagedThreadId','GetApartmentState',
-    'CreateUiObject','AddUiChild','SetUiProperty','GetUiProperty','SetUiVisible','PostUiCallback','StartUiTimer','StopUiTimer',
+    'CreateUiObject','AddUiChild','SetUiProperty','GetUiProperty','SetUiVisible','PostUiCallback','ShowNativeMenu','StartUiTimer','StopUiTimer',
     'AttachUiCallback','DetachUiCallback','DisposeUiObject','ExitUiContext','ShowErrorDialog','ConfirmUninstall',
     'CreateBitmap','DrawBridgeIcon','GetHicon','CloneIcon','CloneIconBitmap','CreateBoldFont','DestroyIcon','DisposeIconResource',
     'NewSourceIdentifier','RegisterTrace','RegisterIntrinsic','CleanupWatcherAttempt','DetachWatcherCallback','UnregisterWatcher',
@@ -451,6 +451,12 @@ function Get-CcodTrayDefaultAdapters {
         $action=[Action] {& $callbackRef}.GetNewClosure()
         [void]$dispatcher.BeginInvoke($action,[Windows.Threading.DispatcherPriority]::ContextIdle)
     }
+    $defaults.ShowNativeMenu={
+        param($Menu)
+        Initialize-CcodTrayWpf
+        if($Menu -isnot [Windows.Forms.ContextMenuStrip]){throw 'native fallback menu is invalid'}
+        $Menu.Show([Windows.Forms.Cursor]::Position)
+    }
     $defaults.StartUiTimer={param($Timer)$Timer.Start()}
     $defaults.StopUiTimer={param($Timer)$Timer.Stop()}
     $defaults.AttachUiCallback={
@@ -464,7 +470,6 @@ function Get-CcodTrayDefaultAdapters {
                 $Object.add_Click($handler)
             }
             'MouseUp' {$handler=[Windows.Forms.MouseEventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_MouseUp($handler)}
-            'Opening' {$handler=[ComponentModel.CancelEventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_Opening($handler)}
             'KeyDown' {$handler=[Windows.Input.KeyEventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_KeyDown($handler)}
             'Deactivated' {$handler=[EventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_Deactivated($handler)}
             'Closing' {$handler=[ComponentModel.CancelEventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_Closing($handler)}
@@ -478,7 +483,6 @@ function Get-CcodTrayDefaultAdapters {
             'Tick' {$Attachment.Target.remove_Tick($Attachment.Handler)}
             'Click' {$Attachment.Target.remove_Click($Attachment.Handler)}
             'MouseUp' {$Attachment.Target.remove_MouseUp($Attachment.Handler)}
-            'Opening' {$Attachment.Target.remove_Opening($Attachment.Handler)}
             'KeyDown' {$Attachment.Target.remove_KeyDown($Attachment.Handler)}
             'Deactivated' {$Attachment.Target.remove_Deactivated($Attachment.Handler)}
             'Closing' {$Attachment.Target.remove_Closing($Attachment.Handler)}
@@ -713,7 +717,7 @@ function Test-CcodContextObject {
     try{
         $names=@(
             'SchemaVersion','State','OwnerManagedThreadId','CommandQueue','CommandOverflowed','CallbackFailure','QueueGate','CloseGate','OnTick','Adapters',
-            'IsPopupOpen','PopupActivationPending','PendingRender','LastAppliedFingerprint','PopupTransitionInProgress','PopupFinalClose','PopupCloseIssued',
+            'IsPopupOpen','PopupShowScheduled','PopupShowGeneration','PendingRender','LastAppliedFingerprint','PopupTransitionInProgress','PopupFinalClose','PopupCloseIssued',
             'ApplicationContext','Timer','NotifyIcon','Menu','NativeFallback','NativeFallbackItem','Rows','Items','LanguageItems','Separators','UnownedControls','Icons','TitleImage','TitleFont','Callbacks','CommandValues','CleanupCodes','CloseReceipt'
         )
         if(-not (Test-CcodExactProperties $Context $names) -or $Context.PSObject.TypeNames -cnotcontains 'Ccod.TrayContext'){return $false}
@@ -721,7 +725,7 @@ function Test-CcodContextObject {
            @('Creating','Open','Closing','Closed') -cnotcontains $Context.State -or $Context.OwnerManagedThreadId -isnot [int] -or $Context.OwnerManagedThreadId -le 0 -or
            $null -eq $Context.CommandQueue -or $Context.CommandOverflowed -isnot [bool] -or $Context.CallbackFailure -isnot [bool] -or
             $null -eq $Context.QueueGate -or $Context.QueueGate.GetType() -ne [object] -or $null -eq $Context.CloseGate -or $Context.CloseGate.GetType() -ne [object] -or
-             $Context.IsPopupOpen -isnot [bool] -or $Context.PopupActivationPending -isnot [bool] -or $Context.PopupTransitionInProgress -isnot [bool] -or $Context.PopupFinalClose -isnot [bool] -or $Context.PopupCloseIssued -isnot [bool] -or
+             $Context.IsPopupOpen -isnot [bool] -or $Context.PopupShowScheduled -isnot [bool] -or $Context.PopupShowGeneration -isnot [long] -or $Context.PopupShowGeneration -lt 0 -or $Context.PopupTransitionInProgress -isnot [bool] -or $Context.PopupFinalClose -isnot [bool] -or $Context.PopupCloseIssued -isnot [bool] -or
             ($null -ne $Context.LastAppliedFingerprint -and ($Context.LastAppliedFingerprint -isnot [string] -or $Context.LastAppliedFingerprint -cnotmatch '^[0-9a-f]{64}$')) -or
             -not (Test-CcodTrayRenderState $Context.PendingRender) -or
             -not (Test-CcodAdapterSet $Context.Adapters) -or $Context.Rows -isnot [Collections.Specialized.OrderedDictionary] -or
@@ -737,7 +741,7 @@ function Test-CcodContextObject {
            (Test-CcodControlCharacter $Context.CommandValues.UninstallTitle) -or (Test-CcodControlCharacter $Context.CommandValues.UninstallMessage) -or
            -not (Test-CcodCleanupReceipt $Context.CloseReceipt 'Closed' $script:TrayCleanupCodeAllowlist)){return $false}
         if($Context.State -ceq 'Closed'){
-            if($null -ne $Context.OnTick -or $null -eq $Context.CloseReceipt -or $Context.IsPopupOpen -or $Context.PopupActivationPending -or $null -ne $Context.PendingRender -or
+            if($null -ne $Context.OnTick -or $null -eq $Context.CloseReceipt -or $Context.IsPopupOpen -or $Context.PopupShowScheduled -or $null -ne $Context.PendingRender -or
                -not $Context.PopupFinalClose -or -not $Context.PopupCloseIssued){return $false}
         }elseif($Context.State -ceq 'Closing'){
             if(($null -ne $Context.OnTick -and $Context.OnTick -isnot [scriptblock]) -or $null -eq $Context.CloseReceipt){return $false}
@@ -795,7 +799,7 @@ function Test-CcodContextGateHandle {
     try{
         $names=@(
             'SchemaVersion','State','OwnerManagedThreadId','CommandQueue','CommandOverflowed','CallbackFailure','QueueGate','CloseGate','OnTick','Adapters',
-            'IsPopupOpen','PopupActivationPending','PendingRender','LastAppliedFingerprint','PopupTransitionInProgress','PopupFinalClose','PopupCloseIssued',
+            'IsPopupOpen','PopupShowScheduled','PopupShowGeneration','PendingRender','LastAppliedFingerprint','PopupTransitionInProgress','PopupFinalClose','PopupCloseIssued',
             'ApplicationContext','Timer','NotifyIcon','Menu','NativeFallback','NativeFallbackItem','Rows','Items','LanguageItems','Separators','UnownedControls','Icons','TitleImage','TitleFont','Callbacks','CommandValues','CleanupCodes','CloseReceipt'
         )
         return (Test-CcodExactProperties $Context $names) -and $Context.PSObject.TypeNames -ccontains 'Ccod.TrayContext' -and
@@ -957,29 +961,50 @@ function Invoke-CcodTrayRenderWrite {
     $Context.LastAppliedFingerprint=$Render.Fingerprint
 }
 
+function Show-CcodTrayNativeFallback {
+    param($Context)
+    try{Invoke-CcodTrayAdapter $Context.Adapters.ShowNativeMenu @($Context.NativeFallback) 0 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'}
+    catch{if($Context.State -ceq 'Open'){$Context.CallbackFailure=$true}}
+}
+
+function Invoke-CcodDeferredTrayPopupShow {
+    param($Context,[long]$RequestGeneration)
+    [Threading.Monitor]::Enter($Context.QueueGate)
+    try{
+        if($Context.State -cne 'Open' -or -not $Context.PopupShowScheduled -or $Context.PopupShowGeneration -ne $RequestGeneration -or $Context.PopupFinalClose){return}
+        $Context.PopupShowScheduled=$false;$Context.PopupTransitionInProgress=$true
+        try{
+            Invoke-CcodTrayAdapter $Context.Adapters.SetUiVisible @($Context.Menu,$true) 0 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'
+            $Context.IsPopupOpen=$true
+        }catch{
+            if($Context.State -ceq 'Open'){$Context.CallbackFailure=$true}
+            Show-CcodTrayNativeFallback $Context
+        }finally{$Context.PopupTransitionInProgress=$false}
+    }finally{[Threading.Monitor]::Exit($Context.QueueGate)}
+}
+
 function Show-CcodTrayPopup {
     param($Context)
     [Threading.Monitor]::Enter($Context.QueueGate)
     try{
-        if($Context.State -cne 'Open' -or $Context.PopupFinalClose -or $Context.PopupTransitionInProgress){return}
+        if($Context.State -cne 'Open' -or $Context.PopupFinalClose -or $Context.PopupTransitionInProgress -or $Context.PopupShowScheduled){return}
         $current=Invoke-CcodTrayAdapter $Context.Adapters.GetManagedThreadId @() 1 'CCOD_TRAY_THREAD_INVALID' 'Tray'
         if($current -isnot [int] -or $current -ne $Context.OwnerManagedThreadId){return}
-        $Context.PopupTransitionInProgress=$true;$Context.PopupActivationPending=$true
-        try{
-            Invoke-CcodTrayAdapter $Context.Adapters.SetUiVisible @($Context.Menu,$true) 0 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'
-            $Context.IsPopupOpen=$true
-            $contextRef=$Context
-            $clearActivation={
-                [Threading.Monitor]::Enter($contextRef.QueueGate)
-                try{if($contextRef.State -ceq 'Open'){$contextRef.PopupActivationPending=$false}}
-                finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
-            }.GetNewClosure()
-            Invoke-CcodTrayAdapter $Context.Adapters.PostUiCallback @($Context.Menu,$clearActivation) 0 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'
-        }catch{
-            $Context.PopupActivationPending=$false
-            if($Context.State -ceq 'Open'){$Context.CallbackFailure=$true}
+        if($Context.PopupShowGeneration -eq [long]::MaxValue){
+            $Context.CallbackFailure=$true
+            Show-CcodTrayNativeFallback $Context
+            return
         }
-        finally{$Context.PopupTransitionInProgress=$false}
+        $Context.PopupShowScheduled=$true
+        $Context.PopupShowGeneration=[long]($Context.PopupShowGeneration+1)
+        $contextRef=$Context;$requestGeneration=$Context.PopupShowGeneration;$invokeDeferredShowRef=${function:Invoke-CcodDeferredTrayPopupShow}
+        $deferredShow={& $invokeDeferredShowRef $contextRef $requestGeneration}.GetNewClosure()
+        try{Invoke-CcodTrayAdapter $Context.Adapters.PostUiCallback @($Context.Menu,$deferredShow) 0 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'}
+        catch{
+            $Context.PopupShowScheduled=$false
+            if($Context.State -ceq 'Open'){$Context.CallbackFailure=$true}
+            Show-CcodTrayNativeFallback $Context
+        }
     }finally{[Threading.Monitor]::Exit($Context.QueueGate)}
 }
 
@@ -987,8 +1012,10 @@ function Hide-CcodTrayPopup {
     param($Context)
     [Threading.Monitor]::Enter($Context.QueueGate)
     try{
-        if($Context.State -cne 'Open' -or -not $Context.IsPopupOpen -or $Context.PopupFinalClose -or $Context.PopupTransitionInProgress){return}
-        $Context.PopupTransitionInProgress=$true;$Context.PopupActivationPending=$false
+        if($Context.State -cne 'Open' -or $Context.PopupFinalClose -or $Context.PopupTransitionInProgress){return}
+        if($Context.PopupShowScheduled){$Context.PopupShowScheduled=$false;return}
+        if(-not $Context.IsPopupOpen){return}
+        $Context.PopupTransitionInProgress=$true
         $Context.IsPopupOpen=$false
         try{
             Invoke-CcodTrayAdapter $Context.Adapters.SetUiVisible @($Context.Menu,$false) 0 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'
@@ -996,16 +1023,6 @@ function Hide-CcodTrayPopup {
             if($null -ne $pending -and $pending.Fingerprint -cne $Context.LastAppliedFingerprint){Invoke-CcodTrayRenderWrite $Context $pending 'CCOD_TRAY_PRESENTATION_FAILED'}
         }catch{if($Context.State -ceq 'Open'){$Context.CallbackFailure=$true}}
         finally{$Context.PopupTransitionInProgress=$false}
-    }finally{[Threading.Monitor]::Exit($Context.QueueGate)}
-}
-
-function Consume-CcodTrayPopupActivationDeactivation {
-    param($Context)
-    [Threading.Monitor]::Enter($Context.QueueGate)
-    try{
-        if($Context.State -cne 'Open' -or -not $Context.PopupActivationPending){return $false}
-        $Context.PopupActivationPending=$false
-        return $true
     }finally{[Threading.Monitor]::Exit($Context.QueueGate)}
 }
 
@@ -1030,7 +1047,7 @@ function New-CcodTrayContext {
     $context=[pscustomobject][ordered]@{
         SchemaVersion=1;State='Creating';OwnerManagedThreadId=$threadId;CommandQueue=$CommandQueue
         CommandOverflowed=$false;CallbackFailure=$false;QueueGate=New-Object object;CloseGate=New-Object object;OnTick=$OnTick;Adapters=$adapter
-        IsPopupOpen=$false;PopupActivationPending=$false;PendingRender=$null;LastAppliedFingerprint=$null;PopupTransitionInProgress=$false;PopupFinalClose=$false;PopupCloseIssued=$false
+        IsPopupOpen=$false;PopupShowScheduled=$false;PopupShowGeneration=[long]0;PendingRender=$null;LastAppliedFingerprint=$null;PopupTransitionInProgress=$false;PopupFinalClose=$false;PopupCloseIssued=$false
         ApplicationContext=$null;Timer=$null;NotifyIcon=$null;Menu=$null;NativeFallback=$null;NativeFallbackItem=$null;Rows=[ordered]@{};Items=[ordered]@{};LanguageItems=[ordered]@{};Separators=[ordered]@{}
         UnownedControls=[Collections.Generic.List[object]]::new();Icons=[ordered]@{};TitleImage=$null;TitleFont=$null
         Callbacks=[Collections.Generic.List[object]]::new();CommandValues=[ordered]@{
@@ -1160,16 +1177,6 @@ function New-CcodTrayContext {
         $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.NativeFallbackItem,'Click',$nativeFallbackClick) $adapter.DetachUiCallback $validClickAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.Callbacks.Add($attachment)
 
-        $opening={
-            param($sender,$eventArgs)
-            if($contextRef.IsPopupOpen -or $contextRef.PopupTransitionInProgress){
-                if($null -ne $eventArgs -and $eventArgs.PSObject.Properties['Cancel']){$eventArgs.Cancel=$true}
-            }
-        }.GetNewClosure()
-        $validOpeningAttachment={param($value)[bool]((Test-CcodExactProperties $value @('Target','EventName','Handler')) -and $null -ne $value.Target -and $value.EventName -ceq 'Opening' -and $null -ne $value.Handler)}
-        $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.NativeFallback,'Opening',$opening) $adapter.DetachUiCallback $validOpeningAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        $context.Callbacks.Add($attachment)
-
         $contextRef=$context;$hidePopupRef=${function:Hide-CcodTrayPopup}
         $keyDown={
             param($sender,$eventArgs)
@@ -1182,8 +1189,7 @@ function New-CcodTrayContext {
         $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.Menu,'KeyDown',$keyDown) $adapter.DetachUiCallback $validKeyAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.Callbacks.Add($attachment)
 
-        $consumeActivationRef=${function:Consume-CcodTrayPopupActivationDeactivation}
-        $deactivated={param($sender,$eventArgs)if(-not (& $consumeActivationRef $contextRef)){& $hidePopupRef $contextRef}}.GetNewClosure()
+        $deactivated={param($sender,$eventArgs)& $hidePopupRef $contextRef}.GetNewClosure()
         $validDeactivatedAttachment={param($value)[bool]((Test-CcodExactProperties $value @('Target','EventName','Handler')) -and $null -ne $value.Target -and $value.EventName -ceq 'Deactivated' -and $null -ne $value.Handler)}
         $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.Menu,'Deactivated',$deactivated) $adapter.DetachUiCallback $validDeactivatedAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.Callbacks.Add($attachment)
@@ -1215,7 +1221,7 @@ function New-CcodTrayContext {
         $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.Timer,'Tick',$tick) $adapter.DetachUiCallback $validTickAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.Callbacks.Add($attachment)
         Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.Timer,'Interval',[int]250) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.NotifyIcon,'ContextMenuStrip',$context.NativeFallback) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
+        Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.NotifyIcon,'ContextMenuStrip',$null) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.NotifyIcon,'Icon',$context.Icons['Gray:16']) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         Invoke-CcodTrayAdapter $adapter.StartUiTimer @($context.Timer) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         Invoke-CcodTrayAdapter $adapter.SetUiVisible @($context.NotifyIcon,$true) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
@@ -1246,7 +1252,7 @@ function Close-CcodTrayContext {
     try{[Threading.Monitor]::Enter($queueGate)}catch{Throw-CcodTrayError 'CCOD_TRAY_INPUT_INVALID' 'Tray'}
     try{
         $Context.State='Closing'
-        $Context.PopupFinalClose=$true;$Context.PopupTransitionInProgress=$true;$Context.IsPopupOpen=$false;$Context.PopupActivationPending=$false;$Context.PendingRender=$null
+        $Context.PopupFinalClose=$true;$Context.PopupTransitionInProgress=$true;$Context.IsPopupOpen=$false;$Context.PopupShowScheduled=$false;$Context.PendingRender=$null
         $Context.CloseReceipt=[pscustomobject][ordered]@{SchemaVersion=1;Closed=$true;CleanupCodes=@()}
     }finally{[Threading.Monitor]::Exit($queueGate)}
     $codes=[Collections.Generic.List[string]]::new();$Context.CleanupCodes=$codes;$adapter=$Context.Adapters
@@ -1294,7 +1300,7 @@ function Close-CcodTrayContext {
         Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.ExitUiContext @($Context.ApplicationContext) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED'
         Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DisposeUiObject @($Context.ApplicationContext) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
     }
-    $Context.OnTick=$null;$Context.Callbacks.Clear();$Context.PopupTransitionInProgress=$false;$Context.PopupActivationPending=$false;$Context.State='Closed'
+    $Context.OnTick=$null;$Context.Callbacks.Clear();$Context.PopupTransitionInProgress=$false;$Context.PopupShowScheduled=$false;$Context.State='Closed'
     $safeCodes=@($codes|Where-Object {$script:TrayCleanupCodeAllowlist -ccontains $_}|Select-Object -Unique)
     $Context.CloseReceipt=[pscustomobject][ordered]@{SchemaVersion=1;Closed=$true;CleanupCodes=$safeCodes}
     return $Context.CloseReceipt
