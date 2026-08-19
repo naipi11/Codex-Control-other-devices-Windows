@@ -1191,6 +1191,8 @@ $results += Invoke-CcodTest 'setup uninstall Start menu and desktop use one inst
     Assert-CcodTrue ($lines -ccontains 'SetupIconFile=..\assets\codexremote-fix\codexremote-fix.ico') 'setup uses the source product icon'
     Assert-CcodTrue ($lines -ccontains "UninstallDisplayIcon=$installedIcon") 'uninstall registration uses the installed product icon'
     Assert-CcodTrue ($lines -ccontains 'Source: "..\assets\codexremote-fix\codexremote-fix.ico"; DestDir: "{app}\assets"; DestName: "CodexRemote-fix.ico"; Flags: ignoreversion') 'installer carries the source icon to the common installed icon path'
+    Assert-CcodTrue ($lines -ccontains 'Source: "..\assets\codexremote-fix\codexremote-fix.ico"; DestDir: "{app}\assets\codexremote-fix"; Flags: ignoreversion') 'installer preserves the hermetic source icon path for installed validation'
+    Assert-CcodTrue ($lines -ccontains 'Source: "..\.github\workflows\release.yml"; DestDir: "{app}\.github\workflows"; Flags: ignoreversion') 'installer carries the release workflow required by installed validation'
 
     $shortcutEntries = @($lines | Where-Object { $_ -cmatch '^Name: "\{(group|userdesktop)\}\\' })
     Assert-CcodTrue ($shortcutEntries.Count -ge 3) 'installer exposes Start menu and desktop shortcuts'
