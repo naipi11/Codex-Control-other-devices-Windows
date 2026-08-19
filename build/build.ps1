@@ -50,13 +50,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
 }
 
-$exe = Join-Path $dist "CodexControlOtherDevices-$Version-setup.exe"
+$exe = Join-Path $dist "CodexRemote-fix-$Version-setup.exe"
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw "Inno Setup completed but the installer was not produced: $exe"
 }
 
 $hash = Get-CcodBuildFileSha256 -Path $exe
-$sha256File = Join-Path $dist ("CodexControlOtherDevices-$Version-setup.exe.sha256.txt")
+$sha256File = Join-Path $dist ("CodexRemote-fix-$Version-setup.exe.sha256.txt")
 Set-Content -LiteralPath $sha256File -Value ("{0} *{1}" -f $hash, [IO.Path]::GetFileName($exe)) -Encoding ascii
 
 Write-Host ''

@@ -1,8 +1,8 @@
-# Technical design
+# CodexRemote-fix technical design
 
 ## Scope
 
-The project enables the Windows desktop-to-desktop controller path only when the
+CodexRemote-fix enables the Windows desktop-to-desktop controller path only when the
 installed Codex package matches the text sentinels observed in the tested code
 family. This is a heuristic guard and does not prove equivalent control flow in
 a future build. The project does not change account entitlements, workspace

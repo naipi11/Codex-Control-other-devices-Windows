@@ -1069,17 +1069,163 @@ $results += Invoke-CcodTest 'fallback rejects two verified supervisor children a
     }
 }
 
-$results += Invoke-CcodTest 'installer exposes a desktop entry that only starts the stable tray bootstrap' {
+$results += Invoke-CcodTest 'installer exposes a CodexRemote-fix desktop entry that only starts the stable tray bootstrap' {
     $installerScript = Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss'
     $entries = @(Get-Content -LiteralPath $installerScript | Where-Object { $_ -cmatch '^Name: "\{userdesktop\}\\' })
     Assert-CcodEqual 1 $entries.Count 'installer defines exactly one desktop entry'
     $entry = [string]$entries[0]
-    Assert-CcodTrue ($entry -cmatch 'Name: "\{userdesktop\}\\Codex 设备连接 \(Device Connection\)"') 'desktop entry has the bilingual product name'
+    Assert-CcodTrue ($entry -cmatch 'Name: "\{userdesktop\}\\CodexRemote-fix"') 'desktop entry has the public product name'
     Assert-CcodTrue ($entry -cmatch 'Filename: "\{sys\}\\WindowsPowerShell\\v1\.0\\powershell\.exe"') 'desktop entry uses the Windows PowerShell host'
     Assert-CcodTrue ($entry -cmatch '-WindowStyle Hidden') 'desktop entry hides the bootstrap host window'
     Assert-CcodTrue ($entry -cmatch '\{localappdata\}\\CodexControlOtherDevices\\bootstrap\.ps1') 'desktop entry targets the stable bootstrap'
     Assert-CcodTrue ($entry -cmatch '-InstallRoot ""\{localappdata\}\\CodexControlOtherDevices""') 'desktop entry supplies the stable install root'
+    Assert-CcodTrue ($entry -cmatch 'IconFilename: "\{app\}\\assets\\CodexRemote-fix\.ico"') 'desktop entry uses the public product icon'
     Assert-CcodTrue ($entry -cnotmatch 'Start-CodexControlOtherDevices\.ps1') 'desktop entry never invokes a direct repair session'
+}
+
+$results += Invoke-CcodTest 'installer exposes CodexRemote-fix as the searchable primary bootstrap entry' {
+    $installerScript = Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss'
+    $content = Get-Content -LiteralPath $installerScript -Raw
+    $lines = @(Get-Content -LiteralPath $installerScript)
+
+    Assert-CcodTrue ($lines -ccontains 'AppId={{2B9E9F2E-7A32-4A7E-9C1D-9F5B5C6D7E8F}') 'installer retains the v2.1.6 AppId for in-place upgrades'
+    Assert-CcodTrue ($lines -ccontains 'AppName=CodexRemote-fix') 'installed app has the public CodexRemote-fix name'
+    Assert-CcodTrue ($lines -ccontains 'AppVerName=CodexRemote-fix {#ProjectVersion}') 'installed app version has the public CodexRemote-fix name'
+    Assert-CcodTrue ($lines -ccontains 'DefaultGroupName=CodexRemote-fix') 'current-user Start menu group has the public CodexRemote-fix name'
+    Assert-CcodTrue ($lines -ccontains 'SetupIconFile=..\assets\codexremote-fix\codexremote-fix.ico') 'setup uses the CodexRemote-fix icon'
+    Assert-CcodTrue ($lines -ccontains 'UninstallDisplayIcon={app}\assets\CodexRemote-fix.ico') 'Apps and Features uses the installed CodexRemote-fix icon'
+    Assert-CcodTrue ($lines -ccontains 'OutputBaseFilename=CodexRemote-fix-{#ProjectVersion}-setup') 'build output uses the public release name'
+    Assert-CcodTrue ($content -cmatch "RegKeyExists\(HKCU64, 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\\{\{2B9E9F2E-7A32-4A7E-9C1D-9F5B5C6D7E8F\}_is1'\)") 'upgrade detection reads the v2.1.6 Inno uninstall key'
+
+    $primaryEntries = @($content -split "`r?`n" | Where-Object { $_ -cmatch '^Name: "\{(group|userdesktop)\}\\CodexRemote-fix";' })
+    Assert-CcodEqual 2 $primaryEntries.Count 'Start menu and desktop each expose one primary CodexRemote-fix entry'
+    foreach ($entry in $primaryEntries) {
+        Assert-CcodTrue ($entry -cmatch 'Filename: "\{sys\}\\WindowsPowerShell\\v1\.0\\powershell\.exe"') 'primary entry uses the PowerShell host'
+        Assert-CcodTrue ($entry -cmatch '\{localappdata\}\\CodexControlOtherDevices\\bootstrap\.ps1') 'primary entry invokes the verified stable bootstrap'
+        Assert-CcodTrue ($entry -cmatch '-InstallRoot ""\{localappdata\}\\CodexControlOtherDevices""') 'primary entry supplies the stable legacy install root'
+        Assert-CcodTrue ($entry -cmatch 'IconFilename: "\{app\}\\assets\\CodexRemote-fix\.ico"') 'primary entry uses the public product icon'
+        Assert-CcodTrue ($entry -cnotmatch 'README\.md') 'primary entry never opens documentation'
+    }
+
+    $buildScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'build\build.ps1') -Raw
+    Assert-CcodTrue ($buildScript -cmatch 'CodexRemote-fix-\$Version-setup\.exe') 'build script locates the public setup filename'
+    Assert-CcodTrue ($buildScript -cmatch 'CodexRemote-fix-\$Version-setup\.exe\.sha256\.txt') 'build script writes a hash beside the public setup filename'
+}
+
+$results += Invoke-CcodTest 'installer publishes the exact CodexRemote-fix 2.2.0 release artifacts' {
+    $package = Get-Content -LiteralPath (Join-Path $repositoryRoot 'package.json') -Raw | ConvertFrom-Json
+    Assert-CcodEqual '2.2.0' ([string]$package.version) 'package version is exactly 2.2.0'
+
+    $installerScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss') -Raw
+    $outputBase = [regex]::Match($installerScript, '(?m)^OutputBaseFilename=(.+)$').Groups[1].Value.Trim()
+    $setupName = ($outputBase -replace '\{#ProjectVersion\}', [string]$package.version) + '.exe'
+    Assert-CcodEqual 'CodexRemote-fix-2.2.0-setup.exe' $setupName 'Inno output resolves to the exact public setup filename'
+
+    $buildScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'build\build.ps1') -Raw
+    $checksumTemplate = [regex]::Match($buildScript, 'Join-Path \$dist \("([^"]+\.sha256\.txt)"\)').Groups[1].Value
+    $checksumName = $checksumTemplate.Replace('$Version', [string]$package.version)
+    Assert-CcodEqual 'CodexRemote-fix-2.2.0-setup.exe.sha256.txt' $checksumName 'build script resolves to the exact public checksum filename'
+}
+
+$results += Invoke-CcodTest 'CodexRemote-fix icon is a bounded multi-resolution PNG ICO' {
+    $iconPath = Join-Path $repositoryRoot 'assets\codexremote-fix\codexremote-fix.ico'
+    Assert-CcodTrue (Test-Path -LiteralPath $iconPath -PathType Leaf) 'public product ICO exists'
+    $bytes = [IO.File]::ReadAllBytes($iconPath)
+    Assert-CcodTrue ($bytes.Length -ge 22) 'ICO contains a header, directory, and image bytes'
+    Assert-CcodEqual 0 ([BitConverter]::ToUInt16($bytes, 0)) 'ICO reserved header is zero'
+    Assert-CcodEqual 1 ([BitConverter]::ToUInt16($bytes, 2)) 'ICO header identifies an icon'
+
+    $imageCount = [int][BitConverter]::ToUInt16($bytes, 4)
+    Assert-CcodTrue ($imageCount -ge 1 -and $imageCount -le 256) 'ICO directory count is nonzero and bounded'
+    $directoryEnd = 6 + (16 * $imageCount)
+    Assert-CcodTrue ($directoryEnd -le $bytes.Length) 'ICO directory fits inside the file'
+
+    $sizes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $ranges = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $imageCount; $index++) {
+        $entry = 6 + (16 * $index)
+        $width = if ($bytes[$entry] -eq 0) { 256 } else { [int]$bytes[$entry] }
+        $height = if ($bytes[$entry + 1] -eq 0) { 256 } else { [int]$bytes[$entry + 1] }
+        $imageBytes = [uint64][BitConverter]::ToUInt32($bytes, $entry + 8)
+        $imageOffset = [uint64][BitConverter]::ToUInt32($bytes, $entry + 12)
+        $imageEnd = $imageOffset + $imageBytes
+
+        Assert-CcodEqual 0 ([int]$bytes[$entry + 3]) "ICO entry $index reserved byte is zero"
+        Assert-CcodEqual 1 ([int][BitConverter]::ToUInt16($bytes, $entry + 4)) "ICO entry $index has one image plane"
+        Assert-CcodEqual 32 ([int][BitConverter]::ToUInt16($bytes, $entry + 6)) "ICO entry $index is 32-bit"
+        Assert-CcodTrue ($width -ge 1 -and $width -le 256 -and $height -ge 1 -and $height -le 256) "ICO entry $index dimensions are in range"
+        Assert-CcodTrue ($imageBytes -gt 24) "ICO entry $index has a usable image payload"
+        Assert-CcodTrue ($imageOffset -ge $directoryEnd -and $imageEnd -le $bytes.Length) "ICO entry $index image range is inside the file"
+
+        $pngSignature = @(137, 80, 78, 71, 13, 10, 26, 10)
+        $isPng = $true
+        for ($signatureIndex = 0; $signatureIndex -lt $pngSignature.Count; $signatureIndex++) {
+            if ($bytes[[int]$imageOffset + $signatureIndex] -ne $pngSignature[$signatureIndex]) {
+                $isPng = $false
+                break
+            }
+        }
+        Assert-CcodTrue $isPng "ICO entry $index is a PNG image"
+
+        $pngWidth = ([uint32]$bytes[[int]$imageOffset + 16] * 16777216) + ([uint32]$bytes[[int]$imageOffset + 17] * 65536) + ([uint32]$bytes[[int]$imageOffset + 18] * 256) + [uint32]$bytes[[int]$imageOffset + 19]
+        $pngHeight = ([uint32]$bytes[[int]$imageOffset + 20] * 16777216) + ([uint32]$bytes[[int]$imageOffset + 21] * 65536) + ([uint32]$bytes[[int]$imageOffset + 22] * 256) + [uint32]$bytes[[int]$imageOffset + 23]
+        Assert-CcodEqual $width ([int]$pngWidth) "ICO entry $index directory width matches PNG IHDR"
+        Assert-CcodEqual $height ([int]$pngHeight) "ICO entry $index directory height matches PNG IHDR"
+        $null = $sizes.Add("${width}x${height}")
+        $ranges.Add([pscustomobject]@{ Start = $imageOffset; End = $imageEnd })
+    }
+
+    $orderedRanges = @($ranges | Sort-Object Start, End)
+    for ($index = 1; $index -lt $orderedRanges.Count; $index++) {
+        Assert-CcodTrue ($orderedRanges[$index - 1].End -le $orderedRanges[$index].Start) "ICO image range $index does not overlap its predecessor"
+    }
+    foreach ($requiredSize in @('16x16', '32x32', '48x48', '256x256')) {
+        Assert-CcodTrue ($sizes.Contains($requiredSize)) "ICO contains required $requiredSize image"
+    }
+}
+
+$results += Invoke-CcodTest 'setup uninstall Start menu and desktop use one installed CodexRemote-fix icon' {
+    $installerScript = Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss'
+    $lines = @(Get-Content -LiteralPath $installerScript)
+    $installedIcon = '{app}\assets\CodexRemote-fix.ico'
+    Assert-CcodTrue ($lines -ccontains 'SetupIconFile=..\assets\codexremote-fix\codexremote-fix.ico') 'setup uses the source product icon'
+    Assert-CcodTrue ($lines -ccontains "UninstallDisplayIcon=$installedIcon") 'uninstall registration uses the installed product icon'
+    Assert-CcodTrue ($lines -ccontains 'Source: "..\assets\codexremote-fix\codexremote-fix.ico"; DestDir: "{app}\assets"; DestName: "CodexRemote-fix.ico"; Flags: ignoreversion') 'installer carries the source icon to the common installed icon path'
+
+    $shortcutEntries = @($lines | Where-Object { $_ -cmatch '^Name: "\{(group|userdesktop)\}\\' })
+    Assert-CcodTrue ($shortcutEntries.Count -ge 3) 'installer exposes Start menu and desktop shortcuts'
+    foreach ($entry in $shortcutEntries) {
+        Assert-CcodTrue ($entry -cmatch ('IconFilename: "' + [regex]::Escape($installedIcon) + '"')) 'every Start menu and desktop shortcut uses the common installed icon'
+    }
+}
+
+$results += Invoke-CcodTest 'README and release workflow publish current installer-first branding' {
+    $readme = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.md') -Raw -Encoding UTF8
+    $readmeChinese = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.zh-CN.md') -Raw -Encoding UTF8
+    Assert-CcodTrue ($readme -cmatch '\A# CodexRemote-fix\r?\n') 'default README uses the public English product heading'
+    Assert-CcodTrue ($readmeChinese -cmatch '\A# CodexRemote-fix\r?\n') 'Chinese README uses the public product heading'
+
+    $quickStart = [regex]::Match($readme, '(?ms)^## Quick start[^\r\n]*\r?\n(.*?)(?=^## )').Groups[1].Value
+    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.2\.0-setup\.exe') 'English Quick Start names the exact setup artifact'
+    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.2\.0-setup\.exe\.sha256\.txt') 'English Quick Start names the exact checksum artifact'
+    Assert-CcodTrue ($quickStart -cnotmatch '(?i)powershell|Install-CodexControlOtherDevices') 'English Quick Start does not teach PowerShell installation'
+    Assert-CcodTrue ($quickStart -cmatch '\*\*CodexRemote-fix\*\*') 'English Quick Start names the public desktop shortcut'
+
+    $chineseSections = [regex]::Matches($readmeChinese, '(?ms)^## [^\r\n]+\r?\n(.*?)(?=^## |\z)')
+    Assert-CcodTrue ($chineseSections.Count -ge 1) 'Chinese README exposes a first Quick Start section'
+    $quickStartChinese = $chineseSections[0].Groups[1].Value
+    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.2\.0-setup\.exe') 'Chinese Quick Start names the exact setup artifact'
+    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.2\.0-setup\.exe\.sha256\.txt') 'Chinese Quick Start names the exact checksum artifact'
+    Assert-CcodTrue ($quickStartChinese -cnotmatch '(?i)powershell|Install-CodexControlOtherDevices') 'Chinese Quick Start does not teach PowerShell installation'
+    Assert-CcodTrue ($quickStartChinese -cmatch '\*\*CodexRemote-fix\*\*') 'Chinese Quick Start names the public desktop shortcut'
+
+    Assert-CcodTrue ($readme -cmatch 'uninstall \*\*CodexRemote-fix\*\* from') 'English uninstall instructions use the public product name'
+    Assert-CcodTrue ($readmeChinese -cmatch '(?s)Windows .{0,100}\*\*CodexRemote-fix\*\*') 'Chinese uninstall instructions use the public product name'
+
+    $workflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\release.yml') -Raw
+    Assert-CcodTrue ($workflow -cmatch '(?m)^name: CodexRemote-fix release$') 'release workflow uses public product branding'
+    Assert-CcodTrue ($workflow -cmatch '(?m)^\s+name: CodexRemote-fix installer$') 'uploaded artifact uses public product branding'
+    Assert-CcodTrue ($workflow -cmatch '--title "CodexRemote-fix \$version"') 'GitHub release title uses public product branding'
 }
 
 $results += Invoke-CcodTest 'installer carries the Inno contract needed by its self-validation' {

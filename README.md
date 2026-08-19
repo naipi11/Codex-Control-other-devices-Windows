@@ -1,8 +1,8 @@
-# Codex Control other devices for Windows
+# CodexRemote-fix
 
 Language / 语言: English · [简体中文](README.zh-CN.md)
 
-Enables the UI that ships with Codex Desktop for Windows but is hidden by a runtime defect:
+CodexRemote-fix enables the UI that ships with Codex Desktop for Windows but is hidden by a runtime defect:
 
 **Settings → Connections → Control other devices**
 
@@ -20,9 +20,9 @@ manages everything automatically.
 
 ## Quick start
 
-1. Download the latest installer from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page and verify its SHA-256.
-2. Run `CodexControlOtherDevices-<version>-setup.exe`; no administrator rights are required.
-3. The tray supervisor starts automatically and creates the desktop shortcut **Codex 设备连接 (Device Connection)**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
+1. Download `CodexRemote-fix-2.2.0-setup.exe` and `CodexRemote-fix-2.2.0-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page, then verify the SHA-256.
+2. Run `CodexRemote-fix-2.2.0-setup.exe`; no administrator rights are required.
+3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
 ![Settings → Connections → Control other devices (English)](docs/assets/control-other-devices-active-en-US.png)
 
@@ -46,7 +46,7 @@ the tab, controller enrollment, device list, and remote projects are all working
 *Illustration; simplified for readability.*
 
 - The logon task `Codex Control Other Devices Supervisor` starts the tray supervisor automatically; no manual steps are needed.
-- The desktop shortcut **Codex 设备连接 (Device Connection)** is an optional way to start the tray supervisor if its icon is not visible. It does not start a repair or change a Codex session by itself.
+- The desktop shortcut **CodexRemote-fix** is an optional way to start the tray supervisor if its icon is not visible. It does not start a repair or change a Codex session by itself.
 - A green tray icon means the current session is active. Open **Settings → Connections → Control other devices** to enroll or use it.
 - New Codex builds start with `--remote-debugging-port` but no `--inspect`; the supervisor recognizes that launch shape and performs the takeover automatically.
 - The tray menu supports Follow system, Chinese, and English; switching applies immediately without restarting anything.
@@ -57,10 +57,11 @@ the tab, controller enrollment, device list, and remote projects are all working
 
 Every tagged release ships a Windows installer and its SHA-256 checksum as release assets.
 The `.github/workflows/release.yml` workflow builds the installer from the tag automatically,
-so future releases always include a ready-to-run `CodexControlOtherDevices-<version>-setup.exe`.
+so the 2.2.0 release includes the ready-to-run `CodexRemote-fix-2.2.0-setup.exe`
+and `CodexRemote-fix-2.2.0-setup.exe.sha256.txt`.
 
 After a Codex Desktop update, check the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
-page for a newer installer, or run the **Compatibility check** shortcut from the Start menu
+page for a newer installer, or run the **CodexRemote-fix compatibility check** shortcut from the Start menu
 to confirm the current supervisor still matches.
 
 ## External renderer shared CDP
@@ -72,8 +73,8 @@ can therefore be shared with External renderer; the temporary Electron main-proc
 Inspector remains separate and is closed after bridge installation.
 
 If that preferred port is paused, unavailable, excluded because it is already
-the main Inspector port, or occupied by a non-Codex listener, Codex Control
-Other Devices selects a different dynamic loopback renderer port. An External renderer
+the main Inspector port, or occupied by a non-Codex listener, CodexRemote-fix
+selects a different dynamic loopback renderer port. An External renderer
 `pause` marker skips integration. Missing or invalid External renderer state, and a
 failed handoff, are handled safely without blocking the Codex session. The
 integration does not promise Browser-ID or port reuse in these fallback cases.
@@ -102,7 +103,7 @@ Automation, Candidate-compatible trial, Logs, and Uninstall. Uninstall always re
 Still no **Control other devices** tab?
 
 1. Confirm the tray icon is green (gray means waiting for Codex or automation is paused).
-2. Run the **Compatibility check** shortcut from the Start menu and confirm `Ready: True`.
+2. Run the **CodexRemote-fix compatibility check** shortcut from the Start menu and confirm `Ready: True`.
 3. Check the logs under `%LOCALAPPDATA%\CodexControlOtherDevices\logs\`.
 4. Make sure security software is not blocking `node.exe` from loopback access.
 5. Exit all Codex processes and retry; the supervisor restarts Codex at most once.
@@ -115,11 +116,11 @@ Enrollment or authorization fails?
 
 External renderer did not attach to an already-running session?
 
-Exit Codex, open **Codex 设备连接 (Device Connection)** from the desktop, then relaunch Codex.
+Exit Codex, open **CodexRemote-fix** from the desktop, then relaunch Codex.
 
 ## Uninstall
 
-Use the tray menu → **Uninstall**, or uninstall **Codex Control other devices** from
+Use the tray menu → **Uninstall**, or uninstall **CodexRemote-fix** from
 Windows Settings → Apps → Installed apps. The device key store is preserved or backed up
 on uninstall; removing it locally does not revoke server authorization, so revoke the
 device in Codex first.

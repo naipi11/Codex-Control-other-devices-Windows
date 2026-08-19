@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
+  <title id="title">CodexRemote-fix abstract remote signal</title>
+  <desc id="description">An original abstract icon with a central signal and three connected endpoints.</desc>
+  <defs>
+    <linearGradient id="background" x1="36" y1="24" x2="218" y2="232" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18233f"/>
+      <stop offset="1" stop-color="#283f72"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="84" y1="80" x2="182" y2="176" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6fe6d8"/>
+      <stop offset="1" stop-color="#78a8ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#background)"/>
+  <path d="M101 94 78 74M155 94l23-20M128 155v28" fill="none" stroke="#b9c9ef" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="74" cy="70" r="19" fill="#ffcc73"/>
+  <circle cx="182" cy="70" r="19" fill="#ff9d8f"/>
+  <circle cx="128" cy="188" r="19" fill="#9be493"/>
+  <circle cx="128" cy="126" r="45" fill="none" stroke="url(#signal)" stroke-width="15"/>
+  <path d="M108 127h40M128 107v40" stroke="url(#signal)" stroke-width="13" stroke-linecap="round"/>
+</svg>

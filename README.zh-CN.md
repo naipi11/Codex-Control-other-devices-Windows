@@ -1,8 +1,8 @@
-# Codex 控制其他设备（Windows）
+# CodexRemote-fix
 
 语言 / Language：**简体中文** · [English](README.md)
 
-在 Windows 版 Codex Desktop 中启用随应用一起打包、但因运行时缺陷被隐藏的：
+CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、但因运行时缺陷被隐藏的：
 
 **设置 → 连接 → 控制其他设备（Control other devices）**
 
@@ -18,9 +18,9 @@
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载最新安装包并核对 SHA-256。
-2. 运行 `CodexControlOtherDevices-<version>-setup.exe`，无需管理员权限。
-3. 托盘守护程序会自动启动，并创建桌面快捷方式 **Codex 设备连接 (Device Connection)**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
+1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载 `CodexRemote-fix-2.2.0-setup.exe` 和 `CodexRemote-fix-2.2.0-setup.exe.sha256.txt`，并核对 SHA-256。
+2. 运行 `CodexRemote-fix-2.2.0-setup.exe`，无需管理员权限。
+3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
 ![设置 → 连接 → 控制其他设备（中文）](docs/assets/control-other-devices-active-zh-CN.png)
 
@@ -41,7 +41,7 @@
 *示意图；为便于阅读已简化。*
 
 - 登录后计划任务 `Codex Control Other Devices Supervisor` 自动启动托盘守护程序，无需手动操作。
-- 若未看到托盘图标，可双击桌面上的 **Codex 设备连接 (Device Connection)** 启动托盘守护程序；它本身不会启动修复，也不会改变当前 Codex 会话。
+- 若未看到托盘图标，可双击桌面上的 **CodexRemote-fix** 启动托盘守护程序；它本身不会启动修复，也不会改变当前 Codex 会话。
 - 托盘图标为绿色时，当前会话已生效；打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 - 新版 Codex 正常启动自带 `--remote-debugging-port`（没有 `--inspect`），守护程序已能识别这种启动方式并自动完成接管。
 - 托盘菜单支持跟随系统、中文、English，切换即时生效，无需重启。
@@ -52,10 +52,11 @@
 
 每个带 tag 的发布都会附带 Windows 安装包及其 SHA-256 校验文件。
 `.github/workflows/release.yml` 会在 tag 上自动构建安装包，因此后续每次更新都会
-提供可直接运行的 `CodexControlOtherDevices-<version>-setup.exe`。
+为 2.2.0 发布提供可直接运行的 `CodexRemote-fix-2.2.0-setup.exe`
+及 `CodexRemote-fix-2.2.0-setup.exe.sha256.txt`。
 
 Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
-查看是否有更新安装包；也可以从开始菜单运行 **Compatibility check（兼容性检查）**
+查看是否有更新安装包；也可以从开始菜单运行 **CodexRemote-fix compatibility check（兼容性检查）**
 快捷方式，确认当前守护程序仍匹配。
 
 ## External renderer 共享 CDP
@@ -66,7 +67,7 @@ Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/Codex-Con
 保持独立，并会在桥接安装后关闭。
 
 如果首选端口处于暂停状态、不可用、因已作为主进程 Inspector 端口而被排除，或被非
-Codex 监听器占用，Codex Control Other Devices 会选择不同的动态回环 renderer 端口。
+Codex 监听器占用，CodexRemote-fix 会选择不同的动态回环 renderer 端口。
 External renderer 的 `pause` 标记会跳过集成。External renderer 状态缺失或无效，以及 handoff
 失败，都会安全处理而不会阻塞 Codex 会话；在这些回退场景中，集成不保证 Browser-ID
 或端口复用。
@@ -95,7 +96,7 @@ External renderer 的 `pause` 标记会跳过集成。External renderer 状态�
 仍然没有“控制其他设备”标签？
 
 1. 确认托盘图标为绿色（灰色表示等待 Codex 或自动化已暂停）。
-2. 从开始菜单运行 **Compatibility check（兼容性检查）**，确认 `Ready: True`。
+2. 从开始菜单运行 **CodexRemote-fix compatibility check（兼容性检查）**，确认 `Ready: True`。
 3. 查看 `%LOCALAPPDATA%\CodexControlOtherDevices\logs\` 下的日志。
 4. 确认安全软件没有阻止 `node.exe` 访问本机回环端口。
 5. 退出所有 Codex 进程后重试；守护程序最多自动重开一次。
@@ -108,13 +109,13 @@ External renderer 的 `pause` 标记会跳过集成。External renderer 状态�
 
 External renderer 未附加到已经运行的会话？
 
-退出 Codex，双击桌面 **Codex 设备连接 (Device Connection)** 启动托盘守护程序，
+退出 Codex，双击桌面 **CodexRemote-fix** 启动托盘守护程序，
 然后重新启动 Codex。
 
 ## 卸载
 
 通过托盘菜单 → **卸载**，或在 Windows 设置 → 应用 → 已安装的应用中卸载
-**Codex Control other devices**。卸载时会保留或备份设备密钥；本地移除密钥不会撤销
+**CodexRemote-fix**。卸载时会保留或备份设备密钥；本地移除密钥不会撤销
 服务器授权，请先在 Codex 中撤销设备。
 
 ## 它解决了什么
