@@ -322,6 +322,15 @@ function Get-CcodProcessAdapters {
                 [int]$TimeoutMilliseconds
             )
         }
+        RequestGracefulClose = {
+            param($Snapshot)
+            try {
+                $process = Get-Process -Id ([int]$Snapshot.Pid) -ErrorAction Stop
+                try { return [bool]$process.CloseMainWindow() } finally { $process.Dispose() }
+            } catch {
+                return $false
+            }
+        }
         ReserveLoopbackPort = {
             param($Address)
             $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse([string]$Address), 0)
@@ -582,7 +591,10 @@ function Get-CcodProcessSnapshot {
         -not [object]::Equals($before.CreationTimeUtc, $after.CreationTimeUtc)) { return $null }
 
     $commandLine = if ($null -eq $cim.PSObject.Properties['CommandLine']) { $null } else { $cim.CommandLine }
-    $launchArguments = Get-CcodParsedLaunchArguments -CommandLine $commandLine -ExecutablePath $package.ExecutablePath -Adapters $adapter
+    # Parse argv[0] against the process image, not the current package image.  This
+    # retains a verifiable top-level shape for an older same-family package after
+    # Store servicing, while eligibility below remains exact-current-path only.
+    $launchArguments = Get-CcodParsedLaunchArguments -CommandLine $commandLine -ExecutablePath ([string]$before.Path) -Adapters $adapter
     $isTopLevel = $launchArguments.Valid -and $launchArguments.IsTopLevel
     $currentSessionId = & $adapter.GetCurrentSessionId
     $currentUserSid = & $adapter.GetCurrentUserSid
@@ -644,6 +656,89 @@ function Test-CcodProcessMatch {
     return $true
 }
 
+function New-CcodStalePackageRootResult {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Confirmed', 'NoCandidate', 'Incomplete', 'Ambiguous')][string]$Outcome,
+        $Snapshot
+    )
+
+    return [pscustomobject][ordered]@{
+        Outcome = $Outcome
+        Snapshot = if ($null -eq $Snapshot) { $null } else { Copy-CcodProcessSnapshot -Snapshot $Snapshot }
+    }
+}
+
+function Get-CcodPackageFullNameParts {
+    param($Package)
+
+    if ($null -eq $Package) { return $null }
+    foreach ($name in @('FullName', 'FamilyName', 'Version', 'ExecutablePath')) {
+        if ($null -eq $Package.PSObject.Properties[$name] -or $Package.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($Package.$name)) { return $null }
+    }
+    $match = [regex]::Match([string]$Package.FullName, '^(?<name>.+)_(?<version>\d+\.\d+\.\d+\.\d+)_(?<architecture>[^_]+)__(?<publisher>[^_]+)$', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success -or $match.Groups['version'].Value -cne [string]$Package.Version) { return $null }
+    if (([string]$Package.FamilyName) -cne ($match.Groups['name'].Value + '_' + $match.Groups['publisher'].Value)) { return $null }
+    return [pscustomobject]@{
+        Name = $match.Groups['name'].Value
+        Version = $match.Groups['version'].Value
+        Architecture = $match.Groups['architecture'].Value
+        Publisher = $match.Groups['publisher'].Value
+    }
+}
+
+function Test-CcodStalePackageRootSnapshot {
+    param(
+        $Snapshot,
+        [Parameter(Mandatory)]$Package,
+        [Parameter(Mandatory)]$PackageParts
+    )
+
+    if ($null -eq $Snapshot -or -not (Test-CcodExactProperties -Value $Snapshot -Names $script:CcodProcessSnapshotFields)) { return $false }
+    if ($Snapshot.Pid -isnot [int] -or $Snapshot.Pid -lt 1 -or $Snapshot.SessionId -isnot [int] -or
+        $Snapshot.UserSid -isnot [string] -or [string]::IsNullOrWhiteSpace($Snapshot.UserSid) -or
+        $Snapshot.Path -isnot [string] -or $Snapshot.PackageFamilyName -isnot [string] -or
+        $Snapshot.CommandLine -isnot [string] -or $Snapshot.IsTopLevel -isnot [bool] -or -not $Snapshot.IsTopLevel -or
+        $Snapshot.Mode -isnot [string] -or $Snapshot.Mode -cne 'Unrelated' -or
+        $Snapshot.RendererPort -isnot [int] -or $Snapshot.MainPort -isnot [int] -or
+        $Snapshot.RendererPort -lt 1 -or $Snapshot.RendererPort -gt 65535 -or
+        $Snapshot.MainPort -lt 1 -or $Snapshot.MainPort -gt 65535 -or $Snapshot.RendererPort -eq $Snapshot.MainPort) { return $false }
+    if (-not (Test-CcodOrdinalIgnoreCase $Snapshot.PackageFamilyName $Package.FamilyName) -or
+        (Test-CcodOrdinalIgnoreCase $Snapshot.Path $Package.ExecutablePath) -or
+        [IO.Path]::GetFileName($Snapshot.Path) -ine 'ChatGPT.exe' -or
+        $null -eq (ConvertTo-CcodDateTimeOffset -Value $Snapshot.CreationTimeUtc)) { return $false }
+
+    $pathPattern = '^C:\\Program Files\\WindowsApps\\' + [regex]::Escape($PackageParts.Name) + '_(?<version>\d+\.\d+\.\d+\.\d+)_' +
+        [regex]::Escape($PackageParts.Architecture) + '__' + [regex]::Escape($PackageParts.Publisher) + '\\app\\ChatGPT\.exe$'
+    $pathMatch = [regex]::Match($Snapshot.Path, $pathPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $pathMatch.Success -or $pathMatch.Groups['version'].Value -ceq $PackageParts.Version) { return $false }
+    return $true
+}
+
+function Get-CcodStalePackageRootResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Package,
+        [AllowEmptyCollection()][object[]]$Snapshots = @(),
+        [hashtable]$Adapters
+    )
+
+    $parts = Get-CcodPackageFullNameParts -Package $Package
+    if ($null -eq $parts) { return New-CcodStalePackageRootResult -Outcome Incomplete -Snapshot $null }
+    $adapter = Get-CcodProcessAdapters -Adapters $Adapters
+    $candidates = @($Snapshots | Where-Object { Test-CcodStalePackageRootSnapshot -Snapshot $_ -Package $Package -PackageParts $parts } | Sort-Object CreationTimeUtc, Pid)
+    if ($candidates.Count -eq 0) { return New-CcodStalePackageRootResult -Outcome NoCandidate -Snapshot $null }
+    if ($candidates.Count -ne 1) { return New-CcodStalePackageRootResult -Outcome Ambiguous -Snapshot $null }
+    $candidate = $candidates[0]
+    $first = & $adapter.GetProcess ([int]$candidate.Pid) $null
+    $second = & $adapter.GetProcess ([int]$candidate.Pid) $null
+    if ($null -eq $first -or $null -eq $second -or -not (Test-CcodProcessMatch -Expected $candidate -Actual $first) -or
+        -not (Test-CcodProcessMatch -Expected $first -Actual $second) -or
+        -not (Test-CcodStalePackageRootSnapshot -Snapshot $second -Package $Package -PackageParts $parts)) {
+        return New-CcodStalePackageRootResult -Outcome Incomplete -Snapshot $null
+    }
+    return New-CcodStalePackageRootResult -Outcome Confirmed -Snapshot $second
+}
+
 function New-CcodStopResult {
     param(
         [Parameter(Mandatory)][ValidateSet('Stopped', 'SourceExited', 'IdentityChanged', 'StopUnconfirmed')][string]$Outcome,
@@ -698,6 +793,59 @@ function Stop-CcodProcessIfMatch {
         'AccessDenied' { return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual }
         'TimedOut' { return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual }
         default { return New-CcodStopResult -Outcome 'StopUnconfirmed' -Snapshot $actual }
+    }
+}
+
+function New-CcodGracefulCloseResult {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Requested', 'NotRequested', 'SourceExited', 'IdentityChanged')][string]$Outcome,
+        $Snapshot
+    )
+    return [pscustomobject][ordered]@{ Outcome=$Outcome; Snapshot=$Snapshot }
+}
+
+function Request-CcodProcessGracefulCloseIfMatch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Expected,
+        $StatusEvidence,
+        [hashtable]$Adapters
+    )
+
+    $adapter = Get-CcodProcessAdapters -Adapters $Adapters
+    $actual = & $adapter.GetProcess ([int]$Expected.Pid) $StatusEvidence
+    if ($null -eq $actual) { return New-CcodGracefulCloseResult -Outcome SourceExited -Snapshot $null }
+    if (-not (Test-CcodProcessMatch -Expected $Expected -Actual $actual)) { return New-CcodGracefulCloseResult -Outcome IdentityChanged -Snapshot $actual }
+    try { $requested = & $adapter.RequestGracefulClose $actual } catch { return New-CcodGracefulCloseResult -Outcome NotRequested -Snapshot $actual }
+    return New-CcodGracefulCloseResult -Outcome $(if ($requested -is [bool] -and $requested) { 'Requested' } else { 'NotRequested' }) -Snapshot $actual
+}
+
+function New-CcodWaitExitResult {
+    param(
+        [Parameter(Mandatory)][ValidateSet('SourceExited', 'IdentityChanged', 'StillRunning')][string]$Outcome,
+        $Snapshot
+    )
+    return [pscustomobject][ordered]@{ Outcome=$Outcome; Snapshot=$Snapshot }
+}
+
+function Wait-CcodProcessExitIfMatch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Expected,
+        $StatusEvidence,
+        [ValidateRange(1, 60000)][int]$TimeoutMilliseconds = 5000,
+        [ValidateRange(1, 1000)][int]$PollMilliseconds = 50,
+        [hashtable]$Adapters
+    )
+
+    $adapter = Get-CcodProcessAdapters -Adapters $Adapters
+    $deadline = (& $adapter.GetUtcNow).AddMilliseconds($TimeoutMilliseconds)
+    while ($true) {
+        $actual = & $adapter.GetProcess ([int]$Expected.Pid) $StatusEvidence
+        if ($null -eq $actual) { return New-CcodWaitExitResult -Outcome SourceExited -Snapshot $null }
+        if (-not (Test-CcodProcessMatch -Expected $Expected -Actual $actual)) { return New-CcodWaitExitResult -Outcome IdentityChanged -Snapshot $actual }
+        if ((& $adapter.GetUtcNow) -ge $deadline) { return New-CcodWaitExitResult -Outcome StillRunning -Snapshot $actual }
+        & $adapter.Delay $PollMilliseconds
     }
 }
 
@@ -1192,4 +1340,4 @@ function Start-CcodProcess {
     return New-CcodStartResult -Outcome 'Started' -Snapshot $null -Process $process
 }
 
-Export-ModuleMember -Function Get-CcodProcessSnapshot, Test-CcodProcessMatch, Get-CcodVerifiedProcessTree, Get-CcodTransactionProcessResult, Find-CcodTransactionProcess, Stop-CcodProcessIfMatch, Start-CcodProcess, Get-CcodAvailableLoopbackPort, Wait-CcodPortClosed
+Export-ModuleMember -Function Get-CcodProcessSnapshot, Test-CcodProcessMatch, Get-CcodStalePackageRootResult, Get-CcodVerifiedProcessTree, Get-CcodTransactionProcessResult, Find-CcodTransactionProcess, Stop-CcodProcessIfMatch, Request-CcodProcessGracefulCloseIfMatch, Wait-CcodProcessExitIfMatch, Start-CcodProcess, Get-CcodAvailableLoopbackPort, Wait-CcodPortClosed

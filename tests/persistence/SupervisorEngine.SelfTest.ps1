@@ -502,6 +502,17 @@ $results += Invoke-CcodTest 'reduces stale persisted-package evidence to one san
     Assert-CcodTrue ($null -eq $reduced.AttemptKey -and $null -eq $reduced.RecoveryIgnoreKey -and $null -eq $reduced.SuppressionKey) 'stale evidence clears no state or key membership'
 }
 
+$results += Invoke-CcodTest 'preserves fail-closed stale remote-server closure codes for an actionable controller result' {
+    foreach($code in @('CCOD_STALE_PACKAGE_AMBIGUOUS','CCOD_STALE_PACKAGE_UNPROVEN')){
+        $error=[pscustomobject][ordered]@{code=$code;stage='OrdinaryStopped';message='The session operation failed safely. See the session log for details.'}
+        $result=New-CcodControllerResult -Action Apply -Ok $false -Outcome Error -SafeState Error -Special $null -Error $error
+        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1'
+        Assert-CcodExactEqual 'Error' $reduced.SessionState "$code remains fail closed"
+        Assert-CcodExactEqual $true $reduced.BlockAutomaticActions "$code blocks another automatic special launch"
+        Assert-CcodExactEqual $code $reduced.ErrorCode "$code survives controller validation"
+    }
+}
+
 $results += Invoke-CcodTest 'fails closed on malformed contradictory or correlation-mismatched controller results' {
     $valid=New-CcodControllerResult
     $mismatch=Complete-CcodControllerRun -Result $valid -ExpectedTransactionId 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff' -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1'

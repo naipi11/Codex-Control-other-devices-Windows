@@ -209,6 +209,55 @@ try {
         }
     }
 
+    Invoke-CcodTest 'finds one same-family stale package special root only when its old package path and argv are exact' {
+        $current = [pscustomobject]@{
+            Found = $true
+            FullName = 'OpenAI.Codex_26.814.5517.0_x64__2p2nqsd0c76g0'
+            FamilyName = 'OpenAI.Codex_2p2nqsd0c76g0'
+            Version = '26.814.5517.0'
+            ExecutablePath = 'C:\Program Files\WindowsApps\OpenAI.Codex_26.814.5517.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
+        }
+        $oldPath = 'C:\Program Files\WindowsApps\OpenAI.Codex_26.814.5167.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
+        $oldCommand = '"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $oldArgs = @($oldPath,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002')
+        $oldAdapters = New-CcodSnapshotAdapters -Path $oldPath -CommandLine $oldCommand -ParsedArguments $oldArgs
+        $oldAdapters.GetPackageIdentity = { $current }.GetNewClosure()
+        $old = Get-CcodProcessSnapshot -ProcessId 4596 -Adapters $oldAdapters
+        Assert-CcodEqual $true $old.IsTopLevel 'old-package argv[0] is independently parsed against its own image path'
+        Assert-CcodEqual 'Unrelated' $old.Mode 'old package is never adopted as the current managed root'
+        $calls = [pscustomobject]@{ Reads = 0 }
+        $result = Get-CcodStalePackageRootResult -Package $current -Snapshots @($old) -Adapters @{
+            GetProcess = { param($ProcessId, $StatusEvidence) $calls.Reads++; $old }.GetNewClosure()
+        }
+
+        Assert-CcodEqual 'Confirmed' $result.Outcome 'one verifiable old-version same-family root is a stale remote-server candidate'
+        Assert-CcodEqual 4596 $result.Snapshot.Pid 'the exact old root is retained'
+        Assert-CcodEqual 2 $calls.Reads 'candidate identity is reread before it can be closed'
+
+        $currentRoot = New-CcodSnapshot -ProcessId 26700 -Path $current.ExecutablePath -Mode Unrelated -RendererPort 41003 -MainPort 41004 -CommandLine ('"' + $current.ExecutablePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41003 --inspect=127.0.0.1:41004')
+        $currentRoot.IsTopLevel = $true
+        $currentResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($currentRoot) -Adapters @{ GetProcess = { param($ProcessId, $StatusEvidence) $currentRoot } }
+        Assert-CcodEqual 'NoCandidate' $currentResult.Outcome 'the current managed package root is never classified stale'
+
+        $foreign = New-CcodSnapshot -ProcessId 88 -Path $oldPath -PackageFamilyName 'Other.Family' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine ('"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002')
+        $foreign.IsTopLevel = $true
+        $foreignResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($foreign) -Adapters @{ GetProcess = { param($ProcessId, $StatusEvidence) $foreign } }
+        Assert-CcodEqual 'NoCandidate' $foreignResult.Outcome 'an unrelated package family is ignored'
+
+        $otherOld = New-CcodSnapshot -ProcessId 4597 -CreationTimeUtc '2026-08-20T01:02:04.0000000Z' -Path $oldPath -Mode Unrelated -RendererPort 41005 -MainPort 41006 -CommandLine ('"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006')
+        $otherOld.IsTopLevel = $true
+        $ambiguous = Get-CcodStalePackageRootResult -Package $current -Snapshots @($old, $otherOld) -Adapters @{ GetProcess = { param($ProcessId, $StatusEvidence) if ($ProcessId -eq 4596) { $old } else { $otherOld } } }
+        Assert-CcodEqual 'Ambiguous' $ambiguous.Outcome 'multiple old same-family remote roots fail closed'
+
+        $reused = $old | Select-Object *
+        $reused.CreationTimeUtc = '2026-08-20T01:02:04.0000000Z'
+        $reuseReads = [pscustomobject]@{ Count = 0 }
+        $reusedResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($old) -Adapters @{
+            GetProcess = { param($ProcessId, $StatusEvidence) $script:unused = $StatusEvidence; $reuseReads.Count++; if ($reuseReads.Count -eq 1) { $old } else { $reused } }.GetNewClosure()
+        }
+        Assert-CcodEqual 'Incomplete' $reusedResult.Outcome 'PID reuse or creation-time drift blocks stale-root closure'
+    }
+
     Invoke-CcodTest 'classifies the current renderer-only CDP launch as an ordinary root' {
         $command = '"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001'
         $arguments = @('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001')

@@ -767,6 +767,33 @@ try {
         Assert-CcodEqual 'CCOD_REQUEST_INVALID' (Invoke-CcodInspectSession -Request $invalid -Paths $paths -Adapters @{ReadState={throw 'must not run'}}).error.code '120001 is rejected before adapters'
     }
 
+    Invoke-CcodTest 'closes one verified stale same-family remote root before launching current special and blocks ambiguity' {
+        $probe=New-CcodEngineProbe
+        $probe.PackageFullName='OpenAI.Codex_26.814.5517.0_x64__2p2nqsd0c76g0';$probe.PackageVersion='26.814.5517.0'
+        $probe.ExecutablePath='C:\Program Files\WindowsApps\OpenAI.Codex_26.814.5517.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
+        $old=New-CcodEngineSnapshot -Pid 4596 -Mode Unrelated -RendererPort 41001 -MainPort 41002
+        $old.Path='C:\Program Files\WindowsApps\OpenAI.Codex_26.814.5167.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
+        $old.CommandLine='"' + $old.Path + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $events=[Collections.Generic.List[string]]::new();$state=[pscustomobject]@{Alive=$true;Waits=0;Stops=0;Starts=0};$snapshotFactory=${function:New-CcodEngineSnapshot}
+        $adapters=New-CcodEngineAdapters -Probe $probe -Processes @($old) -Events $events
+        $adapters.ListProcesses={param($StatusEvidence)if($state.Alive){@($old)}else{@()}}.GetNewClosure()
+        $adapters.GetProcess={param($Pid,$StatusEvidence)if($state.Alive -and $Pid -eq 4596){$old}else{$null}}.GetNewClosure()
+        $adapters.RequestGracefulClose={param($Expected,$StatusEvidence)$events.Add('GracefulClose');[pscustomobject]@{Outcome='Requested';Snapshot=$Expected}}.GetNewClosure()
+        $adapters.WaitProcessExit={param($Expected,$StatusEvidence,$TimeoutMilliseconds)$state.Waits++;$events.Add('WaitExit');if($state.Alive){[pscustomobject]@{Outcome='StillRunning';Snapshot=$Expected}}else{[pscustomobject]@{Outcome='SourceExited';Snapshot=$null}}}.GetNewClosure()
+        $adapters.StopProcess={param($Expected,$StatusEvidence,$TimeoutMilliseconds)$state.Stops++;$events.Add('StopStale');$state.Alive=$false;[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
+        $adapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$state.Starts++;$events.Add('StartSpecial');[pscustomobject]@{Outcome='Started';Snapshot=(& $snapshotFactory -Pid 201 -Mode Unrelated -RendererPort $RendererPort -MainPort $MainPort);Process=[pscustomobject]@{Id=201}}}.GetNewClosure()
+        $activated=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $null -ExistingOnly $true) -Paths $paths -Adapters $adapters
+        Assert-CcodEqual 'Activated' $activated.outcome 'one exact old-package remote root is closed before launch'
+        Assert-CcodEqual 'GracefulClose,WaitExit,StopStale,WaitExit,StartSpecial' (($events | Where-Object { $_ -in @('GracefulClose','WaitExit','StopStale','StartSpecial') }) -join ',') 'graceful close and exact-exit proof precede special launch'
+        Assert-CcodEqual 1 $state.Stops 'force termination occurs only after the graceful wait did not exit'
+
+        $other=$old|Select-Object *;$other.Pid=4597;$other.CreationTimeUtc='2030-02-03T04:00:01.0000000Z'
+        $ambiguousEvents=[Collections.Generic.List[string]]::new();$ambiguousAdapters=New-CcodEngineAdapters -Probe $probe -Processes @($old,$other) -Events $ambiguousEvents
+        $ambiguous=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $true -TransactionId '8394cc7a-69dc-4da0-b229-6fcffb32ec50') -Paths $paths -Adapters $ambiguousAdapters
+        Assert-CcodEqual 'CCOD_STALE_PACKAGE_AMBIGUOUS' $ambiguous.error.code 'multiple stale same-family roots block special launch'
+        Assert-CcodTrue ($ambiguousEvents -cnotcontains 'StartSpecial') 'ambiguity never launches a second special root'
+    }
+
     Invoke-CcodTest 'discovers one existing ordinary source and rejects manual Start root ambiguity' {
         $ordinary=New-CcodEngineSnapshot
         $events=[Collections.Generic.List[string]]::new();$counters=[pscustomobject]@{SpecialStart=0;OrdinaryStart=0;Recover=0;Node=0}

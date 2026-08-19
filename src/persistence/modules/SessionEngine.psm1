@@ -17,7 +17,7 @@ $script:CcodSessionStableErrorCodes=@(
     'CCOD_MAIN_INSPECTOR_OPEN','CCOD_NODE_CANDIDATE_INVALID','CCOD_PATH_MISSING','CCOD_PATH_OUTSIDE_ROOT','CCOD_PATHS_INVALID',
     'CCOD_PORT_UNAVAILABLE','CCOD_RECOVERY_UNPROVEN','CCOD_REPARSE_PATH','CCOD_REPLAY_INPUT_INVALID','CCOD_REQUEST_INVALID',
     'CCOD_SCHEMA_UNSUPPORTED','CCOD_SESSION_FAILED','CCOD_SETTINGS_INVALID','CCOD_SOURCE_AMBIGUOUS','CCOD_SOURCE_CHANGED',
-    'CCOD_SPECIAL_START_FAILED','CCOD_STATE_ALREADY_INITIALIZED','CCOD_STATE_BLOCKED','CCOD_STATE_MALFORMED','CCOD_STATE_MISSING','CCOD_STATE_STALE_PACKAGE',
+    'CCOD_SPECIAL_START_FAILED','CCOD_STALE_PACKAGE_AMBIGUOUS','CCOD_STALE_PACKAGE_UNPROVEN','CCOD_STATE_ALREADY_INITIALIZED','CCOD_STATE_BLOCKED','CCOD_STATE_MALFORMED','CCOD_STATE_MISSING','CCOD_STATE_STALE_PACKAGE',
     'CCOD_STATUS_INVALID','CCOD_STOP_UNCONFIRMED','CCOD_TRANSITION_ARCHIVE_FAILED','CCOD_TRANSITION_COMPLETION_INVALID',
     'CCOD_TRANSITION_CONFLICT','CCOD_TRANSITION_INVALID','CCOD_TRANSITION_RECEIPT_INVALID','CCOD_TRANSITION_STAGE_INVALID',
     'CCOD_VERIFIED_PACKAGES_INVALID'
@@ -514,6 +514,8 @@ function Merge-CcodSessionAdapters($Adapters) {
         CompleteTransition={ param($Path,$LogPath,$TransactionId,$Disposition) Complete-CcodTransition -Path $Path -LogPath $LogPath -TransactionId $TransactionId -Disposition $Disposition }
         ClearCommittedTransition={ param($Path,$LogPath,$TransactionId,$Disposition) Complete-CcodTransition -Path $Path -LogPath $LogPath -TransactionId $TransactionId -Disposition $Disposition -RequireTerminalReceipt }
         StopProcess={ param($Expected,$StatusEvidence,$TimeoutMilliseconds) Stop-CcodProcessIfMatch -Expected $Expected -StatusEvidence $StatusEvidence -TimeoutMilliseconds $TimeoutMilliseconds }
+        RequestGracefulClose={ param($Expected,$StatusEvidence) Request-CcodProcessGracefulCloseIfMatch -Expected $Expected -StatusEvidence $StatusEvidence }
+        WaitProcessExit={ param($Expected,$StatusEvidence,$TimeoutMilliseconds) Wait-CcodProcessExitIfMatch -Expected $Expected -StatusEvidence $StatusEvidence -TimeoutMilliseconds $TimeoutMilliseconds }
         GetPreferredRendererPort={ param($Excluded) Get-CcodRendererPreferredPort -ExcludedPorts $Excluded }
         GetPort={ param($Excluded) Get-CcodAvailableLoopbackPort -ExcludedPorts $Excluded }
         StartSpecial={ param($RendererPort,$MainPort,$TimeoutMilliseconds) Start-CcodProcess -Mode Special -RendererPort $RendererPort -MainPort $MainPort -StartupTimeoutMilliseconds $TimeoutMilliseconds }
@@ -545,6 +547,32 @@ function Merge-CcodSessionAdapters($Adapters) {
         if($Adapters.ContainsKey('ObserveSpecial') -and -not $Adapters.ContainsKey('ObserveSpecialIsDefault')){$defaults.ObserveSpecialIsDefault=$false}
     }
     return $defaults
+}
+
+function Close-CcodVerifiedStalePackageRoot {
+    param($Probe,$StatusEvidence,[hashtable]$Adapter,[int]$TimeoutMilliseconds)
+    $package=[pscustomobject][ordered]@{Found=$true;FullName=$Probe.PackageFullName;FamilyName=$Probe.PackageFamilyName;Version=$Probe.PackageVersion;ExecutablePath=$Probe.ExecutablePath}
+    $reads=@(& $Adapter.ListProcesses $StatusEvidence)
+    $reReadAdapter=@{GetProcess={param($ProcessId,$IgnoredStatus)& $Adapter.GetProcess $ProcessId $null}.GetNewClosure()}
+    $candidate=Get-CcodStalePackageRootResult -Package $package -Snapshots $reads -Adapters $reReadAdapter
+    if($candidate.Outcome -ceq 'NoCandidate'){return}
+    if($candidate.Outcome -ceq 'Ambiguous'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_AMBIGUOUS' 'Multiple old-package remote server roots were found' $candidate}
+    if($candidate.Outcome -cne 'Confirmed' -or $null -eq $candidate.Snapshot){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package remote server identity could not be proven' $candidate}
+    $root=$candidate.Snapshot;$close=& $Adapter.RequestGracefulClose $root $StatusEvidence
+    if($close.Outcome -ceq 'IdentityChanged'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root identity changed before graceful close' $close}
+    if($close.Outcome -ceq 'SourceExited'){return}
+    if($close.Outcome -ceq 'Requested'){
+        $wait=& $Adapter.WaitProcessExit $root $StatusEvidence $TimeoutMilliseconds
+        if($wait.Outcome -ceq 'SourceExited'){return}
+        if($wait.Outcome -ceq 'IdentityChanged'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root identity changed while waiting for graceful close' $wait}
+        if($wait.Outcome -cne 'StillRunning'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root graceful-close result is invalid' $wait}
+    }elseif($close.Outcome -cne 'NotRequested'){
+        Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root graceful-close result is invalid' $close
+    }
+    $stop=& $Adapter.StopProcess $root $StatusEvidence $TimeoutMilliseconds
+    if($stop.Outcome -ne 'Stopped' -and $stop.Outcome -ne 'SourceExited'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root could not be stopped with an exact identity receipt' $stop}
+    $final=& $Adapter.WaitProcessExit $root $StatusEvidence $TimeoutMilliseconds
+    if($final.Outcome -ne 'SourceExited'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root exit was not proven before special launch' $final}
 }
 
 function Get-CcodExactPropertyValue {
@@ -894,6 +922,7 @@ function Invoke-CcodApplySession {
         } else {
             $result.stage='OrdinaryStopped';$transition=& $adapter.SetTransition $Paths.TransitionPath $Request.transactionId 'IntentWritten' 'OrdinaryStopped' $null $null $null $null
         }
+        Close-CcodVerifiedStalePackageRoot -Probe $probe -StatusEvidence $state.Status -Adapter $adapter -TimeoutMilliseconds (Get-CcodProcessControlTimeout $Request.timeoutMilliseconds)
         $currentStage='OrdinaryStopped';$special=$null;$renderer=$Request.rendererPort;$main=$Request.mainPort;$recoveryAttempted=$false
         try {
             $rendererExcluded=if($null -eq $main){@()}else{@($main)}
