@@ -1234,4 +1234,39 @@ $results += Invoke-CcodTest 'installer carries the Inno contract needed by its s
     Assert-CcodEqual 1 $sourceEntries.Count 'installer carries the build contract used by Validate.ps1'
 }
 
+$results += Invoke-CcodTest 'installer migrates only its exact legacy shortcuts to the public Start menu group' {
+    $installerScript = Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss'
+    $lines = @(Get-Content -LiteralPath $installerScript -Encoding UTF8)
+    $content = Get-Content -LiteralPath $installerScript -Raw -Encoding UTF8
+    Assert-CcodTrue ($lines -ccontains 'UsePreviousGroup=no') 'upgrade ignores the stored legacy Inno icon group'
+
+    $sectionMatch = [regex]::Match($content, '(?ms)^\[InstallDelete\]\r?\n(.*?)(?=^\[|\z)')
+    Assert-CcodTrue $sectionMatch.Success 'installer defines an exact legacy-shortcut cleanup section'
+    $deleteLines = @($sectionMatch.Groups[1].Value -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $legacyGroup = '{userprograms}\Codex Control other devices'
+    foreach ($shortcut in @(
+        'Codex Control other devices for Windows.lnk',
+        'Open the tray supervisor.lnk',
+        'Compatibility check.lnk',
+        'Uninstall Codex Control other devices.lnk',
+        'CodexRemote-fix.lnk',
+        'CodexRemote-fix compatibility check.lnk',
+        'Uninstall CodexRemote-fix.lnk'
+    )) {
+        Assert-CcodTrue ($deleteLines -ccontains "Type: files; Name: `"$legacyGroup\$shortcut`"") "upgrade deletes only the exact legacy Start menu shortcut $shortcut"
+    }
+    Assert-CcodTrue ($deleteLines -ccontains "Type: dirifempty; Name: `"$legacyGroup`"") 'upgrade removes the legacy Start menu group only when empty'
+
+    $legacyDesktopShortcut = 'Codex ' + [char]0x8BBE + [char]0x5907 + [char]0x8FDE + [char]0x63A5 + ' (Device Connection).lnk'
+    Assert-CcodTrue ($deleteLines -ccontains "Type: files; Name: `"{userdesktop}\$legacyDesktopShortcut`"") 'upgrade deletes the exact legacy desktop shortcut'
+    Assert-CcodTrue ($sectionMatch.Groups[1].Value -cnotmatch '(?im)^\s*Type:\s*filesandordirs') 'migration never recursively deletes the legacy group'
+    Assert-CcodTrue ($sectionMatch.Groups[1].Value -cnotmatch '[*?]') 'migration never uses wildcard deletion'
+}
+
+$results += Invoke-CcodTest 'installer carries build.ps1 so installed self-validation is hermetic' {
+    $installerScript = Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss'
+    $sourceEntries = @(Get-Content -LiteralPath $installerScript | Where-Object { $_ -cmatch '^Source: "\.\.\\build\\build\.ps1"; DestDir: "\{app\}\\build";' })
+    Assert-CcodEqual 1 $sourceEntries.Count 'installer carries build.ps1 required by Validate.ps1'
+}
+
 Write-Output "Install lifecycle self-tests passed: $($results.Count)"

@@ -10,6 +10,7 @@ AppUpdatesURL=https://github.com/naipi11/Codex-Control-other-devices-Windows/rel
 VersionInfoVersion={#ProjectVersion}.0
 DefaultDirName={localappdata}\CodexControlOtherDevices-installer
 DefaultGroupName=CodexRemote-fix
+UsePreviousGroup=no
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=dist
@@ -37,6 +38,7 @@ Source: "..\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\SECURITY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\package.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\build\CodexControlOtherDevices.iss"; DestDir: "{app}\build"; Flags: ignoreversion
+Source: "..\build\build.ps1"; DestDir: "{app}\build"; Flags: ignoreversion
 Source: "..\assets\codexremote-fix\codexremote-fix.ico"; DestDir: "{app}\assets"; DestName: "CodexRemote-fix.ico"; Flags: ignoreversion
 Source: "..\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\src\*"; DestDir: "{app}\src"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -46,6 +48,17 @@ Source: "..\Uninstall-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ig
 Source: "..\Start-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Reset-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Test-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+Type: files; Name: "{userprograms}\Codex Control other devices\Codex Control other devices for Windows.lnk"
+Type: files; Name: "{userprograms}\Codex Control other devices\Open the tray supervisor.lnk"
+Type: files; Name: "{userprograms}\Codex Control other devices\Compatibility check.lnk"
+Type: files; Name: "{userprograms}\Codex Control other devices\Uninstall Codex Control other devices.lnk"
+Type: files; Name: "{userprograms}\Codex Control other devices\CodexRemote-fix.lnk"
+Type: files; Name: "{userprograms}\Codex Control other devices\CodexRemote-fix compatibility check.lnk"
+Type: files; Name: "{userprograms}\Codex Control other devices\Uninstall CodexRemote-fix.lnk"
+Type: dirifempty; Name: "{userprograms}\Codex Control other devices"
+Type: files; Name: "{userdesktop}\Codex 设备连接 (Device Connection).lnk"
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-CodexControlOtherDevices.ps1"" -EnableCandidateCompatibleUpdates"; Flags: runhidden waituntilterminated; StatusMsg: "Installing CodexRemote-fix..."
