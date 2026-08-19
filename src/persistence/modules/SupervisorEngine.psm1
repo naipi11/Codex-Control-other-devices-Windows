@@ -585,7 +585,7 @@ function Assert-CcodControllerEnvelopeShape {
     $code = 'CCOD_CONTROLLER_RESULT_INVALID'
     Assert-CcodExactObject $Result $script:CcodControllerResultFields $code 'Controller result'
     if ($Result.schemaVersion -isnot [int] -or $Result.schemaVersion -ne 1 -or
-        $Result.action -isnot [string] -or @('Inspect','Apply','RepairRenderer','Recover') -cnotcontains $Result.action -or
+        $Result.action -isnot [string] -or @('Inspect','Apply','RepairStale','RepairRenderer','Recover') -cnotcontains $Result.action -or
         $Result.ok -isnot [bool] -or $Result.outcome -isnot [string] -or $Result.safeState -isnot [string] -or
         $Result.stage -isnot [string] -or $Result.stage -cnotmatch '^[A-Za-z][A-Za-z0-9]*$' -or
         -not (Test-CcodCanonicalGuid $Result.transactionId) -or
@@ -651,6 +651,11 @@ function Test-CcodActionOutcomeStageCompatibility {
                 'Recovered|OrdinaryRunning|Recovered'
             ) -ccontains $tuple
         }
+        'RepairStale' {
+            return @(
+                'Activated|SpecialValidated|Completed','Recovered|OrdinaryRunning|Recovered'
+            ) -ccontains $tuple
+        }
         'RepairRenderer' {
             return @('NoAction|SpecialValidated|RendererRepaired','Recovered|OrdinaryRunning|Recovered') -ccontains $tuple
         }
@@ -687,7 +692,7 @@ function Complete-CcodControllerRun {
         [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedRuntimeId
     )
     if (-not (Test-CcodCanonicalGuid $ExpectedTransactionId) -or
-        $ExpectedAction -isnot [string] -or @('Inspect','Apply','RepairRenderer','Recover') -cnotcontains $ExpectedAction -or
+        $ExpectedAction -isnot [string] -or @('Inspect','Apply','RepairStale','RepairRenderer','Recover') -cnotcontains $ExpectedAction -or
         $ExpectedRuntimeId -isnot [string] -or $ExpectedRuntimeId -cnotmatch '^[A-Za-z0-9._-]{1,96}$') {
         return New-CcodControllerReduction 'Error' $true $null $null $null 'CCOD_CONTROLLER_RESULT_INVALID' 'ControllerResultInvalid'
     }

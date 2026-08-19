@@ -458,12 +458,13 @@ function New-CcodSupervisorWorkerPaths {
 }
 
 function New-CcodSupervisorControllerRequest {
-    param($HostState,[ValidateSet('Inspect','Apply','RepairRenderer','Recover')][string]$Action,$Target)
+    param($HostState,[ValidateSet('Inspect','Apply','RepairStale','RepairRenderer','Recover')][string]$Action,$Target)
     $transactionId=if($Action -ceq 'Recover' -and $null -ne $HostState.Journal){$HostState.Journal.transactionId}else{[guid]::NewGuid().ToString('D')}
     if($transactionId -isnot [string] -or $transactionId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'){throw 'transaction identity is invalid'}
     $source=$null
-    if($Action -ceq 'Apply'){
+    if($Action -ceq 'Apply' -or $Action -ceq 'RepairStale'){
         if($null -eq $Target){
+            if($Action -ceq 'RepairStale'){throw 'RepairStale target is required'}
             return [pscustomobject][ordered]@{
                 schemaVersion=1;action=$Action;transactionId=$transactionId;runtimeId=$HostState.Layout.RuntimeId
                 supervisorIdentity=[pscustomobject][ordered]@{pid=[int]$HostState.Identity.Pid;creationTimeUtc=$HostState.Identity.CreationTimeUtc;sessionId=$HostState.Identity.SessionId.ToString([Globalization.CultureInfo]::InvariantCulture)}
@@ -472,15 +473,18 @@ function New-CcodSupervisorControllerRequest {
         }
         $sourceFields=@('Pid','CreationTimeUtc','SessionId','UserSid','Path','PackageFamilyName','CommandLine','ParentPid','IsTopLevel','Mode','RendererPort','MainPort')
         $actual=@($Target.PSObject.Properties.Name)
-        if($null -eq $Target -or ($Target -isnot [pscustomobject]) -or $actual.Count -ne $sourceFields.Count){throw 'Apply target is invalid'}
-        foreach($name in $sourceFields){if($actual -cnotcontains $name){throw 'Apply target is invalid'}}
+        if($null -eq $Target -or ($Target -isnot [pscustomobject]) -or $actual.Count -ne $sourceFields.Count){throw "$Action target is invalid"}
+        foreach($name in $sourceFields){if($actual -cnotcontains $name){throw "$Action target is invalid"}}
         if($Target.Pid -isnot [int] -or $Target.Pid -lt 1 -or -not (Test-CcodSupervisorCanonicalUtc $Target.CreationTimeUtc) -or
            $Target.SessionId -isnot [int] -or $Target.SessionId -lt 0 -or $Target.UserSid -isnot [string] -or [string]::IsNullOrWhiteSpace($Target.UserSid) -or
            $Target.Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Target.Path) -or $Target.PackageFamilyName -isnot [string] -or [string]::IsNullOrWhiteSpace($Target.PackageFamilyName) -or
            $Target.CommandLine -isnot [string] -or
            ($null -ne $Target.ParentPid -and ($Target.ParentPid -isnot [int] -or $Target.ParentPid -lt 0)) -or
-           $Target.IsTopLevel -isnot [bool] -or -not $Target.IsTopLevel -or $Target.Mode -cne 'Ordinary' -or
-           $null -ne $Target.RendererPort -or $null -ne $Target.MainPort){throw 'Apply target is invalid'}
+           $Target.IsTopLevel -isnot [bool] -or -not $Target.IsTopLevel){throw "$Action target is invalid"}
+        if($Action -ceq 'Apply' -and ($Target.Mode -cne 'Ordinary' -or $null -ne $Target.RendererPort -or $null -ne $Target.MainPort)){throw 'Apply target is invalid'}
+        if($Action -ceq 'RepairStale' -and ($Target.Mode -cne 'Unrelated' -or $Target.RendererPort -isnot [int] -or $Target.MainPort -isnot [int] -or
+           $Target.RendererPort -lt 1 -or $Target.RendererPort -gt 65535 -or $Target.MainPort -lt 1 -or $Target.MainPort -gt 65535 -or
+           $Target.RendererPort -eq $Target.MainPort)){throw 'RepairStale target is invalid'}
         $source=$Target
     }
     [pscustomobject][ordered]@{
@@ -554,7 +558,7 @@ function Write-CcodSupervisorRendererHandoffFailure {
 function Invoke-CcodSupervisorRendererHandoff {
     param($HostState,$Slot,$Result,[hashtable]$Adapters)
     try{
-        if($null -eq $Result -or @('Apply','RepairRenderer','Recover') -cnotcontains $Slot.Action -or
+        if($null -eq $Result -or @('Apply','RepairStale','RepairRenderer','Recover') -cnotcontains $Slot.Action -or
            $null -eq $Result.PSObject.Properties['ok'] -or $Result.ok -isnot [bool] -or -not $Result.ok -or
            $null -eq $Result.PSObject.Properties['safeState'] -or $Result.safeState -cne 'SpecialValidated' -or
            $null -eq $Result.PSObject.Properties['special'] -or $null -eq $Result.special -or
@@ -711,6 +715,11 @@ function Invoke-CcodSupervisorCommand {
         'SetCandidateCompatibleOptIn' {if($Command.Value -is [bool]){Invoke-CcodSupervisorAdapter $Adapters.SetCandidateOptIn @($HostState.Layout.StateRoot,[bool]$Command.Value) 0;$HostState.ForceReconcile=$true}}
         'OpenLogs' {Invoke-CcodSupervisorAdapter $Adapters.OpenLogs @($HostState.Layout.LogDirectory) 0}
         'ManualRetry' {
+            if($null -ne $HostState.StaleReconciliationCandidate){
+                $staleKey=('{0}|{1}' -f $HostState.StaleReconciliationCandidate.Pid,$HostState.StaleReconciliationCandidate.CreationTimeUtc)
+                if($HostState.AttemptKeys.Contains($staleKey)){[void]$HostState.AttemptKeys.Remove($staleKey)}
+                $HostState.BlockAutomaticActions=$false
+            }
             $retryKey=$null
             if(-not [string]::IsNullOrWhiteSpace([string]$HostState.PackageFullName) -and
                -not [string]::IsNullOrWhiteSpace([string]$HostState.AppAsarSha256)){
@@ -849,7 +858,11 @@ function Get-CcodSupervisorStaleReconciliationCandidate {
            $Snapshot.Path -isnot [string] -or -not [string]::Equals($Snapshot.Path,$expectedOldExecutable,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($Snapshot.Path) -ine 'ChatGPT.exe' -or $Snapshot.PackageFamilyName -isnot [string] -or $Snapshot.PackageFamilyName -cne $LivePackage.FamilyName -or
            $Snapshot.ParentPid -isnot [int] -or $Snapshot.ParentPid -lt 0 -or $Snapshot.IsTopLevel -isnot [bool] -or $Snapshot.IsTopLevel -or $Snapshot.Mode -cne 'Unrelated' -or $null -ne $Snapshot.RendererPort -or $null -ne $Snapshot.MainPort -or
            -not(Test-CcodSupervisorExactStaleLaunch $Snapshot $expectedOldExecutable $codex.rendererPort $codex.mainPort $Adapters)){return $null}
-        return $Snapshot
+        return [pscustomobject][ordered]@{
+            Pid=[int]$Snapshot.Pid;CreationTimeUtc=[string]$Snapshot.CreationTimeUtc;SessionId=[int]$Snapshot.SessionId;UserSid=[string]$Snapshot.UserSid
+            Path=[string]$Snapshot.Path;PackageFamilyName=[string]$Snapshot.PackageFamilyName;CommandLine=[string]$Snapshot.CommandLine;ParentPid=[int]$Snapshot.ParentPid
+            IsTopLevel=$true;Mode='Unrelated';RendererPort=[int]$codex.rendererPort;MainPort=[int]$codex.mainPort
+        }
     }catch{return $null}
 }
 
@@ -967,8 +980,14 @@ function Invoke-CcodSupervisorTick {
         $HostState.NextReconcileMilliseconds=$deadline;$HostState.ForceReconcile=$false
     }
     if($null -ne $HostState.StaleReconciliationCandidate){
+        if($HostState.BlockAutomaticActions -and $HostState.Reason -cne 'StalePackageStatus'){
+            Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters;return
+        }
         $HostState.SessionState='Error';$HostState.BlockAutomaticActions=$true;$HostState.Reason='StalePackageStatus'
-        Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Apply' $null|Out-Null;return
+        $staleKey=('{0}|{1}' -f $HostState.StaleReconciliationCandidate.Pid,$HostState.StaleReconciliationCandidate.CreationTimeUtc)
+        if($HostState.AttemptKeys.Contains($staleKey)){Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters;return}
+        $HostState.AttemptKeys[$staleKey]=$true
+        Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'RepairStale' $HostState.StaleReconciliationCandidate|Out-Null;return
     }
     $context=New-CcodSupervisorEngineContext $HostState
     $decision=Invoke-CcodSupervisorAdapter $Adapters.GetSupervisorDecision @($context) 1

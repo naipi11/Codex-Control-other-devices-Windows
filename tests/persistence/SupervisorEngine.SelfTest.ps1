@@ -150,7 +150,7 @@ function New-CcodRecoveryEvidence {
 
 function New-CcodControllerResult {
     param(
-        [ValidateSet('Inspect','Apply','RepairRenderer','Recover')][string]$Action='Apply',
+        [ValidateSet('Inspect','Apply','RepairStale','RepairRenderer','Recover')][string]$Action='Apply',
         [bool]$Ok=$true,
         [string]$Outcome='Activated',
         [string]$SafeState='SpecialValidated',
@@ -421,6 +421,7 @@ $results += Invoke-CcodTest 'reduces every allowed controller success tuple from
     $recoverySource=New-CcodResultSource -ProcessId 300 -CreationTimeUtc '2030-02-03T04:03:00.0000000Z'
     $cases=@(
         @{Action='Apply';Outcome='Activated';Safe='SpecialValidated';Stage='Completed';Source=$null;Special=$special;Recovery=$null;State='Active'},
+        @{Action='RepairStale';Outcome='Activated';Safe='SpecialValidated';Stage='Completed';Source=$source;Special=$special;Recovery=$null;State='Active'},
         @{Action='Inspect';Outcome='Inspected';Safe='SpecialValidated';Stage='Inspected';Source=$null;Special=$special;Recovery=$null;State='Active'},
         @{Action='Inspect';Outcome='Inspected';Safe='RendererRepairRequired';Stage='Inspected';Source=$null;Special=$special;Recovery=$null;State='Inspecting'},
         @{Action='Inspect';Outcome='Inspected';Safe='OrdinaryRunning';Stage='Inspected';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
@@ -505,11 +506,13 @@ $results += Invoke-CcodTest 'reduces stale persisted-package evidence to one san
 $results += Invoke-CcodTest 'preserves fail-closed stale remote-server closure codes for an actionable controller result' {
     foreach($code in @('CCOD_STALE_PACKAGE_AMBIGUOUS','CCOD_STALE_PACKAGE_UNPROVEN')){
         $error=[pscustomobject][ordered]@{code=$code;stage='OrdinaryStopped';message='The session operation failed safely. See the session log for details.'}
-        $result=New-CcodControllerResult -Action Apply -Ok $false -Outcome Error -SafeState Error -Special $null -Error $error
-        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1'
+        $source=New-CcodResultSource -ProcessId 4596 -CreationTimeUtc '2030-02-03T04:00:00.0000000Z'
+        $result=New-CcodControllerResult -Action RepairStale -Ok $false -Outcome Error -SafeState Error -Source $source -Special $null -Error $error
+        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction RepairStale -ExpectedRuntimeId 'runtime-1'
         Assert-CcodExactEqual 'Error' $reduced.SessionState "$code remains fail closed"
         Assert-CcodExactEqual $true $reduced.BlockAutomaticActions "$code blocks another automatic special launch"
         Assert-CcodExactEqual $code $reduced.ErrorCode "$code survives controller validation"
+        Assert-CcodExactEqual '4596|2030-02-03T04:00:00.0000000Z' $reduced.AttemptKey "$code remains bound to the consumed stale lifecycle"
     }
 }
 

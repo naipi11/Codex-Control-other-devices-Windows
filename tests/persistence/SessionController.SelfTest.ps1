@@ -81,6 +81,7 @@ function New-CcodMalformedControllerTestLease([string]$Case){
 function Merge-CcodControllerTestAdapters([hashtable]$Overrides){
     $resolved=@{
         GetIdentity={ [pscustomobject][ordered]@{UserSid=$script:CcodControllerTestUserSid;SessionId=$script:CcodControllerTestSessionId} }
+        GetSupervisorProcess={param($ProcessId)[pscustomobject][ordered]@{Pid=[int]$ProcessId;CreationTimeUtc='2030-02-03T03:00:00.0000000Z';SessionId=[int]1}}
         StartStopwatch={ [pscustomobject]@{Marker='test-clock'} }
         GetElapsedMilliseconds={param($Clock)[long]0}
         EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)New-CcodControllerTestLease -Kind $Kind}
@@ -200,6 +201,22 @@ try{
         Assert-CcodEqual 0 $mismatchEvents.Count 'request session mismatch has no lease or engine action'
         Assert-CcodEqual 'CCOD_REQUEST_INVALID' $mismatch.Result.error.code 'actual session mismatch is stable request invalid'
         Assert-CcodEqual 'InputValidation' $mismatch.Result.stage 'session mismatch is input validation'
+
+        foreach($case in @(
+            @{Name='pid';Live=[pscustomobject][ordered]@{Pid=[int]12;CreationTimeUtc='2030-02-03T03:00:00.0000000Z';SessionId=[int]1}},
+            @{Name='creation';Live=[pscustomobject][ordered]@{Pid=[int]11;CreationTimeUtc='2030-02-03T03:00:01.0000000Z';SessionId=[int]1}}
+        )){
+            $authorityEvents=[Collections.Generic.List[string]]::new()
+            $authority=Invoke-CcodLeasedTestController -Request $request -Paths $paths -ResultPath $resultPath -Adapters @{
+                GetSupervisorProcess={param($ProcessId)$case.Live}.GetNewClosure()
+                EnterMutex={param($Kind,$UserSid,$SessionId,$TimeoutMilliseconds)$authorityEvents.Add('enter');throw 'must not acquire'}.GetNewClosure()
+                EngineInvoker={param($Action,$Request,$Paths)$authorityEvents.Add('engine');throw 'must not invoke'}.GetNewClosure()
+                WriteResult={param($Path,$Value)};WriteStdout={param($Line)};WriteStderr={param($Line)}
+            }
+            Assert-CcodEqual 0 $authorityEvents.Count "$($case.Name) mismatch has no lease or engine action"
+            Assert-CcodEqual 'CCOD_REQUEST_INVALID' $authority.Result.error.code "$($case.Name) mismatch is stable request invalid"
+            Assert-CcodEqual 'InputValidation' $authority.Result.stage "$($case.Name) mismatch is input validation"
+        }
     }
 
     Invoke-CcodTest 'stopwatch initialization failure is correlated redacted and framed once' {

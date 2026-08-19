@@ -78,7 +78,7 @@ function Assert-CcodSessionRequest {
     param($Request, [string]$ExpectedAction)
     Assert-CcodSessionExactProperties $Request @('schemaVersion','action','transactionId','runtimeId','supervisorIdentity','source','existingOnly','rendererPort','mainPort','timeoutMilliseconds','restartOrdinary') 'CCOD_REQUEST_INVALID' 'request'
     if (($Request.schemaVersion -isnot [int] -and $Request.schemaVersion -isnot [long]) -or $Request.schemaVersion -ne 1 -or
-        $Request.action -isnot [string] -or @('Inspect','Apply','RepairRenderer','Recover') -cnotcontains $Request.action -or
+        $Request.action -isnot [string] -or @('Inspect','Apply','RepairStale','RepairRenderer','Recover') -cnotcontains $Request.action -or
         $Request.action -cne $ExpectedAction -or -not (Test-CcodSessionCanonicalGuid $Request.transactionId) -or
         $Request.runtimeId -isnot [string] -or [string]::IsNullOrWhiteSpace($Request.runtimeId) -or
         $Request.existingOnly -isnot [bool] -or $Request.restartOrdinary -isnot [bool] -or
@@ -111,6 +111,15 @@ function Assert-CcodSessionRequest {
                 ($null -ne $Request.source -and (-not $Request.source.IsTopLevel -or $Request.source.Mode -cne 'Ordinary')) -or
                 ($null -ne $Request.rendererPort -and $null -ne $Request.mainPort -and $Request.rendererPort -eq $Request.mainPort)) {
                 Throw-CcodSessionError 'CCOD_REQUEST_INVALID' 'Apply fields are inconsistent' $Request
+            }
+        }
+        'RepairStale' {
+            if ($null -eq $Request.source -or -not $Request.existingOnly -or -not $Request.restartOrdinary -or
+                -not $Request.source.IsTopLevel -or $Request.source.Mode -cne 'Unrelated' -or
+                $Request.source.RendererPort -isnot [int] -or $Request.source.MainPort -isnot [int] -or
+                $Request.source.RendererPort -eq $Request.source.MainPort -or
+                $null -ne $Request.rendererPort -or $null -ne $Request.mainPort) {
+                Throw-CcodSessionError 'CCOD_REQUEST_INVALID' 'RepairStale fields are inconsistent' $Request
             }
         }
         'RepairRenderer' {
@@ -402,6 +411,20 @@ function Get-CcodCurrentPackageRoots {
     }|Sort-Object CreationTimeUtc,Pid)
 }
 
+function Assert-CcodLiveSupervisorIdentity {
+    param($Request,[hashtable]$Adapter)
+    $identity=& $Adapter.CurrentIdentity
+    $live=& $Adapter.GetSupervisorProcess ([int]$Request.supervisorIdentity.pid)
+    if($null -eq $identity -or [string]$identity.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or
+       [string]::IsNullOrWhiteSpace([string]$identity.UserSid) -or $null -eq $live -or
+       $live.Pid -isnot [int] -or $live.Pid -ne [int]$Request.supervisorIdentity.pid -or
+       $live.CreationTimeUtc -isnot [string] -or $live.CreationTimeUtc -cne $Request.supervisorIdentity.creationTimeUtc -or
+       [string]$live.SessionId -cne [string]$Request.supervisorIdentity.sessionId){
+        Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Repair authority no longer matches the live supervisor lifecycle' $Request.supervisorIdentity
+    }
+    return $identity
+}
+
 function Find-CcodOrdinarySnapshot {
     param($StatusEvidence,[hashtable]$Adapter)
     $candidates=@(& $Adapter.ListProcesses $StatusEvidence|Where-Object{$_.IsTopLevel -and $_.Mode -ceq 'Ordinary'}|Sort-Object CreationTimeUtc,Pid)
@@ -547,6 +570,14 @@ function Merge-CcodSessionAdapters($Adapters) {
             $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$identity.User.Value}finally{$identity.Dispose()}
             [pscustomobject][ordered]@{SessionId=$sessionId;UserSid=$sid}
         }
+        GetSupervisorProcess={param($ProcessId)
+            $process=$null
+            try{
+                $process=[Diagnostics.Process]::GetProcessById([int]$ProcessId)
+                $created=$process.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+                [pscustomobject][ordered]@{Pid=[int]$process.Id;CreationTimeUtc=$created;SessionId=[string]$process.SessionId}
+            }catch{return $null}finally{if($null -ne $process){$process.Dispose()}}
+        }
     }
     if ($null -ne $Adapters) {
         foreach($key in $Adapters.Keys){$defaults[$key]=$Adapters[$key]}
@@ -556,13 +587,20 @@ function Merge-CcodSessionAdapters($Adapters) {
 }
 
 function Close-CcodVerifiedStalePackageRoot {
-    param($Probe,$StatusEvidence,[hashtable]$Adapter,[int]$TimeoutMilliseconds)
+    param($Probe,$StatusEvidence,[hashtable]$Adapter,[int]$TimeoutMilliseconds,$ExpectedRoot)
     $package=[pscustomobject][ordered]@{Found=$true;FullName=$Probe.PackageFullName;FamilyName=$Probe.PackageFamilyName;Version=$Probe.PackageVersion;ExecutablePath=$Probe.ExecutablePath}
     $candidate=& $Adapter.FindStalePackageRoot $package $StatusEvidence
-    if($candidate.Outcome -ceq 'NoCandidate'){return}
+    if($candidate.Outcome -ceq 'NoCandidate'){
+        if($null -eq $ExpectedRoot){return}
+        Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'The requested old-package remote server lifecycle is no longer present' $ExpectedRoot
+    }
     if($candidate.Outcome -ceq 'Ambiguous'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_AMBIGUOUS' 'Multiple old-package remote server roots were found' $candidate}
     if($candidate.Outcome -cne 'Confirmed' -or $null -eq $candidate.Snapshot){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package remote server identity could not be proven' $candidate}
-    $root=$candidate.Snapshot;$tree=@(& $Adapter.GetStaleTree $root $package)
+    $root=$candidate.Snapshot
+    if($null -ne $ExpectedRoot -and -not (& $Adapter.ProcessMatch $ExpectedRoot $root)){
+        Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Worker stale-root evidence does not match the requested lifecycle' $candidate
+    }
+    $tree=@(& $Adapter.GetStaleTree $root $package)
     if($tree.Count -lt 1 -or @($tree|Where-Object{$_ -ne $null -and $_.Pid -eq $root.Pid -and (& $Adapter.ProcessMatch $root $_)}).Count -ne 1){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package process tree could not be proven before close' $tree}
     $byPid=@{};foreach($member in $tree){$byPid[[int]$member.Pid]=$member}
     $ordered=@($tree|Sort-Object @{Expression={-(Get-CcodTreeDepth $_ $byPid)}},@{Expression={$_.Pid}})
@@ -591,6 +629,11 @@ function Close-CcodVerifiedStalePackageRoot {
     }
     foreach($port in @($root.RendererPort,$root.MainPort)){
         if(-not (& $Adapter.WaitPortClosed $port $TimeoutMilliseconds)){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package remote server port did not explicitly refuse before launch' $port}
+    }
+    $post=& $Adapter.FindStalePackageRoot $package $StatusEvidence
+    if($post.Outcome -cne 'NoCandidate'){
+        $code=if($post.Outcome -ceq 'Ambiguous'){'CCOD_STALE_PACKAGE_AMBIGUOUS'}else{'CCOD_STALE_PACKAGE_UNPROVEN'}
+        Throw-CcodSessionError $code 'A same-family top-level debug root remains after stale closure' $post
     }
 }
 
@@ -895,37 +938,56 @@ function Invoke-CcodInspectSession {
     } -InspectionAdapters -SuppressDiagnostic
 }
 
-function Invoke-CcodApplySession {
-    [CmdletBinding()] param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,$Adapters)
-    return Invoke-CcodSessionCore Apply $Request $Paths $Adapters {
+function Invoke-CcodActivationSession {
+    param([ValidateSet('Apply','RepairStale')][string]$Action,[Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,$Adapters)
+    $repairStale=$Action -ceq 'RepairStale'
+    return Invoke-CcodSessionCore $Action $Request $Paths $Adapters {
         param($result,$adapter)
+        $repairIdentity=$null
+        if($repairStale){$repairIdentity=Assert-CcodLiveSupervisorIdentity $Request $adapter}
         $result.stage='StaticProbe';$state=& $adapter.ReadState $Paths.StateRoot $null
-        if(-not $state.TransitionActionsAllowed){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'State damage blocks Apply' $state.Damage}
+        if(-not $state.TransitionActionsAllowed){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'State damage blocks activation' $state.Damage}
         $probe=& $adapter.StaticProbe $state.Settings.nodeCandidates $Paths.CheckerPath
         $result.package=ConvertTo-CcodSessionPackage $probe
         $suppressionKey=Get-CcodSuppressionKey -PackageFullName $probe.PackageFullName -AppAsarSha256 $probe.AppAsarSha256 -RuntimeId $Request.runtimeId
         $state=& $adapter.ReadState $Paths.StateRoot $suppressionKey
-        if($state.StatusRebuildRequired){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Status requires a dedicated live rebuild before Apply' $state.Damage}
+        if($state.StatusRebuildRequired){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Status requires a dedicated live rebuild before activation' $state.Damage}
         $prior=$null
         if($null -ne $state.VerifiedPackages -and $null -ne $state.VerifiedPackages.packages){$property=$state.VerifiedPackages.packages.PSObject.Properties[$suppressionKey];if($null -ne $property){$prior=$property.Value}}
         $priorSucceeded=$null -ne $prior -and $prior.dynamicOutcome -ceq 'Succeeded' -and $prior.probeState -ceq 'Valid'
-        if($probe.StaticClassification -cne 'CandidateCompatible' -or -not $probe.Ready -or (-not $state.AutomaticCandidateTrialsAllowed -and -not $priorSucceeded)){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Package is not authorized for Apply' $probe}
+        if($probe.StaticClassification -cne 'CandidateCompatible' -or -not $probe.Ready -or (-not $state.AutomaticCandidateTrialsAllowed -and -not $priorSucceeded)){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Package is not authorized for activation' $probe}
         $source=$Request.source
-        if($null -eq $source -and -not $Request.existingOnly){
-            $roots=@(Get-CcodCurrentPackageRoots $state.Status $probe $Request $adapter)
-            if($roots.Count -gt 1 -or ($roots.Count -eq 1 -and $roots[0].Mode -cne 'Ordinary')){Throw-CcodSessionError 'CCOD_SOURCE_AMBIGUOUS' 'Current package roots do not prove one ordinary source' $roots}
-            if($roots.Count -eq 1){$source=$roots[0]}
-        }
-        if($null -ne $source){
-            $identity=& $adapter.CurrentIdentity
-            if($null -eq $identity -or [string]$identity.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or
-                [string]$source.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or $source.UserSid -cne $identity.UserSid -or
-                -not $source.Path.Equals($probe.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or $source.PackageFamilyName -cne $probe.PackageFamilyName){
-                Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Source identity is outside the current supervisor package boundary' $source
+        if($repairStale){
+            $result.source=ConvertTo-CcodSessionSource $source
+            if([string]$source.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or $source.UserSid -cne $repairIdentity.UserSid -or
+               $source.PackageFamilyName -cne $probe.PackageFamilyName -or
+               $source.Path.Equals($probe.ExecutablePath,[StringComparison]::OrdinalIgnoreCase)){
+                Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Requested stale source is outside the live supervisor package boundary' $source
             }
-            $actual=& $adapter.GetProcess $source.Pid $state.Status
-            if($null -eq $actual -or -not (& $adapter.ProcessMatch $source $actual)){Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Source identity changed before transaction start' $source}
-            $source=$actual;$result.source=ConvertTo-CcodSessionSource $source
+            $currentRoots=@(Get-CcodCurrentPackageRoots $state.Status $probe $Request $adapter)
+            if($currentRoots.Count -ne 0){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_AMBIGUOUS' 'A current-package root conflicts with stale repair' $currentRoots}
+            $result.stage='StaleClose'
+            Close-CcodVerifiedStalePackageRoot -Probe $probe -StatusEvidence $state.Status -Adapter $adapter -TimeoutMilliseconds (Get-CcodProcessControlTimeout $Request.timeoutMilliseconds) -ExpectedRoot $source
+            $currentRoots=@(Get-CcodCurrentPackageRoots $state.Status $probe $Request $adapter)
+            if($currentRoots.Count -ne 0){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_AMBIGUOUS' 'A current-package root appeared during stale repair' $currentRoots}
+            $source=$null
+        }else{
+            if($null -eq $source -and -not $Request.existingOnly){
+                $roots=@(Get-CcodCurrentPackageRoots $state.Status $probe $Request $adapter)
+                if($roots.Count -gt 1 -or ($roots.Count -eq 1 -and $roots[0].Mode -cne 'Ordinary')){Throw-CcodSessionError 'CCOD_SOURCE_AMBIGUOUS' 'Current package roots do not prove one ordinary source' $roots}
+                if($roots.Count -eq 1){$source=$roots[0]}
+            }
+            if($null -ne $source){
+                $identity=& $adapter.CurrentIdentity
+                if($null -eq $identity -or [string]$identity.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or
+                    [string]$source.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or $source.UserSid -cne $identity.UserSid -or
+                    -not $source.Path.Equals($probe.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or $source.PackageFamilyName -cne $probe.PackageFamilyName){
+                    Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Source identity is outside the current supervisor package boundary' $source
+                }
+                $actual=& $adapter.GetProcess $source.Pid $state.Status
+                if($null -eq $actual -or -not (& $adapter.ProcessMatch $source $actual)){Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Source identity changed before transaction start' $source}
+                $source=$actual;$result.source=ConvertTo-CcodSessionSource $source
+            }
         }
         $journalPackage=ConvertTo-CcodJournalPackage $probe
         $result.stage='IntentWritten';$transition=& $adapter.NewTransition $Paths.TransitionPath $source $journalPackage $Request.runtimeId $null $null $Request.transactionId
@@ -941,7 +1003,6 @@ function Invoke-CcodApplySession {
         } else {
             $result.stage='OrdinaryStopped';$transition=& $adapter.SetTransition $Paths.TransitionPath $Request.transactionId 'IntentWritten' 'OrdinaryStopped' $null $null $null $null
         }
-        Close-CcodVerifiedStalePackageRoot -Probe $probe -StatusEvidence $state.Status -Adapter $adapter -TimeoutMilliseconds (Get-CcodProcessControlTimeout $Request.timeoutMilliseconds)
         $currentStage='OrdinaryStopped';$special=$null;$renderer=$Request.rendererPort;$main=$Request.mainPort;$recoveryAttempted=$false
         try {
             $rendererExcluded=if($null -eq $main){@()}else{@($main)}
@@ -964,7 +1025,7 @@ function Invoke-CcodApplySession {
             & $adapter.CompleteTransition $Paths.TransitionPath $Paths.TransitionLogPath $Request.transactionId 'Activated' | Out-Null
             $result.ok=$true;$result.outcome='Activated';$result.safeState='SpecialValidated';$result.stage='Completed';return $result
         } catch {
-            Write-CcodSessionDiagnostic $result 'Apply' $Request.transactionId $result.stage (Get-CcodSessionErrorCode $_) $Paths $adapter
+            Write-CcodSessionDiagnostic $result $Action $Request.transactionId $result.stage (Get-CcodSessionErrorCode $_) $Paths $adapter
             if($recoveryAttempted){Throw-CcodSessionError 'CCOD_RECOVERY_UNPROVEN' 'Recursive recovery is forbidden' $_}
             $recoveryAttempted=$true
             $recoveryRenderer=$null;$recoveryMain=$null
@@ -972,6 +1033,16 @@ function Invoke-CcodApplySession {
             return Invoke-CcodRecoveryOperation $result $Request $Paths $adapter $state $probe $currentStage $special $recoveryRenderer $recoveryMain $Request.transactionId
         }
     }
+}
+
+function Invoke-CcodApplySession {
+    [CmdletBinding()] param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,$Adapters)
+    return Invoke-CcodActivationSession -Action Apply -Request $Request -Paths $Paths -Adapters $Adapters
+}
+
+function Invoke-CcodRepairStaleSession {
+    [CmdletBinding()] param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)]$Paths,$Adapters)
+    return Invoke-CcodActivationSession -Action RepairStale -Request $Request -Paths $Paths -Adapters $Adapters
 }
 
 function Invoke-CcodRepairRenderer {
@@ -1269,6 +1340,6 @@ function Invoke-CcodReplayTransition {
 }
 
 Export-ModuleMember -Function @(
-    'Invoke-CcodInspectSession','Invoke-CcodApplySession','Invoke-CcodRepairRenderer',
+    'Invoke-CcodInspectSession','Invoke-CcodApplySession','Invoke-CcodRepairStaleSession','Invoke-CcodRepairRenderer',
     'Invoke-CcodRecoverSession','Invoke-CcodReplayTransition','Test-CcodBridgeResult'
 )

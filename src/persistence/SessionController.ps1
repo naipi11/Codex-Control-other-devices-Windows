@@ -5,7 +5,7 @@ param(
     [Parameter(ParameterSetName='Supervisor')]
     [string]$ResultPath,
     [Parameter(ParameterSetName='Manual')]
-    [ValidateSet('Inspect','Apply','RepairRenderer','Recover')]
+    [ValidateSet('Inspect','Apply','RepairStale','RepairRenderer','Recover')]
     [string]$Action,
     [Parameter(ParameterSetName='Manual')]
     [bool]$ExistingOnly=$true,
@@ -42,7 +42,7 @@ function Test-CcodControllerCanonicalGuid([object]$Value){
 function New-CcodControllerErrorResult {
     param($Request,[string]$Code,[string]$Stage,[string]$Message)
     $action=$null;$transactionId=$null
-    if($null -ne $Request -and $null -ne $Request.PSObject.Properties['action'] -and $Request.action -is [string] -and @('Inspect','Apply','RepairRenderer','Recover') -ccontains $Request.action){$action=$Request.action}
+    if($null -ne $Request -and $null -ne $Request.PSObject.Properties['action'] -and $Request.action -is [string] -and @('Inspect','Apply','RepairStale','RepairRenderer','Recover') -ccontains $Request.action){$action=$Request.action}
     if($null -ne $Request -and $null -ne $Request.PSObject.Properties['transactionId'] -and (Test-CcodControllerCanonicalGuid $Request.transactionId)){$transactionId=$Request.transactionId}
     [pscustomobject][ordered]@{schemaVersion=1;action=$action;ok=$false;outcome='Error';safeState='Error';stage=$Stage;transactionId=$transactionId;package=$null;source=$null;special=$null;probes=$null;recovery=$null;error=[pscustomobject][ordered]@{code=$Code;stage=$Stage;message='The session controller failed safely. See the session log for details.'};logFile=$null}
 }
@@ -100,6 +100,14 @@ function Get-CcodControllerAdapters($Adapters){
                 [pscustomobject][ordered]@{UserSid=$identity.User.Value;SessionId=[int]$process.SessionId}
             }finally{if($null -ne $process){$process.Dispose()};if($null -ne $identity){$identity.Dispose()}}
         }
+        GetSupervisorProcess={param($ProcessId)
+            $process=$null
+            try{
+                $process=[Diagnostics.Process]::GetProcessById([int]$ProcessId)
+                $created=$process.StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+                [pscustomobject][ordered]@{Pid=[int]$process.Id;CreationTimeUtc=$created;SessionId=[int]$process.SessionId}
+            }catch{return $null}finally{if($null -ne $process){$process.Dispose()}}
+        }
         StartStopwatch={ [Diagnostics.Stopwatch]::StartNew() }
         GetElapsedMilliseconds={param($Clock)[long]$Clock.ElapsedMilliseconds}
         EnterMutex={
@@ -110,7 +118,7 @@ function Get-CcodControllerAdapters($Adapters){
         ExitMutex={param($Lease)Exit-CcodMutex -Lease $Lease}
         ReadJournal={param($Path)Read-CcodTransition -Path $Path}
         UtcNow={ [DateTime]::UtcNow }
-        EngineInvoker={param($Action,$Request,$Paths)switch($Action){'Inspect'{Invoke-CcodInspectSession -Request $Request -Paths $Paths}'Apply'{Invoke-CcodApplySession -Request $Request -Paths $Paths}'RepairRenderer'{Invoke-CcodRepairRenderer -Request $Request -Paths $Paths}'Recover'{Invoke-CcodRecoverSession -Request $Request -Paths $Paths}default{throw 'unsupported controller action'}}}
+        EngineInvoker={param($Action,$Request,$Paths)switch($Action){'Inspect'{Invoke-CcodInspectSession -Request $Request -Paths $Paths}'Apply'{Invoke-CcodApplySession -Request $Request -Paths $Paths}'RepairStale'{Invoke-CcodRepairStaleSession -Request $Request -Paths $Paths}'RepairRenderer'{Invoke-CcodRepairRenderer -Request $Request -Paths $Paths}'Recover'{Invoke-CcodRecoverSession -Request $Request -Paths $Paths}default{throw 'unsupported controller action'}}}
         WriteResult={param($Path,$Value)Write-CcodAtomicJson -Path $Path -Value $Value}
         WriteStdout={param($Line)[Console]::Out.WriteLine($Line)}
         WriteStderr={param($Line)[Console]::Error.WriteLine($Line)}
@@ -126,19 +134,35 @@ function Test-CcodControllerCanonicalSid([object]$Value){
     return $sid.Value -ceq $Value
 }
 
+function Test-CcodControllerCanonicalUtc([object]$Value){
+    if($Value -isnot [string]){return $false}
+    $parsed=[DateTime]::MinValue
+    return [DateTime]::TryParseExact($Value,'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$parsed) -and
+        $parsed.Kind -eq [DateTimeKind]::Utc -and $parsed.ToString('o',[Globalization.CultureInfo]::InvariantCulture) -ceq $Value
+}
+
 function Test-CcodControllerLeaseInput {
-    param($Request,$Identity)
+    param($Request,$Identity,$SupervisorProcess)
     if($null -eq $Request -or ($Request -isnot [pscustomobject] -and $Request -isnot [Collections.IDictionary]) -or
-        $null -eq $Request.PSObject.Properties['action'] -or $Request.action -isnot [string] -or @('Inspect','Apply','RepairRenderer','Recover') -cnotcontains $Request.action -or
+        $null -eq $Request.PSObject.Properties['action'] -or $Request.action -isnot [string] -or @('Inspect','Apply','RepairStale','RepairRenderer','Recover') -cnotcontains $Request.action -or
         $null -eq $Request.PSObject.Properties['transactionId'] -or -not (Test-CcodControllerCanonicalGuid $Request.transactionId) -or
         $null -eq $Request.PSObject.Properties['timeoutMilliseconds'] -or $Request.timeoutMilliseconds -isnot [int] -or $Request.timeoutMilliseconds -lt 500 -or $Request.timeoutMilliseconds -gt 120000 -or
         $null -eq $Request.PSObject.Properties['supervisorIdentity'] -or $null -eq $Request.supervisorIdentity -or
+        $null -eq $Request.supervisorIdentity.PSObject.Properties['pid'] -or $Request.supervisorIdentity.pid -isnot [int] -or $Request.supervisorIdentity.pid -lt 1 -or
+        $null -eq $Request.supervisorIdentity.PSObject.Properties['creationTimeUtc'] -or -not (Test-CcodControllerCanonicalUtc $Request.supervisorIdentity.creationTimeUtc) -or
         $null -eq $Request.supervisorIdentity.PSObject.Properties['sessionId'] -or $Request.supervisorIdentity.sessionId -isnot [string] -or
         $null -eq $Identity -or ($Identity -isnot [pscustomobject] -and $Identity -isnot [Collections.IDictionary]) -or
         $null -eq $Identity.PSObject.Properties['UserSid'] -or -not (Test-CcodControllerCanonicalSid $Identity.UserSid) -or
-        $null -eq $Identity.PSObject.Properties['SessionId'] -or $Identity.SessionId -isnot [int] -or $Identity.SessionId -lt 0){return $false}
+        $null -eq $Identity.PSObject.Properties['SessionId'] -or $Identity.SessionId -isnot [int] -or $Identity.SessionId -lt 0 -or
+        $null -eq $SupervisorProcess -or ($SupervisorProcess -isnot [pscustomobject] -and $SupervisorProcess -isnot [Collections.IDictionary]) -or
+        $null -eq $SupervisorProcess.PSObject.Properties['Pid'] -or $SupervisorProcess.Pid -isnot [int] -or
+        $null -eq $SupervisorProcess.PSObject.Properties['CreationTimeUtc'] -or $SupervisorProcess.CreationTimeUtc -isnot [string] -or
+        $null -eq $SupervisorProcess.PSObject.Properties['SessionId'] -or $SupervisorProcess.SessionId -isnot [int]){return $false}
     $canonicalSession=$Identity.SessionId.ToString([Globalization.CultureInfo]::InvariantCulture)
-    return $Request.supervisorIdentity.sessionId -ceq $canonicalSession
+    return $Request.supervisorIdentity.sessionId -ceq $canonicalSession -and
+        $SupervisorProcess.Pid -eq $Request.supervisorIdentity.pid -and
+        $SupervisorProcess.CreationTimeUtc -ceq $Request.supervisorIdentity.creationTimeUtc -and
+        $SupervisorProcess.SessionId -eq $Identity.SessionId
 }
 
 function Get-CcodControllerRemainingBudget {
@@ -218,7 +242,8 @@ function Invoke-CcodSessionController {
     $adapter=Get-CcodControllerAdapters $Adapters;$result=$null;$intendedResult=$null;$diagnosticWritten=$false;$accountLease=$null;$sessionLease=$null;$accountLeaseAcquired=$false;$sessionLeaseAcquired=$false;$releaseFailed=$false;$provisionalRequired=$false;$initialResultWriteFailed=$false
     try{
         try{$identity=& $adapter.GetIdentity}catch{$identity=$null}
-        if(-not (Test-CcodControllerLeaseInput $Request $identity)){
+        try{$supervisorProcess=& $adapter.GetSupervisorProcess $Request.supervisorIdentity.pid}catch{$supervisorProcess=$null}
+        if(-not (Test-CcodControllerLeaseInput $Request $identity $supervisorProcess)){
             $result=New-CcodControllerErrorResult $Request 'CCOD_REQUEST_INVALID' 'InputValidation' 'The request does not match this controller session.'
         }else{
             $total=[Math]::Min([int]$Request.timeoutMilliseconds,5000)

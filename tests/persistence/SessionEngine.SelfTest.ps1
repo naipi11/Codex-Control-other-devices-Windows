@@ -28,7 +28,7 @@ function New-CcodEngineSnapshot {
 
 function New-CcodEngineRequest {
     param(
-        [ValidateSet('Inspect','Apply','RepairRenderer','Recover')][string]$Action = 'Inspect',
+        [ValidateSet('Inspect','Apply','RepairStale','RepairRenderer','Recover')][string]$Action = 'Inspect',
         [string]$RuntimeId = 'runtime-1',
         [int]$SupervisorPid = 11,
         [string]$SupervisorCreationTimeUtc = '2030-02-03T03:00:00.0000000Z',
@@ -307,6 +307,7 @@ function New-CcodEngineAdapters {
         StartOrdinary={ param($TimeoutMilliseconds) $counts.OrdinaryStart++; [pscustomobject]@{ Outcome='Adopted'; Snapshot=(& $snapshotFactory -Pid 301 -CreationTimeUtc '2030-02-03T04:06:01.0000000Z'); Process=$null } }.GetNewClosure()
         Delay={ param($Milliseconds) }
         CurrentIdentity={ [pscustomobject][ordered]@{SessionId='1';UserSid='S-1-5-21-test'} }
+        GetSupervisorProcess={ param($ProcessId) [pscustomobject][ordered]@{Pid=[int]$ProcessId;CreationTimeUtc='2030-02-03T03:00:00.0000000Z';SessionId='1'} }
         Events=$eventsValue
         Counters=$counts
     }
@@ -321,8 +322,8 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-engine-selftest-' + [guid]::
 try {
     $paths = New-CcodEnginePaths -Root $root
 
-    Invoke-CcodTest 'exports exactly the six public SessionEngine functions' {
-        Assert-CcodEqual 'Invoke-CcodApplySession,Invoke-CcodInspectSession,Invoke-CcodRecoverSession,Invoke-CcodRepairRenderer,Invoke-CcodReplayTransition,Test-CcodBridgeResult' `
+    Invoke-CcodTest 'exports exactly the seven public SessionEngine functions' {
+        Assert-CcodEqual 'Invoke-CcodApplySession,Invoke-CcodInspectSession,Invoke-CcodRecoverSession,Invoke-CcodRepairRenderer,Invoke-CcodRepairStaleSession,Invoke-CcodReplayTransition,Test-CcodBridgeResult' `
             ((Get-Command -Module SessionEngine | Sort-Object Name | ForEach-Object Name) -join ',') 'public API remains exact'
     }
 
@@ -773,7 +774,7 @@ try {
         Assert-CcodEqual 'CCOD_REQUEST_INVALID' (Invoke-CcodInspectSession -Request $invalid -Paths $paths -Adapters @{ReadState={throw 'must not run'}}).error.code '120001 is rejected before adapters'
     }
 
-    Invoke-CcodTest 'closes one verified stale same-family remote root before launching current special and blocks ambiguity' {
+    Invoke-CcodTest 'repairs only the identity-bound stale root and blocks disappearance mismatch or ambiguity before launch' {
         $probe=New-CcodEngineProbe
         $probe.PackageFullName='OpenAI.Codex_26.814.5517.0_x64__2p2nqsd0c76g0';$probe.PackageVersion='26.814.5517.0'
         $probe.ExecutablePath='C:\Program Files\WindowsApps\OpenAI.Codex_26.814.5517.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
@@ -782,9 +783,9 @@ try {
         $old.CommandLine='"' + $old.Path + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
         $child=New-CcodEngineSnapshot -Pid 4597 -CreationTimeUtc '2030-02-03T04:00:01.0000000Z' -Mode Unrelated -ParentPid 4596
         $child.Path=$old.Path;$child.PackageFamilyName=$old.PackageFamilyName;$child.CommandLine='"' + $child.Path + '" --type=renderer'
-        $events=[Collections.Generic.List[string]]::new();$state=[pscustomobject]@{AliveByPid=@{4596=$old;4597=$child};Waits=0;Stops=0;Starts=0};$snapshotFactory=${function:New-CcodEngineSnapshot}
+        $events=[Collections.Generic.List[string]]::new();$state=[pscustomobject]@{AliveByPid=@{4596=$old;4597=$child};Waits=0;Stops=0;Starts=0;Finds=0};$snapshotFactory=${function:New-CcodEngineSnapshot}
         $adapters=New-CcodEngineAdapters -Probe $probe -Processes @($old,$child) -Events $events
-        $adapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='Confirmed';Snapshot=$old}}.GetNewClosure()
+        $adapters.FindStalePackageRoot={param($Package,$StatusEvidence)$state.Finds++;if($state.Finds -eq 1){[pscustomobject][ordered]@{Outcome='Confirmed';Snapshot=$old}}else{[pscustomobject][ordered]@{Outcome='NoCandidate';Snapshot=$null}}}.GetNewClosure()
         $adapters.GetStaleTree={param($Root,$Package)@($child,$old)}.GetNewClosure()
         $adapters.GetStaleProcess={param($Pid,$Package)if($state.AliveByPid.ContainsKey([int]$Pid)){$state.AliveByPid[[int]$Pid]}else{$null}}.GetNewClosure()
         $adapters.RequestStaleGracefulClose={param($Expected,$Package)$events.Add('GracefulClose');[pscustomobject]@{Outcome='Requested';Snapshot=$Expected}}.GetNewClosure()
@@ -792,8 +793,9 @@ try {
         $adapters.StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds)$state.Stops++;$events.Add("StopStale:$($Expected.Pid)");$state.AliveByPid.Remove([int]$Expected.Pid);[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
         $adapters.WaitPortClosed={param($Port,$TimeoutMilliseconds)$events.Add("Port:$Port");$true}.GetNewClosure()
         $adapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$state.Starts++;$events.Add('StartSpecial');[pscustomobject]@{Outcome='Started';Snapshot=(& $snapshotFactory -Pid 201 -Mode Unrelated -RendererPort $RendererPort -MainPort $MainPort);Process=[pscustomobject]@{Id=201}}}.GetNewClosure()
-        $activated=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $null -ExistingOnly $false) -Paths $paths -Adapters $adapters
+        $activated=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -ExistingOnly $true) -Paths $paths -Adapters $adapters
         Assert-CcodEqual 'Activated' $activated.outcome 'one exact old-package remote root is closed before launch'
+        Assert-CcodEqual 4596 $activated.source.pid 'successful repair remains correlated to the exact supervisor-observed stale lifecycle'
         Assert-CcodEqual 'GracefulClose,WaitExit,StopStale:4597,StopStale:4596,Port:41001,Port:41002,StartSpecial' (($events | Where-Object { $_ -match '^(GracefulClose|WaitExit|StopStale:|Port:|StartSpecial)' }) -join ',') 'child-first exact tree closure and both port refusals precede special launch'
         Assert-CcodEqual 2 $state.Stops 'every surviving recorded tree member is stopped only after the graceful wait'
 
@@ -804,7 +806,7 @@ try {
         $survivingAdapters.RequestStaleGracefulClose={param($Expected,$Package)[pscustomobject]@{Outcome='NotRequested';Snapshot=$Expected}}
         $survivingAdapters.StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds)if($Expected.Pid -eq 4596){$survivingState.AliveByPid.Remove(4596)};[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
         $survivingAdapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$survivingEvents.Add('StartSpecial');throw 'must not start'}.GetNewClosure()
-        $surviving=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $false -TransactionId 'a92ec482-6dcf-4b9a-af19-18d9bd4b7ec1') -Paths $paths -Adapters $survivingAdapters
+        $surviving=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId 'a92ec482-6dcf-4b9a-af19-18d9bd4b7ec1') -Paths $paths -Adapters $survivingAdapters
         Assert-CcodEqual 'CCOD_STALE_PACKAGE_UNPROVEN' $surviving.error.code 'a recorded stale child that remains alive blocks special launch'
         Assert-CcodTrue ($survivingEvents -cnotcontains 'StartSpecial') 'surviving stale child never permits a second remote server'
 
@@ -815,16 +817,36 @@ try {
         $portAdapters.RequestStaleGracefulClose={param($Expected,$Package)[pscustomobject]@{Outcome='NotRequested';Snapshot=$Expected}}
         $portAdapters.StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds)$portState.AliveByPid.Remove([int]$Expected.Pid);[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
         $portAdapters.WaitPortClosed={param($Port,$TimeoutMilliseconds)$Port -ne 41002}.GetNewClosure();$portAdapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$portEvents.Add('StartSpecial');throw 'must not start'}.GetNewClosure()
-        $openPort=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $false -TransactionId '55a91c89-723d-4bd1-aac0-a0f1b9a2a9fc') -Paths $paths -Adapters $portAdapters
+        $openPort=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId '55a91c89-723d-4bd1-aac0-a0f1b9a2a9fc') -Paths $paths -Adapters $portAdapters
         Assert-CcodEqual 'CCOD_STALE_PACKAGE_UNPROVEN' $openPort.error.code 'a stale remote port that remains open blocks special launch'
         Assert-CcodTrue ($portEvents -cnotcontains 'StartSpecial') 'open stale remote port never permits a second server'
 
         $other=$old|Select-Object *;$other.Pid=4597;$other.CreationTimeUtc='2030-02-03T04:00:01.0000000Z'
         $ambiguousEvents=[Collections.Generic.List[string]]::new();$ambiguousAdapters=New-CcodEngineAdapters -Probe $probe -Processes @($old,$other) -Events $ambiguousEvents
         $ambiguousAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='Ambiguous';Snapshot=$null}}.GetNewClosure()
-        $ambiguous=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $false -TransactionId '8394cc7a-69dc-4da0-b229-6fcffb32ec50') -Paths $paths -Adapters $ambiguousAdapters
+        $ambiguous=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId '8394cc7a-69dc-4da0-b229-6fcffb32ec50') -Paths $paths -Adapters $ambiguousAdapters
         Assert-CcodEqual 'CCOD_STALE_PACKAGE_AMBIGUOUS' $ambiguous.error.code 'multiple stale same-family roots block special launch'
         Assert-CcodTrue ($ambiguousEvents -cnotcontains 'StartSpecial') 'ambiguity never launches a second special root'
+
+        $missingEvents=[Collections.Generic.List[string]]::new();$missingAdapters=New-CcodEngineAdapters -Probe $probe -Events $missingEvents
+        $missingAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='NoCandidate';Snapshot=$null}}
+        $missing=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId 'b36071ed-9135-418f-901d-46e657e4277d') -Paths $paths -Adapters $missingAdapters
+        Assert-CcodEqual 'CCOD_STALE_PACKAGE_UNPROVEN' $missing.error.code 'an exact candidate that disappears between observation and worker rescan is unproven'
+        Assert-CcodTrue ($missingEvents -cnotcontains 'StartSpecial') 'a disappeared stale lifecycle never becomes source-less launch permission'
+
+        $changed=$old|Select-Object *;$changed.CreationTimeUtc='2030-02-03T04:00:09.0000000Z'
+        $changedEvents=[Collections.Generic.List[string]]::new();$changedAdapters=New-CcodEngineAdapters -Probe $probe -Events $changedEvents
+        $changedAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='Confirmed';Snapshot=$changed}}.GetNewClosure()
+        $changed=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId '3a17e2dc-6f3c-4bb7-ad4f-7d0ea20a54e4') -Paths $paths -Adapters $changedAdapters
+        Assert-CcodEqual 'CCOD_STALE_PACKAGE_UNPROVEN' $changed.error.code 'a worker rescan cannot substitute a different stale lifecycle for the requested one'
+        Assert-CcodTrue ($changedEvents -cnotcontains 'StartSpecial') 'mismatched stale request identity blocks before launch'
+
+        $supervisorEvents=[Collections.Generic.List[string]]::new();$supervisorAdapters=New-CcodEngineAdapters -Probe $probe -Events $supervisorEvents
+        $supervisorAdapters.GetSupervisorProcess={param($ProcessId)[pscustomobject][ordered]@{Pid=[int]$ProcessId;CreationTimeUtc='2030-02-03T03:00:01.0000000Z';SessionId='1'}}
+        $supervisorAdapters.FindStalePackageRoot={throw 'must not rescan stale roots for a replaced supervisor'}
+        $supervisorMismatch=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId 'b3f60f6a-672e-4daf-b5d7-44932c74e8cd') -Paths $paths -Adapters $supervisorAdapters
+        Assert-CcodEqual 'CCOD_SOURCE_CHANGED' $supervisorMismatch.error.code 'repair authority is bound to live supervisor PID and creation time'
+        Assert-CcodEqual 0 $supervisorEvents.Count 'supervisor replacement blocks before state process or launch activity'
     }
 
     Invoke-CcodTest 'discovers one existing ordinary source and rejects manual Start root ambiguity' {

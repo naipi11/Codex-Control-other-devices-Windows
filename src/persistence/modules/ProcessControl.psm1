@@ -798,13 +798,24 @@ function Get-CcodStalePackageRootResult {
     } else { @($Snapshots) }
     $currentSessionId = & $adapter.GetCurrentSessionId
     $currentUserSid = & $adapter.GetCurrentUserSid
-    $candidates = @($observed | Where-Object {
-        $_.SessionId -eq $currentSessionId -and $_.UserSid -ceq $currentUserSid -and
-        (Test-CcodStalePackageRootSnapshot -Snapshot $_ -Package $Package -PackageParts $parts -Adapter $adapter)
-    } | Sort-Object CreationTimeUtc, Pid)
-    if ($candidates.Count -eq 0) { return New-CcodStalePackageRootResult -Outcome NoCandidate -Snapshot $null }
-    if ($candidates.Count -ne 1) { return New-CcodStalePackageRootResult -Outcome Ambiguous -Snapshot $null }
-    $candidate = $candidates[0]
+    $suspicious = [Collections.Generic.List[object]]::new()
+    $candidates = [Collections.Generic.List[object]]::new()
+    foreach ($snapshot in @($observed)) {
+        if ($null -eq $snapshot -or $snapshot.SessionId -ne $currentSessionId -or $snapshot.UserSid -cne $currentUserSid -or
+            $snapshot.PackageFamilyName -isnot [string] -or -not (Test-CcodOrdinalIgnoreCase $snapshot.PackageFamilyName $Package.FamilyName) -or
+            $snapshot.Path -isnot [string] -or [IO.Path]::GetFileName($snapshot.Path) -ine 'ChatGPT.exe' -or
+            $snapshot.CommandLine -isnot [string] -or $snapshot.IsTopLevel -isnot [bool] -or -not $snapshot.IsTopLevel) { continue }
+        $launchArguments = Get-CcodParsedLaunchArguments -CommandLine $snapshot.CommandLine -ExecutablePath $snapshot.Path -Adapters $adapter
+        if (-not $launchArguments.Valid -or -not $launchArguments.IsTopLevel -or -not $launchArguments.HasDebugSwitch) { continue }
+        $suspicious.Add($snapshot)
+        if (Test-CcodStalePackageRootSnapshot -Snapshot $snapshot -Package $Package -PackageParts $parts -Adapter $adapter) {
+            $candidates.Add($snapshot)
+        }
+    }
+    $orderedCandidates = @($candidates | Sort-Object CreationTimeUtc, Pid)
+    if ($suspicious.Count -eq 0) { return New-CcodStalePackageRootResult -Outcome NoCandidate -Snapshot $null }
+    if ($suspicious.Count -ne 1 -or $orderedCandidates.Count -ne 1) { return New-CcodStalePackageRootResult -Outcome Ambiguous -Snapshot $null }
+    $candidate = $orderedCandidates[0]
     $first = if ($rawMode) { Get-CcodStalePackageProcessSnapshot -ProcessId ([int]$candidate.Pid) -Package $Package -Adapter $adapter } else { & $adapter.GetProcess ([int]$candidate.Pid) $null }
     $second = if ($rawMode) { Get-CcodStalePackageProcessSnapshot -ProcessId ([int]$candidate.Pid) -Package $Package -Adapter $adapter } else { & $adapter.GetProcess ([int]$candidate.Pid) $null }
     if ($null -eq $first -or $null -eq $second -or -not (Test-CcodProcessMatch -Expected $candidate -Actual $first) -or

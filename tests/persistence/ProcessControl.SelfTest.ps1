@@ -250,13 +250,13 @@ try {
         $currentRoot = New-CcodSnapshot -ProcessId 26700 -Path $current.ExecutablePath -Mode Unrelated -RendererPort 41003 -MainPort 41004 -CommandLine ('"' + $current.ExecutablePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41003 --inspect=127.0.0.1:41004')
         $currentRoot.IsTopLevel = $true
         $currentResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($currentRoot) -Adapters @{ GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'};GetProcess = { param($ProcessId, $StatusEvidence) $currentRoot } }
-        Assert-CcodEqual 'NoCandidate' $currentResult.Outcome 'the current managed package root is never classified stale'
+        Assert-CcodEqual 'Ambiguous' $currentResult.Outcome 'an equal-version same-family top-level debug root is a conflict but never a stale closure target'
 
         $futurePath = 'C:\Program Files\WindowsApps\OpenAI.Codex_26.814.9999.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
         $futureAdapters = New-CcodSnapshotAdapters -Path $futurePath -CommandLine ('"' + $futurePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006') -ParsedArguments @($futurePath,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41005','--inspect=127.0.0.1:41006')
         $futureAdapters.GetPackageIdentity = { $current }.GetNewClosure()
         $futureResult = Get-CcodStalePackageRootResult -Package $current -ProcessIds @(26701) -Adapters $futureAdapters
-        Assert-CcodEqual 'NoCandidate' $futureResult.Outcome 'a same-family newer package version is never a stale closure target'
+        Assert-CcodEqual 'Ambiguous' $futureResult.Outcome 'a same-family newer package version is a conflict but never a stale closure target'
 
         $extraDebug = $result.Snapshot | Select-Object *
         $extraDebug.CommandLine = '"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002 --inspect-brk=127.0.0.1:41003'
@@ -265,7 +265,7 @@ try {
             ParseCommandLine={param($CommandLine)@($oldPath,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002','--inspect-brk=127.0.0.1:41003')}
             GetProcess={param($ProcessId,$StatusEvidence)$extraDebug}.GetNewClosure()
         }
-        Assert-CcodEqual 'NoCandidate' $extraDebugResult.Outcome 'extra or conflicting debug argv cannot become a stale closure target'
+        Assert-CcodEqual 'Ambiguous' $extraDebugResult.Outcome 'extra or conflicting same-family top-level debug argv are a conflict but never a closure target'
 
         foreach($unsafePath in @(
             'C:\PROGRA~1\WindowsApps\OpenAI.Codex_26.814.5167.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe',
@@ -274,7 +274,7 @@ try {
             $unsafe = New-CcodSnapshot -ProcessId 26702 -Path $unsafePath -Mode Unrelated -RendererPort 41005 -MainPort 41006 -CommandLine ('"' + $unsafePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006')
             $unsafe.IsTopLevel = $true
             $unsafeResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($unsafe) -Adapters @{ GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'};GetProcess = { param($ProcessId, $StatusEvidence) $unsafe }.GetNewClosure() }
-            Assert-CcodEqual 'NoCandidate' $unsafeResult.Outcome 'only the native WindowsApps full path with a four-part older version is targetable'
+            Assert-CcodEqual 'Ambiguous' $unsafeResult.Outcome 'an unsafe same-family top-level debug path blocks repair but is never targetable'
         }
 
         $foreign = New-CcodSnapshot -ProcessId 88 -Path $oldPath -PackageFamilyName 'Other.Family' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine ('"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002')
@@ -291,6 +291,32 @@ try {
         $otherOld.CommandLine = '"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006'
         $ambiguous = Get-CcodStalePackageRootResult -Package $current -Snapshots @($rawOld, $otherOld) -Adapters @{ GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'};GetProcess = { param($ProcessId, $StatusEvidence) if ($ProcessId -eq 4596) { $rawOld } else { $otherOld } } }
         Assert-CcodEqual 'Ambiguous' $ambiguous.Outcome 'multiple old same-family remote roots fail closed'
+
+        $malformedSibling = $extraDebug | Select-Object *
+        $malformedSibling.Pid = 4598
+        $malformedSibling.CreationTimeUtc = '2026-08-20T01:02:05.0000000Z'
+        $malformedConflict = Get-CcodStalePackageRootResult -Package $current -Snapshots @($rawOld, $malformedSibling) -Adapters @{
+            GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'}
+            ParseCommandLine={
+                param($CommandLine)
+                if($CommandLine -ceq $rawOld.CommandLine){return @($oldArgs)}
+                return @($oldPath,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002','--inspect-brk=127.0.0.1:41003')
+            }.GetNewClosure()
+            GetProcess={param($ProcessId,$StatusEvidence)if($ProcessId -eq 4596){$rawOld}else{$malformedSibling}}.GetNewClosure()
+        }
+        Assert-CcodEqual 'Ambiguous' $malformedConflict.Outcome 'one exact old root plus a malformed same-family top-level debug sibling fails closed'
+
+        $newerSibling = New-CcodSnapshot -ProcessId 4599 -CreationTimeUtc '2026-08-20T01:02:06.0000000Z' -Path $futurePath -Mode Unrelated -RendererPort 41005 -MainPort 41006 -CommandLine ('"' + $futurePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006')
+        $newerConflict = Get-CcodStalePackageRootResult -Package $current -Snapshots @($rawOld, $newerSibling) -Adapters @{
+            GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'}
+            ParseCommandLine={
+                param($CommandLine)
+                if($CommandLine -ceq $rawOld.CommandLine){return @($oldArgs)}
+                return @($futurePath,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41005','--inspect=127.0.0.1:41006')
+            }.GetNewClosure()
+            GetProcess={param($ProcessId,$StatusEvidence)if($ProcessId -eq 4596){$rawOld}else{$newerSibling}}.GetNewClosure()
+        }
+        Assert-CcodEqual 'Ambiguous' $newerConflict.Outcome 'one exact old root plus a newer same-family top-level debug sibling fails closed'
 
         $reused = $rawOld | Select-Object *
         $reused.CreationTimeUtc = '2026-08-20T01:02:04.0000000Z'

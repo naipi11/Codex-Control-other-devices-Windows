@@ -737,14 +737,38 @@ Invoke-CcodTest 'uses a constrained stale reconciliation candidate for only an e
     Assert-CcodEqual 'StalePackageStatus' $hostState.Reason 'one constrained stale candidate produces the fixed reason'
     $candidateProperty=$hostState.PSObject.Properties['StaleReconciliationCandidate']
     Assert-CcodTrue ($null -ne $candidateProperty -and $null -ne $candidateProperty.Value -and $candidateProperty.Value.Pid -eq 201) 'candidate binds only the exact prior verified process identity'
-    Assert-CcodTrue ($world.Calls.Contains('Start:Controller:Apply')) 'one exact stale root dispatches the controller repair path'
-    Assert-CcodTrue ($null -eq $hostState.WorkerSlot.Request.source -and -not $hostState.WorkerSlot.Request.existingOnly) 'stale-only repair uses the explicit source-less Apply contract'
+    Assert-CcodTrue ($world.Calls.Contains('Start:Controller:RepairStale')) 'one exact stale root dispatches the dedicated controller repair path'
+    $repairRequest=$hostState.WorkerSlot.Request
+    Assert-CcodEqual 'RepairStale' $repairRequest.action 'stale repair has a distinct authenticated action'
+    Assert-CcodTrue ($repairRequest.existingOnly -and $null -ne $repairRequest.source) 'stale repair cannot degrade into a source-less activation request'
+    $expectedRepairSource=@('201','2030-02-03T03:02:00.0000000Z','1','S-1-5-21-111-222-333-1001',$oldExecutable,'OpenAI.Codex_2p2nqsd0c76g0',$definitions['201'].CommandLine,'41001','41002')-join '|'
+    Assert-CcodEqual $expectedRepairSource `
+        (($repairRequest.source.Pid,$repairRequest.source.CreationTimeUtc,$repairRequest.source.SessionId,$repairRequest.source.UserSid,$repairRequest.source.Path,$repairRequest.source.PackageFamilyName,$repairRequest.source.CommandLine,$repairRequest.source.RendererPort,$repairRequest.source.MainPort)-join '|') 'request freezes exact observed stale PID creation session user native path family argv and ports'
+    $repairKey='201|2030-02-03T03:02:00.0000000Z'
+    Assert-CcodTrue $hostState.AttemptKeys.Contains($repairKey) 'dispatch consumes the exact stale lifecycle before the worker can fail'
 
     $world.Calls.Clear();$seenStatusEvidence.Clear();$hostState.ForceReconcile=$true
     Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'same constrained candidate cannot create a second worker while the repair slot is owned'
 
-    $hostState.WorkerSlot=$null
+    $fixture.Fake.Adapters.CompleteControllerRun={
+        param($Result,$TransactionId,$Action,$RuntimeId)
+        $world.Calls.Add("Reduce:$Action")
+        [pscustomobject][ordered]@{SessionState='Error';BlockAutomaticActions=$true;AttemptKey=$repairKey;RecoveryIgnoreKey=$null;SuppressionKey=$null;ErrorCode='CCOD_STALE_PACKAGE_UNPROVEN';Reason='ControllerFailed'}
+    }.GetNewClosure()
+    $world.WorkerResult=[pscustomobject][ordered]@{ok=$false;outcome='Error';safeState='Error';special=$null}
+    $stdout=$world.WorkerResult|ConvertTo-Json -Depth 20 -Compress
+    $world.Poll=[pscustomobject][ordered]@{Completed=$true;ExitCode=[int]1;StdoutText=$stdout;StdoutByteCount=[int]$stdout.Length;StdoutOverflow=$false;StderrByteCount=[int]0;StderrOverflow=$false}
+    $world.Calls.Clear();Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodTrue ($null -eq $hostState.WorkerSlot -and $hostState.BlockAutomaticActions) 'failed stale repair clears only the worker slot and remains blocked'
+    $world.Calls.Clear();$world.Elapsed.Enqueue([long]1000);$hostState.ForceReconcile=$true
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'failed exact stale lifecycle is not redispatched on the next supervisor tick'
+
+    Invoke-CcodSupervisorCommand $hostState $fixture.Fake.Adapters ([pscustomobject][ordered]@{Kind='ManualRetry';Value=$null;EnqueuedAtUtc='2030-02-03T03:04:05.0000000Z'})
+    Assert-CcodTrue (-not $hostState.AttemptKeys.Contains($repairKey)) 'explicit manual retry clears only the stale lifecycle suppression'
+    Assert-CcodEqual $false $hostState.BlockAutomaticActions 'explicit manual retry reopens reconciliation after a stale repair failure'
+
     [void]$definitions.Remove('201')
     $definitions['202']=[pscustomobject][ordered]@{Pid=[int]202;CreationTimeUtc='2030-02-03T03:03:00.0000000Z';Path=$liveExecutable;CommandLine=('"'+$liveExecutable+'"');Arguments=@($liveExecutable)}
     $world.Calls.Clear();$world.ProcessIds=@(202,333);$hostState.ForceReconcile=$true
@@ -753,7 +777,7 @@ Invoke-CcodTest 'uses a constrained stale reconciliation candidate for only an e
     Assert-CcodTrue ($world.Calls.Contains('Start:StaticProbe:StaticProbe')) 'changed current ordinary identity enters existing static validation'
     Assert-CcodEqual $stateBefore ($state|ConvertTo-Json -Depth 20 -Compress) 'candidate reconciliation does not clear persisted state'
     $keysAfter=($hostState.AttemptKeys|ConvertTo-Json -Compress)+($hostState.RecoveryIgnoreKeys|ConvertTo-Json -Compress)+($hostState.SuppressionKeys|ConvertTo-Json -Compress)
-    Assert-CcodEqual $keysBefore $keysAfter 'candidate reconciliation does not clear key or authorization membership'
+    Assert-CcodEqual $keysBefore $keysAfter 'candidate reconciliation and targeted retry preserve unrelated key or authorization membership'
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -eq 'Manual:Clear'}).Count 'candidate reconciliation never clears failed package records'
 }
 
