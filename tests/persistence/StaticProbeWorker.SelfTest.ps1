@@ -91,10 +91,21 @@ function New-CcodTask4Probe {
     param(
         [ValidateSet('CandidateCompatible','NativeModulePresent','UnknownOrIncompatible')]
         [string]$Classification = 'CandidateCompatible',
-        [string]$Code = 'CHECKER_OK'
+        [string]$Code = 'CHECKER_OK',
+        [bool]$NativeModulePresent = $false
     )
-    $native = $Classification -ceq 'NativeModulePresent'
+    $native = if ($PSBoundParameters.ContainsKey('NativeModulePresent')) {
+        $NativeModulePresent
+    } else {
+        $Classification -ceq 'NativeModulePresent'
+    }
     $ready = $Classification -ceq 'CandidateCompatible'
+    $signatures = [pscustomobject][ordered]@{
+        invertedGate = $true
+        deviceKeyModuleReference = $true
+        macOnlyGuard = $true
+        windowsControllerUi = $Classification -ceq 'CandidateCompatible'
+    }
     [pscustomobject][ordered]@{
         Ready = $ready
         Code = $Code
@@ -118,13 +129,27 @@ function New-CcodTask4Probe {
         NodeCapabilities = [pscustomobject][ordered]@{ Supported=$true; Version='v22.23.1'; Major=22 }
         NativeModulePresent = $native
         PackageSignatures = [pscustomobject]@{ schemaVersion=1 }
-        Signatures = [pscustomobject]@{ invertedGate=$true; deviceKeyModuleReference=$true; macOnlyGuard=$true; windowsControllerUi=$true }
+        Signatures = $signatures
     }
 }
 
 function New-CcodWorkerSuccessResult {
-    param([string]$Classification = 'CandidateCompatible')
+    param(
+        [string]$Classification = 'CandidateCompatible',
+        [bool]$NativeModulePresent = $false
+    )
     $request = New-CcodWorkerRequest
+    $native = if ($PSBoundParameters.ContainsKey('NativeModulePresent')) {
+        $NativeModulePresent
+    } else {
+        $Classification -ceq 'NativeModulePresent'
+    }
+    $signatures = [pscustomobject][ordered]@{
+        invertedGate = $true
+        deviceKeyModuleReference = $true
+        macOnlyGuard = $true
+        windowsControllerUi = $Classification -ceq 'CandidateCompatible'
+    }
     [pscustomobject][ordered]@{
         schemaVersion = 1
         action = 'StaticProbe'
@@ -136,6 +161,7 @@ function New-CcodWorkerSuccessResult {
             ready = $Classification -ceq 'CandidateCompatible'
             code = 'CHECKER_OK'
             staticClassification = $Classification
+            affectedBuildDetected = $Classification -ceq 'CandidateCompatible'
             packageInstalled = $true
             packageFullName = $script:PackageFullName
             packageFamilyName = $script:PackageFamilyName
@@ -145,7 +171,8 @@ function New-CcodWorkerSuccessResult {
             nodeVersion = 'v22.23.1'
             nodeMajor = 22
             nodeSupported = $true
-            nativeModulePresent = $Classification -ceq 'NativeModulePresent'
+            nativeModulePresent = $native
+            signatures = $signatures
         }
         error = $null
     }
@@ -227,7 +254,8 @@ function New-CcodWorkerHarness {
         [string]$Classification = 'CandidateCompatible',
         [string]$ProbeCode = 'CHECKER_OK',
         [string]$Drift = 'None',
-        [bool]$WriteFailure = $false
+        [bool]$WriteFailure = $false,
+        [bool]$NativeModulePresent = $false
     )
     $install = [IO.Path]::GetFullPath((Join-Path $Root 'install'))
     $runtime = [IO.Path]::GetFullPath((Join-Path $install 'runtime\runtime-1'))
@@ -243,8 +271,12 @@ function New-CcodWorkerHarness {
     $events=[Collections.Generic.List[string]]::new();$stdout=[Collections.Generic.List[string]]::new();$written=[Collections.Generic.List[object]]::new();$probeCalls=[Collections.Generic.List[object]]::new()
     $parentReads=[pscustomobject]@{Count=0};$targetReads=[pscustomobject]@{Count=0};$packageReads=[pscustomobject]@{Count=0}
     $classificationValue=$Classification;$probeCodeValue=$ProbeCode;$driftValue=$Drift;$writeFails=$WriteFailure
+    $nativeModulePresentWasSpecified=$PSBoundParameters.ContainsKey('NativeModulePresent');$nativeModulePresentValue=$NativeModulePresent
     $workerSid=[string]$script:WorkerSid;$supervisorCreated=[string]$script:SupervisorCreated
-    $basePackage=New-CcodWorkerPackage;$baseTarget=New-CcodWorkerTargetSnapshot;$baseProbe=New-CcodTask4Probe -Classification $classificationValue -Code $probeCodeValue
+    $basePackage=New-CcodWorkerPackage;$baseTarget=New-CcodWorkerTargetSnapshot
+    $baseProbeParameters=@{ Classification=$classificationValue; Code=$probeCodeValue }
+    if($nativeModulePresentWasSpecified){$baseProbeParameters.NativeModulePresent=$nativeModulePresentValue}
+    $baseProbe=New-CcodTask4Probe @baseProbeParameters
     $adapters=@{
         GetScriptPath={ $context.WorkerPath }.GetNewClosure()
         AuthorizeRuntime={param($Path)$context}.GetNewClosure()
@@ -312,7 +344,7 @@ try {
         $extra=Copy-CcodJsonObject $base;$extra|Add-Member -NotePropertyName path -NotePropertyValue 'C:\private';Assert-CcodThrows {Assert-CcodStaticProbeResult $extra $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'
         $wrong=[pscustomobject][ordered]@{action='StaticProbe';schemaVersion=1;ok=$true;requestId=$base.requestId;runtimeId=$base.runtimeId;targetIdentity=$base.targetIdentity;probe=$base.probe;error=$null};Assert-CcodThrows {Assert-CcodStaticProbeResult $wrong $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'
         foreach($field in @('requestId','runtimeId')){$bad=Copy-CcodJsonObject $base;$bad.$field='mismatch';Assert-CcodThrows {Assert-CcodStaticProbeResult $bad $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'}
-        foreach($field in @('ready','code','staticClassification','packageInstalled','packageFullName','packageFamilyName','packageVersion','executablePath','appAsarSha256','nodeVersion','nodeMajor','nodeSupported','nativeModulePresent')){
+        foreach($field in @('ready','code','staticClassification','affectedBuildDetected','packageInstalled','packageFullName','packageFamilyName','packageVersion','executablePath','appAsarSha256','nodeVersion','nodeMajor','nodeSupported','nativeModulePresent','signatures')){
             $bad=Copy-CcodJsonObject $base;[void]$bad.probe.PSObject.Properties.Remove($field)
             Assert-CcodThrows {Assert-CcodStaticProbeResult $bad $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'
         }
@@ -320,11 +352,47 @@ try {
             @{Name='ready';Value=1},@{Name='code';Value='CHECKER_FAILED'},@{Name='staticClassification';Value='candidatecompatible'},
             @{Name='packageInstalled';Value=1},@{Name='packageFullName';Value=''},@{Name='packageFamilyName';Value="Other`nFamily"},
             @{Name='packageVersion';Value=''},@{Name='executablePath';Value='relative.exe'},@{Name='appAsarSha256';Value=('A'*64)},
-            @{Name='nodeVersion';Value='v21.0.0'},@{Name='nodeMajor';Value=[long]22},@{Name='nodeSupported';Value=$false},@{Name='nativeModulePresent';Value=$true}
+            @{Name='nodeVersion';Value='v21.0.0'},@{Name='nodeMajor';Value=[long]22},@{Name='nodeSupported';Value=$false},@{Name='affectedBuildDetected';Value=$false}
         )){$bad=Copy-CcodJsonObject $base;$bad.probe.($mutation.Name)=$mutation.Value;Assert-CcodThrows {Assert-CcodStaticProbeResult $bad $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'}
+        foreach($mutate in @(
+            {param($signatures)[void]$signatures.PSObject.Properties.Remove('windowsControllerUi')},
+            {param($signatures)$signatures|Add-Member -NotePropertyName extra -NotePropertyValue $true},
+            {param($signatures)$signatures.invertedGate=1},
+            {param($signatures)$signatures.windowsControllerUi=$false}
+        )){
+            $bad=Copy-CcodJsonObject $base;& $mutate $bad.probe.signatures
+            Assert-CcodThrows {Assert-CcodStaticProbeResult -Result $bad -ExpectedRequest $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'
+        }
         $failure=New-CcodStaticProbeErrorResult -Request $request -Code 'CCOD_STATIC_PROBE_FAILED' -Stage 'StaticProbe'
         Assert-CcodStaticProbeResult -Result $failure -ExpectedRequest $request|Out-Null
         $failure.error.message="secret`npath";Assert-CcodThrows {Assert-CcodStaticProbeResult $failure $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'
+    }
+
+    Invoke-CcodTest 'rejects a fabricated CandidateCompatible public frame without full compatibility proof' {
+        $request=New-CcodWorkerRequest
+        $fabricated=New-CcodWorkerSuccessResult -Classification 'CandidateCompatible' -NativeModulePresent $true
+        [void]$fabricated.probe.PSObject.Properties.Remove('signatures')
+        Assert-CcodThrows {Assert-CcodStaticProbeResult -Result $fabricated -ExpectedRequest $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'
+    }
+
+    Invoke-CcodTest 'accepts CandidateCompatible evidence when a native device-key file is also present' {
+        $request=New-CcodWorkerRequest
+        $result=New-CcodWorkerSuccessResult -Classification 'CandidateCompatible' -NativeModulePresent $true
+        Assert-CcodStaticProbeResult -Result $result -ExpectedRequest $request|Out-Null
+        Assert-CcodEqual 'CandidateCompatible' $result.probe.staticClassification 'complete legacy defect evidence retains the candidate classification'
+        Assert-CcodEqual $true $result.probe.nativeModulePresent 'native module presence remains observable evidence'
+        Assert-CcodEqual $true $result.probe.ready 'candidate remains eligible for the controlled trial'
+    }
+
+    Invoke-CcodTest 'rejects native-module presence contradictions outside the candidate classification' {
+        foreach($case in @(
+            @{Classification='NativeModulePresent';NativeModulePresent=$false},
+            @{Classification='UnknownOrIncompatible';NativeModulePresent=$true}
+        )){
+            $request=New-CcodWorkerRequest
+            $result=New-CcodWorkerSuccessResult -Classification $case.Classification -NativeModulePresent $case.NativeModulePresent
+            Assert-CcodThrows {Assert-CcodStaticProbeResult -Result $result -ExpectedRequest $request|Out-Null} 'CCOD_STATIC_RESULT_INVALID'
+        }
     }
 
     Invoke-CcodTest 'authorizes only the strict active manifest bound self path before module use' {
@@ -546,9 +614,28 @@ try {
             Assert-CcodEqual ($harness.Written[0]|ConvertTo-Json -Depth 20 -Compress) $harness.Stdout[0] "$classification stdout matches durable object"
             Assert-CcodEqual $classification $harness.Written[0].probe.staticClassification "$classification is retained"
             Assert-CcodEqual ($classification -ceq 'CandidateCompatible') $harness.Written[0].probe.ready 'only Candidate is ready'
-            Assert-CcodEqual 'ready,code,staticClassification,packageInstalled,packageFullName,packageFamilyName,packageVersion,executablePath,appAsarSha256,nodeVersion,nodeMajor,nodeSupported,nativeModulePresent' (($harness.Written[0].probe.PSObject.Properties.Name)-join ',') 'only the public 13 fields are published'
+            Assert-CcodEqual 'ready,code,staticClassification,affectedBuildDetected,packageInstalled,packageFullName,packageFamilyName,packageVersion,executablePath,appAsarSha256,nodeVersion,nodeMajor,nodeSupported,nativeModulePresent,signatures' (($harness.Written[0].probe.PSObject.Properties.Name)-join ',') 'only the public evidence fields are published'
+            Assert-CcodEqual ($classification -ceq 'CandidateCompatible') $harness.Written[0].probe.affectedBuildDetected 'affected build evidence matches classification'
+            Assert-CcodEqual 'invertedGate,deviceKeyModuleReference,macOnlyGuard,windowsControllerUi' (($harness.Written[0].probe.signatures.PSObject.Properties.Name)-join ',') 'only the four boolean sentinels are published'
+            if($classification -ceq 'NativeModulePresent'){
+                Assert-CcodEqual $true $harness.Written[0].probe.nativeModulePresent 'incomplete sentinel evidence retains the native module hint'
+                Assert-CcodEqual $false $harness.Written[0].probe.signatures.windowsControllerUi 'incomplete sentinel evidence remains incomplete'
+            }
             Assert-CcodEqual 'C:\Node\node.exe' $harness.ProbeCalls[0].Nodes[0] 'only strict settings node candidates reach the probe'
         }
+    }
+
+    Invoke-CcodTest 'publishes a ready CandidateCompatible frame when native device-key file evidence is also present' {
+        $harness=New-CcodWorkerHarness -Root (Join-Path $root 'candidate-with-native') -Classification 'CandidateCompatible' -NativeModulePresent $true
+        $run=Invoke-CcodStaticProbeWorker -RequestPath $harness.RequestPath -ResultPath $harness.ResultPath -Adapters $harness.Adapters
+        Assert-CcodEqual 0 $run.ExitCode 'candidate plus native evidence exits zero'
+        Assert-CcodEqual 'write,stdout' ($harness.Events -join ',') 'candidate plus native evidence writes before stdout'
+        Assert-CcodEqual 1 $harness.Written.Count 'candidate plus native evidence writes one result'
+        Assert-CcodEqual 'CandidateCompatible' $harness.Written[0].probe.staticClassification 'candidate classification is retained'
+        Assert-CcodEqual $true $harness.Written[0].probe.nativeModulePresent 'native evidence is retained'
+        Assert-CcodEqual $true $harness.Written[0].probe.ready 'candidate plus native evidence remains ready'
+        Assert-CcodEqual $true $harness.Written[0].probe.affectedBuildDetected 'candidate plus native evidence retains the affected-build proof'
+        Assert-CcodEqual $true $harness.Written[0].probe.signatures.windowsControllerUi 'candidate plus native evidence publishes the complete sentinel proof'
     }
 
     Invoke-CcodTest 'fails closed on operational probe errors and every pre/post identity or runtime drift' {

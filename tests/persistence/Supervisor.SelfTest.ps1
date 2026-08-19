@@ -842,6 +842,27 @@ Invoke-CcodTest 'worker request ids are canonical D-format GUIDs for probe frami
     Assert-CcodTrue ($slot.RequestPath.EndsWith("static-probe-$($slot.RequestId).request.json")) 'request path matches StaticProbeWorker framing'
 }
 
+Invoke-CcodTest 'fails closed when a static worker fabricates a ready candidate without sentinel proof' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $target=New-CcodSupervisorTestSnapshot
+    $slot=Start-CcodSupervisorWorkerSlot $hostState $fixture.Fake.Adapters 'StaticProbe' 'StaticProbe' $target
+    $world.WorkerResult=[pscustomobject][ordered]@{
+        schemaVersion=1;action='StaticProbe';ok=$true;requestId=$slot.Request.requestId;runtimeId=$slot.Request.runtimeId
+        targetIdentity=[pscustomobject][ordered]@{pid=$slot.Request.targetIdentity.pid;creationTimeUtc=$slot.Request.targetIdentity.creationTimeUtc}
+        probe=[pscustomobject][ordered]@{
+            ready=$true;code='CHECKER_OK';staticClassification='CandidateCompatible';packageInstalled=$true
+            packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageFamilyName='OpenAI.Codex_2p2nqsd0c76g0';packageVersion='1.0.0.0'
+            executablePath='C:\Fake\Codex\app\ChatGPT.exe';appAsarSha256=('a'*64);nodeVersion='v22.23.1';nodeMajor=22;nodeSupported=$true;nativeModulePresent=$true
+        };error=$null
+    }
+    $stdout=$world.WorkerResult|ConvertTo-Json -Depth 20 -Compress
+    $world.Poll=[pscustomobject][ordered]@{Completed=$true;ExitCode=[int]0;StdoutText=$stdout;StdoutByteCount=[int]$stdout.Length;StdoutOverflow=$false;StderrByteCount=[int]0;StderrOverflow=$false}
+    Invoke-CcodSupervisorPollSlot $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual 'UnknownOrIncompatible' $hostState.Classification 'incomplete public proof cannot update the candidate classification'
+    Assert-CcodEqual 'WorkerFramingFailed' $hostState.Reason 'malformed public proof is recorded as a framing failure'
+    Assert-CcodEqual $true $hostState.BlockAutomaticActions 'malformed public proof blocks automatic actions'
+}
+
 Invoke-CcodTest 'hands External renderer back only after a verified shared-renderer controller result' {
     $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
     $handoffCalls=[Collections.Generic.List[object]]::new()

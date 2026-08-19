@@ -42,9 +42,9 @@ export async function inspectPackage(asarPath, nativeDirectory, Adapters = creat
 
   const nativeModulePresent = await containsNativeDeviceKeyModule(nativeDirectory, Adapters);
   const allSignatures = Object.values(signatureState).every(Boolean);
-  const classification = nativeModulePresent
-    ? "NativeModulePresent"
-    : allSignatures ? "CandidateCompatible" : "UnknownOrIncompatible";
+  const classification = allSignatures
+    ? "CandidateCompatible"
+    : nativeModulePresent ? "NativeModulePresent" : "UnknownOrIncompatible";
   return {
     affected: classification === "CandidateCompatible",
     appAsarSha256: hash.digest("hex"),

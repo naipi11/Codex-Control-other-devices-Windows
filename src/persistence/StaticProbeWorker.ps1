@@ -13,7 +13,8 @@ $InformationPreference = 'SilentlyContinue'
 $script:CcodStaticProbeWorkerScriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { $null } else { [IO.Path]::GetFullPath($PSCommandPath) }
 $script:CcodStaticProbeRequestFields = @('schemaVersion','action','requestId','runtimeId','supervisorIdentity','targetIdentity','timeoutMilliseconds')
 $script:CcodStaticProbeResultFields = @('schemaVersion','action','ok','requestId','runtimeId','targetIdentity','probe','error')
-$script:CcodStaticProbeFields = @('ready','code','staticClassification','packageInstalled','packageFullName','packageFamilyName','packageVersion','executablePath','appAsarSha256','nodeVersion','nodeMajor','nodeSupported','nativeModulePresent')
+$script:CcodStaticProbeFields = @('ready','code','staticClassification','affectedBuildDetected','packageInstalled','packageFullName','packageFamilyName','packageVersion','executablePath','appAsarSha256','nodeVersion','nodeMajor','nodeSupported','nativeModulePresent','signatures')
+$script:CcodStaticProbeSignatureFields = @('invertedGate','deviceKeyModuleReference','macOnlyGuard','windowsControllerUi')
 $script:CcodStaticProbeErrorFields = @('code','stage','message')
 $script:CcodStaticProbeRequiredFiles = @(
     'src/persistence/StaticProbeWorker.ps1',
@@ -210,16 +211,25 @@ function Assert-CcodStaticProbeResult {
     if ($probe.ready -isnot [bool] -or $probe.code -isnot [string] -or $probe.code -cne 'CHECKER_OK' -or
         $probe.staticClassification -isnot [string] -or @('CandidateCompatible','NativeModulePresent','UnknownOrIncompatible') -cnotcontains $probe.staticClassification -or
         $probe.packageInstalled -isnot [bool] -or -not $probe.packageInstalled -or $probe.nodeSupported -isnot [bool] -or -not $probe.nodeSupported -or
-        $probe.nativeModulePresent -isnot [bool]) { Throw-CcodStaticProbeError 'CCOD_STATIC_RESULT_INVALID' 'Static probe evidence flags are invalid' $null }
+        $probe.affectedBuildDetected -isnot [bool] -or $probe.nativeModulePresent -isnot [bool]) { Throw-CcodStaticProbeError 'CCOD_STATIC_RESULT_INVALID' 'Static probe evidence flags are invalid' $null }
+    Assert-CcodStaticExactObject $probe.signatures $script:CcodStaticProbeSignatureFields 'CCOD_STATIC_RESULT_INVALID' 'Static probe signatures'|Out-Null
+    foreach($name in $script:CcodStaticProbeSignatureFields){
+        if($probe.signatures.$name -isnot [bool]){Throw-CcodStaticProbeError 'CCOD_STATIC_RESULT_INVALID' 'Static probe signatures are invalid' $null}
+    }
     foreach ($name in @('packageFullName','packageFamilyName','packageVersion','executablePath','appAsarSha256','nodeVersion')) {
         if ($probe.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($probe.$name) -or $probe.$name -match '[\r\n]') { Throw-CcodStaticProbeError 'CCOD_STATIC_RESULT_INVALID' 'Static probe string evidence is invalid' $null }
     }
     $path=$null;try{$path=[IO.Path]::GetFullPath($probe.executablePath)}catch{}
+    $allSentinels=@($script:CcodStaticProbeSignatureFields|Where-Object{-not $probe.signatures.$_}).Count -eq 0
+    $validTuple=(
+        ($probe.staticClassification -ceq 'CandidateCompatible' -and $probe.ready -and $probe.affectedBuildDetected -and $allSentinels) -or
+        ($probe.staticClassification -ceq 'NativeModulePresent' -and -not $probe.ready -and -not $probe.affectedBuildDetected -and $probe.nativeModulePresent -and -not $allSentinels) -or
+        ($probe.staticClassification -ceq 'UnknownOrIncompatible' -and -not $probe.ready -and -not $probe.affectedBuildDetected -and -not $probe.nativeModulePresent -and -not $allSentinels)
+    )
     if ($null -eq $path -or -not [IO.Path]::IsPathRooted($probe.executablePath) -or $path -cne $probe.executablePath -or
         $probe.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or $probe.nodeMajor -isnot [int] -or $probe.nodeMajor -lt 22 -or
         $probe.nodeVersion -cnotmatch '^v(?<major>[0-9]+)\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$' -or [int]$Matches.major -ne $probe.nodeMajor -or
-        $probe.ready -ne ($probe.staticClassification -ceq 'CandidateCompatible') -or
-        $probe.nativeModulePresent -ne ($probe.staticClassification -ceq 'NativeModulePresent')) {
+        -not $validTuple) {
         Throw-CcodStaticProbeError 'CCOD_STATIC_RESULT_INVALID' 'Static probe evidence invariants are invalid' $null
     }
     return $Result
@@ -960,9 +970,10 @@ function ConvertTo-CcodStaticProbePublicResult {
     $result=[pscustomobject][ordered]@{
         schemaVersion=1;action='StaticProbe';ok=$true;requestId=$Request.requestId;runtimeId=$Request.runtimeId;targetIdentity=Copy-CcodStaticTargetIdentity $Request.targetIdentity
         probe=[pscustomobject][ordered]@{
-            ready=$Task4Probe.Ready;code=$Task4Probe.Code;staticClassification=$Task4Probe.StaticClassification;packageInstalled=$Task4Probe.PackageInstalled
+            ready=$Task4Probe.Ready;code=$Task4Probe.Code;staticClassification=$Task4Probe.StaticClassification;affectedBuildDetected=$Task4Probe.AffectedBuildDetected;packageInstalled=$Task4Probe.PackageInstalled
             packageFullName=$Task4Probe.PackageFullName;packageFamilyName=$Task4Probe.PackageFamilyName;packageVersion=$Task4Probe.PackageVersion;executablePath=$Task4Probe.ExecutablePath
             appAsarSha256=$Task4Probe.AppAsarSha256;nodeVersion=$Task4Probe.NodeVersion;nodeMajor=$Task4Probe.NodeMajor;nodeSupported=$Task4Probe.NodeSupported;nativeModulePresent=$Task4Probe.NativeModulePresent
+            signatures=[pscustomobject][ordered]@{invertedGate=$Task4Probe.Signatures.invertedGate;deviceKeyModuleReference=$Task4Probe.Signatures.deviceKeyModuleReference;macOnlyGuard=$Task4Probe.Signatures.macOnlyGuard;windowsControllerUi=$Task4Probe.Signatures.windowsControllerUi}
         };error=$null
     }
     Assert-CcodStaticProbeResult $result $Request|Out-Null

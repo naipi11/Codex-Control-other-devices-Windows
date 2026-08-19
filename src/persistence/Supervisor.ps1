@@ -48,6 +48,39 @@ function Test-CcodSupervisorExactProperties {
     }catch{return $false}
 }
 
+function Test-CcodSupervisorStaticProbeResult {
+    param($Result,$Request)
+    try{
+        $resultFields=@('schemaVersion','action','ok','requestId','runtimeId','targetIdentity','probe','error')
+        $probeFields=@('ready','code','staticClassification','affectedBuildDetected','packageInstalled','packageFullName','packageFamilyName','packageVersion','executablePath','appAsarSha256','nodeVersion','nodeMajor','nodeSupported','nativeModulePresent','signatures')
+        $signatureFields=@('invertedGate','deviceKeyModuleReference','macOnlyGuard','windowsControllerUi')
+        if(-not (Test-CcodSupervisorExactProperties $Result $resultFields) -or
+           ($Result.schemaVersion -isnot [int] -and $Result.schemaVersion -isnot [long]) -or $Result.schemaVersion -ne 1 -or
+           $Result.action -isnot [string] -or $Result.action -cne 'StaticProbe' -or $Result.ok -isnot [bool] -or -not $Result.ok -or $null -ne $Result.error -or
+           $Result.requestId -isnot [string] -or $Result.requestId -cne $Request.requestId -or $Result.runtimeId -isnot [string] -or $Result.runtimeId -cne $Request.runtimeId -or
+           -not (Test-CcodSupervisorExactProperties $Result.targetIdentity @('pid','creationTimeUtc')) -or
+           ($Result.targetIdentity.pid -isnot [int] -and $Result.targetIdentity.pid -isnot [long]) -or $Result.targetIdentity.pid -ne $Request.targetIdentity.pid -or
+           $Result.targetIdentity.creationTimeUtc -isnot [string] -or $Result.targetIdentity.creationTimeUtc -cne $Request.targetIdentity.creationTimeUtc -or
+           -not (Test-CcodSupervisorExactProperties $Result.probe $probeFields)){return $false}
+        $probe=$Result.probe
+        if($probe.ready -isnot [bool] -or $probe.code -isnot [string] -or $probe.code -cne 'CHECKER_OK' -or
+           $probe.staticClassification -isnot [string] -or @('CandidateCompatible','NativeModulePresent','UnknownOrIncompatible') -cnotcontains $probe.staticClassification -or
+           $probe.affectedBuildDetected -isnot [bool] -or $probe.packageInstalled -isnot [bool] -or -not $probe.packageInstalled -or
+           $probe.nodeSupported -isnot [bool] -or -not $probe.nodeSupported -or $probe.nativeModulePresent -isnot [bool] -or
+           ($probe.nodeMajor -isnot [int] -and $probe.nodeMajor -isnot [long]) -or $probe.nodeMajor -lt 22 -or
+           -not (Test-CcodSupervisorExactProperties $probe.signatures $signatureFields)){return $false}
+        foreach($name in @('packageFullName','packageFamilyName','packageVersion','executablePath','appAsarSha256','nodeVersion')){
+            if($probe.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($probe.$name) -or $probe.$name -match '[\r\n]'){return $false}
+        }
+        foreach($name in $signatureFields){if($probe.signatures.$name -isnot [bool]){return $false}}
+        if($probe.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or $probe.nodeVersion -cnotmatch '^v(?<major>[0-9]+)\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$' -or [int]$Matches.major -ne $probe.nodeMajor){return $false}
+        $allSentinels=@($signatureFields|Where-Object{-not $probe.signatures.$_}).Count -eq 0
+        return ($probe.staticClassification -ceq 'CandidateCompatible' -and $probe.ready -and $probe.affectedBuildDetected -and $allSentinels) -or
+               ($probe.staticClassification -ceq 'NativeModulePresent' -and -not $probe.ready -and -not $probe.affectedBuildDetected -and $probe.nativeModulePresent -and -not $allSentinels) -or
+               ($probe.staticClassification -ceq 'UnknownOrIncompatible' -and -not $probe.ready -and -not $probe.affectedBuildDetected -and -not $probe.nativeModulePresent -and -not $allSentinels)
+    }catch{return $false}
+}
+
 function Test-CcodSupervisorCanonicalUtc {
     param($Value)
     if($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$'){return $false}
@@ -560,6 +593,7 @@ function Invoke-CcodSupervisorPollSlot {
                 Invoke-CcodSupervisorRendererHandoff $HostState $slot $result $Adapters
             }elseif($slot.Kind -ceq 'StaticProbe'){
                 if($result.ok -and $null -ne $result.probe){
+                    if(-not (Test-CcodSupervisorStaticProbeResult $result $slot.Request)){$HostState.Classification='UnknownOrIncompatible';throw 'static probe framing failed'}
                     $HostState.PackageFullName=[string]$result.probe.packageFullName
                     $HostState.AppAsarSha256=[string]$result.probe.appAsarSha256
                     $HostState.Classification=[string]$result.probe.staticClassification
@@ -567,6 +601,9 @@ function Invoke-CcodSupervisorPollSlot {
                         $attemptKey=('{0}|{1}' -f $slot.Request.targetIdentity.pid,$slot.Request.targetIdentity.creationTimeUtc)
                         $HostState.StaticCache[$attemptKey]=$result
                     }
+                }elseif($result.ok){
+                    $HostState.Classification='UnknownOrIncompatible'
+                    throw 'static probe framing failed'
                 }else{
                     $HostState.Classification='UnknownOrIncompatible'
                 }

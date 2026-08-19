@@ -255,7 +255,7 @@ function Get-CcodPackageClassification {
     foreach ($name in $required) {
         if ($null -eq $CheckerState.PSObject.Properties[$name]) { return $null }
     }
-    if ($CheckerState.schemaVersion -ne 1 -or
+    if (($CheckerState.schemaVersion -isnot [int] -and $CheckerState.schemaVersion -isnot [long]) -or $CheckerState.schemaVersion -ne 1 -or
         $CheckerState.affected -isnot [bool] -or
         $CheckerState.classification -isnot [string] -or
         $CheckerState.appAsarSha256 -isnot [string] -or $CheckerState.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or
@@ -271,8 +271,8 @@ function Get-CcodPackageClassification {
     }
     $allSentinels = @($script:CcodSignatureNames | ForEach-Object { $signatures.$_ } | Where-Object { -not $_ }).Count -eq 0
     switch ($CheckerState.classification) {
-        'CandidateCompatible' { if ($CheckerState.nativeModulePresent -or -not $CheckerState.affected -or -not $allSentinels) { return $null } }
-        'NativeModulePresent' { if (-not $CheckerState.nativeModulePresent -or $CheckerState.affected) { return $null } }
+        'CandidateCompatible' { if (-not $CheckerState.affected -or -not $allSentinels) { return $null } }
+        'NativeModulePresent' { if (-not $CheckerState.nativeModulePresent -or $CheckerState.affected -or $allSentinels) { return $null } }
         'UnknownOrIncompatible' { if ($CheckerState.nativeModulePresent -or $CheckerState.affected -or $allSentinels) { return $null } }
     }
     return [pscustomobject]@{

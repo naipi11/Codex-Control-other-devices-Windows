@@ -6,6 +6,9 @@ const firstChunk = Buffer.concat([
   Buffer.alloc(4 * 1024 * 1024),
 ]);
 const trailingChunk = Buffer.from("trailing-hash-bytes");
+const incompleteFirstChunk = Buffer.from(
+  "782640499 remote-control-device-key.node Remote control device keys are only available on macOS",
+);
 const expectedDigest = `fake-sha256:${Buffer.concat([firstChunk, trailingChunk]).toString("hex")}`;
 const expectedSignatures = {
   invertedGate: true,
@@ -14,7 +17,10 @@ const expectedSignatures = {
   windowsControllerUi: true,
 };
 
-function createFakeAdapters({ nativeModulePresent = false } = {}) {
+function createFakeAdapters({
+  nativeModulePresent = false,
+  chunks = [firstChunk, trailingChunk],
+} = {}) {
   const stdout = [];
   return {
     adapters: {
@@ -35,8 +41,7 @@ function createFakeAdapters({ nativeModulePresent = false } = {}) {
         if (asarPath !== "fixture.asar") throw new Error(`missing fixture: ${asarPath}`);
         if (options.highWaterMark !== 4 * 1024 * 1024) throw new Error("unexpected chunk size");
         return (async function* () {
-          yield firstChunk;
-          yield trailingChunk;
+          yield* chunks;
         })();
       },
       async readdir(directory) {
@@ -76,8 +81,31 @@ function createFakeAdapters({ nativeModulePresent = false } = {}) {
 {
   const { adapters } = createFakeAdapters({ nativeModulePresent: true });
   const result = await inspectPackage("fixture.asar", "fixture.native", adapters);
+  assert.equal(result.classification, "CandidateCompatible");
+  assert.equal(result.affected, true);
+  assert.equal(result.nativeModulePresent, true);
+  assert.deepEqual(result.signatures, expectedSignatures);
+}
+
+{
+  const { adapters } = createFakeAdapters({
+    nativeModulePresent: true,
+    chunks: [incompleteFirstChunk, trailingChunk],
+  });
+  const result = await inspectPackage("fixture.asar", "fixture.native", adapters);
   assert.equal(result.classification, "NativeModulePresent");
   assert.equal(result.affected, false);
+  assert.equal(result.signatures.windowsControllerUi, false);
+}
+
+{
+  const { adapters } = createFakeAdapters({
+    chunks: [incompleteFirstChunk, trailingChunk],
+  });
+  const result = await inspectPackage("fixture.asar", "fixture.native", adapters);
+  assert.equal(result.classification, "UnknownOrIncompatible");
+  assert.equal(result.affected, false);
+  assert.equal(result.signatures.windowsControllerUi, false);
 }
 
 {

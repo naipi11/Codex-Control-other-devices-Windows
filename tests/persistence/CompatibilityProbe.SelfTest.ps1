@@ -8,11 +8,12 @@ function New-CcodCheckerJson {
     param(
         [string]$Classification = 'CandidateCompatible',
         [bool]$NativeModulePresent = $false,
+        [object]$SchemaVersion = 1,
         [hashtable]$Signatures = @{ invertedGate = $true; deviceKeyModuleReference = $true; macOnlyGuard = $true; windowsControllerUi = $true }
     )
 
     return (@{
-        schemaVersion = 1
+        schemaVersion = $SchemaVersion
         affected = $Classification -eq 'CandidateCompatible'
         classification = $Classification
         appAsarSha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -88,8 +89,26 @@ try {
         Assert-CcodEqual 1 $result.SchemaVersion 'checker schema is retained'
     }
 
-    Invoke-CcodTest 'fails closed when the native device-key module is present' {
-        $json = New-CcodCheckerJson -Classification 'NativeModulePresent' -NativeModulePresent $true
+    Invoke-CcodTest 'fails closed when schemaVersion is a string even when every candidate field otherwise matches' {
+        $json = New-CcodCheckerJson -SchemaVersion '1' -Classification 'CandidateCompatible' -NativeModulePresent $true
+        $result = Invoke-CcodStaticProbe -NodeCandidates @('C:\Node\node.exe') -CheckerPath 'C:\Runtime\check-package.mjs' -Adapters (New-CcodProbeAdapters -CheckerJson $json)
+        Assert-CcodEqual 'CHECKER_SCHEMA_INVALID' $result.Code 'a string schema version is not trusted as schema one'
+        Assert-CcodEqual 'UnknownOrIncompatible' $result.StaticClassification 'an invalid schema cannot become a compatible candidate'
+        Assert-CcodEqual $false $result.Ready 'an invalid schema never permits the controlled trial'
+    }
+
+    Invoke-CcodTest 'keeps complete legacy defect evidence eligible when the native device-key file is also present' {
+        $json = New-CcodCheckerJson -Classification 'CandidateCompatible' -NativeModulePresent $true
+        $result = Invoke-CcodStaticProbe -NodeCandidates @('C:\Node\node.exe') -CheckerPath 'C:\Runtime\check-package.mjs' -Adapters (New-CcodProbeAdapters -CheckerJson $json)
+        Assert-CcodEqual 'CHECKER_OK' $result.Code 'complete evidence remains a valid checker result'
+        Assert-CcodEqual 'CandidateCompatible' $result.StaticClassification 'legacy defect sentinels take precedence over a file-presence hint'
+        Assert-CcodEqual $true $result.Ready 'the controlled dynamic trial remains available'
+        Assert-CcodEqual $true $result.AffectedBuildDetected 'the affected-build signal is retained'
+        Assert-CcodEqual $true $result.NativeModulePresent 'the native device-key file remains observable evidence'
+    }
+
+    Invoke-CcodTest 'fails closed when a native device-key module is present without complete legacy defect evidence' {
+        $json = New-CcodCheckerJson -Classification 'NativeModulePresent' -NativeModulePresent $true -Signatures @{ invertedGate = $true; deviceKeyModuleReference = $true; macOnlyGuard = $true; windowsControllerUi = $false }
         $result = Invoke-CcodStaticProbe -NodeCandidates @('C:\Node\node.exe') -CheckerPath 'C:\Runtime\check-package.mjs' -Adapters (New-CcodProbeAdapters -CheckerJson $json)
         Assert-CcodEqual 'NativeModulePresent' $result.StaticClassification 'native module has its distinct classification'
         Assert-CcodEqual $false $result.Ready 'native module never permits a trial'
