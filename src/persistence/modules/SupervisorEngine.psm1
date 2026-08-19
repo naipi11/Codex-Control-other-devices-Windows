@@ -495,6 +495,46 @@ function Assert-CcodControllerIdentity {
     }
 }
 
+function Assert-CcodControllerStaleSource {
+    param($Source)
+    $names=@('pid','creationTimeUtc','sessionId','userSid','path','packageFamilyName','commandLine','parentPid','isTopLevel','mode','rendererPort','mainPort')
+    Assert-CcodExactObject $Source $names 'CCOD_CONTROLLER_RESULT_INVALID' 'Controller stale source'
+    if(-not (Test-CcodExactInt32 $Source.pid 1) -or -not (Test-CcodCanonicalUtc $Source.creationTimeUtc) -or
+       -not (Test-CcodExactInt32 $Source.sessionId 0) -or $Source.userSid -isnot [string] -or [string]::IsNullOrWhiteSpace($Source.userSid) -or
+       $Source.path -isnot [string] -or [string]::IsNullOrWhiteSpace($Source.path) -or
+       $Source.packageFamilyName -isnot [string] -or [string]::IsNullOrWhiteSpace($Source.packageFamilyName) -or
+       $Source.commandLine -isnot [string] -or [string]::IsNullOrWhiteSpace($Source.commandLine) -or
+       ($null -ne $Source.parentPid -and -not (Test-CcodExactInt32 $Source.parentPid 0)) -or
+       $Source.isTopLevel -isnot [bool] -or -not $Source.isTopLevel -or $Source.mode -cne 'Unrelated' -or
+       -not (Test-CcodExactInt32 $Source.rendererPort 1) -or $Source.rendererPort -gt 65535 -or
+       -not (Test-CcodExactInt32 $Source.mainPort 1) -or $Source.mainPort -gt 65535 -or $Source.rendererPort -eq $Source.mainPort){
+        Throw-CcodSupervisorError 'CCOD_CONTROLLER_RESULT_INVALID' 'Controller stale source is invalid' $Source
+    }
+}
+
+function Assert-CcodRepairStaleCorrelation {
+    param($Result,$ExpectedSource)
+    Assert-CcodProcessSnapshot $ExpectedSource 'CCOD_CONTROLLER_RESULT_INVALID'
+    if(-not $ExpectedSource.IsTopLevel -or $ExpectedSource.Mode -cne 'Unrelated' -or
+       -not (Test-CcodExactInt32 $ExpectedSource.RendererPort 1) -or $ExpectedSource.RendererPort -gt 65535 -or
+       -not (Test-CcodExactInt32 $ExpectedSource.MainPort 1) -or $ExpectedSource.MainPort -gt 65535 -or
+       $ExpectedSource.RendererPort -eq $ExpectedSource.MainPort){
+        Throw-CcodSupervisorError 'CCOD_CONTROLLER_RESULT_INVALID' 'Expected stale source is invalid' $ExpectedSource
+    }
+    if($Result.ok -and $Result.safeState -ceq 'OrdinaryRunning'){return}
+    if($null -eq $Result.source){
+        if($Result.ok){Throw-CcodSupervisorError 'CCOD_CONTROLLER_RESULT_INVALID' 'Successful stale repair lacks correlated source evidence' $Result}
+        return
+    }
+    Assert-CcodControllerStaleSource $Result.source
+    $mapping=[ordered]@{pid='Pid';creationTimeUtc='CreationTimeUtc';sessionId='SessionId';userSid='UserSid';path='Path';packageFamilyName='PackageFamilyName';commandLine='CommandLine';parentPid='ParentPid';isTopLevel='IsTopLevel';mode='Mode';rendererPort='RendererPort';mainPort='MainPort'}
+    foreach($entry in $mapping.GetEnumerator()){
+        if(-not [object]::Equals($Result.source.($entry.Key),$ExpectedSource.($entry.Value))){
+            Throw-CcodSupervisorError 'CCOD_CONTROLLER_RESULT_INVALID' 'RepairStale result source does not match its dispatched request' $Result.source
+        }
+    }
+}
+
 function Assert-CcodControllerPackage {
     param($Package)
     if ($null -eq $Package) { return }
@@ -593,7 +633,10 @@ function Assert-CcodControllerEnvelopeShape {
         Throw-CcodSupervisorError $code 'Controller result scalar fields are invalid' $Result
     }
     Assert-CcodControllerPackage $Result.package
-    if ($null -ne $Result.source) { Assert-CcodControllerIdentity $Result.source 'Controller source' }
+    if ($null -ne $Result.source) {
+        if($Result.action -ceq 'RepairStale' -and $Result.outcome -cne 'Recovered'){Assert-CcodControllerStaleSource $Result.source}
+        else{Assert-CcodControllerIdentity $Result.source 'Controller source'}
+    }
     Assert-CcodControllerSpecial $Result.special
     Assert-CcodControllerProbes $Result.probes
     Assert-CcodControllerRecovery $Result.recovery
@@ -689,14 +732,19 @@ function Complete-CcodControllerRun {
         [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$Result,
         [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedTransactionId,
         [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedAction,
-        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedRuntimeId
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyString()]$ExpectedRuntimeId,
+        [AllowNull()]$ExpectedSource=$null
     )
     if (-not (Test-CcodCanonicalGuid $ExpectedTransactionId) -or
         $ExpectedAction -isnot [string] -or @('Inspect','Apply','RepairStale','RepairRenderer','Recover') -cnotcontains $ExpectedAction -or
         $ExpectedRuntimeId -isnot [string] -or $ExpectedRuntimeId -cnotmatch '^[A-Za-z0-9._-]{1,96}$') {
         return New-CcodControllerReduction 'Error' $true $null $null $null 'CCOD_CONTROLLER_RESULT_INVALID' 'ControllerResultInvalid'
     }
-    try { Assert-CcodControllerEnvelopeShape $Result }
+    try {
+        Assert-CcodControllerEnvelopeShape $Result
+        if($ExpectedAction -ceq 'RepairStale'){Assert-CcodRepairStaleCorrelation $Result $ExpectedSource}
+        elseif($null -ne $ExpectedSource){Throw-CcodSupervisorError 'CCOD_CONTROLLER_RESULT_INVALID' 'Unexpected source correlation input' $ExpectedSource}
+    }
     catch { return New-CcodControllerReduction 'Error' $true $null $null $null 'CCOD_CONTROLLER_RESULT_INVALID' 'ControllerResultInvalid' }
     if ($Result.transactionId -cne $ExpectedTransactionId -or $Result.action -cne $ExpectedAction) {
         return New-CcodControllerReduction 'Error' $true $null $null $null 'CCOD_CONTROLLER_RESULT_MISMATCH' 'ControllerResultMismatch'

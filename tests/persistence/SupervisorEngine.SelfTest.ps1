@@ -118,6 +118,15 @@ function New-CcodResultSource {
     [pscustomobject][ordered]@{ pid=$ProcessId; creationTimeUtc=$CreationTimeUtc }
 }
 
+function New-CcodResultStaleSource {
+    param($Expected)
+    [pscustomobject][ordered]@{
+        pid=[int]$Expected.Pid;creationTimeUtc=[string]$Expected.CreationTimeUtc;sessionId=[int]$Expected.SessionId;userSid=[string]$Expected.UserSid
+        path=[string]$Expected.Path;packageFamilyName=[string]$Expected.PackageFamilyName;commandLine=[string]$Expected.CommandLine;parentPid=$Expected.ParentPid
+        isTopLevel=[bool]$Expected.IsTopLevel;mode=[string]$Expected.Mode;rendererPort=[int]$Expected.RendererPort;mainPort=[int]$Expected.MainPort
+    }
+}
+
 function New-CcodResultSpecial {
     [pscustomobject][ordered]@{
         pid=200; creationTimeUtc='2030-02-03T04:02:00.0000000Z'; rendererPort=41001; mainPort=41002
@@ -419,9 +428,12 @@ $results += Invoke-CcodTest 'reduces every allowed controller success tuple from
     $package=New-CcodResultPackage
     $recovery=New-CcodRecoveryEvidence
     $recoverySource=New-CcodResultSource -ProcessId 300 -CreationTimeUtc '2030-02-03T04:03:00.0000000Z'
+    $staleExpected=New-CcodSupervisorSnapshot -ProcessId 4596 -CreationTimeUtc '2030-02-03T04:00:00.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
+    $staleExpected.Path='C:\Old\ChatGPT.exe';$staleExpected.CommandLine='"C:\Old\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+    $staleSource=New-CcodResultStaleSource $staleExpected
     $cases=@(
         @{Action='Apply';Outcome='Activated';Safe='SpecialValidated';Stage='Completed';Source=$null;Special=$special;Recovery=$null;State='Active'},
-        @{Action='RepairStale';Outcome='Activated';Safe='SpecialValidated';Stage='Completed';Source=$source;Special=$special;Recovery=$null;State='Active'},
+        @{Action='RepairStale';Outcome='Activated';Safe='SpecialValidated';Stage='Completed';Source=$staleSource;ExpectedSource=$staleExpected;Special=$special;Recovery=$null;State='Active'},
         @{Action='Inspect';Outcome='Inspected';Safe='SpecialValidated';Stage='Inspected';Source=$null;Special=$special;Recovery=$null;State='Active'},
         @{Action='Inspect';Outcome='Inspected';Safe='RendererRepairRequired';Stage='Inspected';Source=$null;Special=$special;Recovery=$null;State='Inspecting'},
         @{Action='Inspect';Outcome='Inspected';Safe='OrdinaryRunning';Stage='Inspected';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
@@ -433,6 +445,7 @@ $results += Invoke-CcodTest 'reduces every allowed controller success tuple from
         @{Action='Recover';Outcome='NoAction';Safe='OrdinaryRunning';Stage='Cancelled';Source=$source;Special=$null;Recovery=$null;State='Waiting'},
         @{Action='Recover';Outcome='NoAction';Safe='NoCodex';Stage='Cancelled';Source=$null;Special=$null;Recovery=$null;State='Waiting'},
         @{Action='Apply';Outcome='Recovered';Safe='OrdinaryRunning';Stage='Recovered';Package=$package;Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
+        @{Action='RepairStale';Outcome='Recovered';Safe='OrdinaryRunning';Stage='Recovered';Package=$package;Source=$recoverySource;ExpectedSource=$staleExpected;Special=$null;Recovery=$recovery;State='Recovered'},
         @{Action='RepairRenderer';Outcome='Recovered';Safe='OrdinaryRunning';Stage='Recovered';Package=$package;Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
         @{Action='Recover';Outcome='Recovered';Safe='OrdinaryRunning';Stage='Recovered';Package=$package;Source=$recoverySource;Special=$null;Recovery=$recovery;State='Recovered'},
         @{Action='Recover';Outcome='Closed';Safe='Closed';Stage='Closed';Source=$null;Special=$null;Recovery=$null;State='Waiting'}
@@ -440,8 +453,9 @@ $results += Invoke-CcodTest 'reduces every allowed controller success tuple from
     foreach($case in $cases){
         $packageValue=$null
         if ($case.ContainsKey('Package')) { $packageValue=$case.Package }
+        $expectedSource=$null;if($case.ContainsKey('ExpectedSource')){$expectedSource=$case.ExpectedSource}
         $result=New-CcodControllerResult -Action $case.Action -Outcome $case.Outcome -SafeState $case.Safe -Stage $case.Stage -Package $packageValue -Source $case.Source -Special $case.Special -Recovery $case.Recovery
-        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction $case.Action -ExpectedRuntimeId 'runtime-1'
+        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction $case.Action -ExpectedRuntimeId 'runtime-1' -ExpectedSource $expectedSource
         Assert-CcodPropertyOrder $reduced @('SessionState','BlockAutomaticActions','AttemptKey','RecoveryIgnoreKey','SuppressionKey','ErrorCode','Reason') 'completion schema order'
         Assert-CcodExactEqual $case.State $reduced.SessionState ("{0}/{1}/{2} maps from safe tuple" -f $case.Action,$case.Outcome,$case.Safe)
         Assert-CcodExactEqual $false $reduced.BlockAutomaticActions 'proven success does not globally block'
@@ -506,13 +520,38 @@ $results += Invoke-CcodTest 'reduces stale persisted-package evidence to one san
 $results += Invoke-CcodTest 'preserves fail-closed stale remote-server closure codes for an actionable controller result' {
     foreach($code in @('CCOD_STALE_PACKAGE_AMBIGUOUS','CCOD_STALE_PACKAGE_UNPROVEN')){
         $error=[pscustomobject][ordered]@{code=$code;stage='OrdinaryStopped';message='The session operation failed safely. See the session log for details.'}
-        $source=New-CcodResultSource -ProcessId 4596 -CreationTimeUtc '2030-02-03T04:00:00.0000000Z'
+        $expected=New-CcodSupervisorSnapshot -ProcessId 4596 -CreationTimeUtc '2030-02-03T04:00:00.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
+        $expected.Path='C:\Old\ChatGPT.exe';$expected.CommandLine='"C:\Old\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+        $source=New-CcodResultStaleSource $expected
         $result=New-CcodControllerResult -Action RepairStale -Ok $false -Outcome Error -SafeState Error -Source $source -Special $null -Error $error
-        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction RepairStale -ExpectedRuntimeId 'runtime-1'
+        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction RepairStale -ExpectedRuntimeId 'runtime-1' -ExpectedSource $expected
         Assert-CcodExactEqual 'Error' $reduced.SessionState "$code remains fail closed"
         Assert-CcodExactEqual $true $reduced.BlockAutomaticActions "$code blocks another automatic special launch"
         Assert-CcodExactEqual $code $reduced.ErrorCode "$code survives controller validation"
         Assert-CcodExactEqual '4596|2030-02-03T04:00:00.0000000Z' $reduced.AttemptKey "$code remains bound to the consumed stale lifecycle"
+    }
+}
+
+$results += Invoke-CcodTest 'correlates every RepairStale result source field to the dispatched request before Active' {
+    $expected=New-CcodSupervisorSnapshot -ProcessId 4596 -CreationTimeUtc '2030-02-03T04:00:00.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
+    $expected.Path='C:\Old\ChatGPT.exe';$expected.CommandLine='"C:\Old\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
+    $source=New-CcodResultStaleSource $expected
+    $valid=New-CcodControllerResult -Action RepairStale -Outcome Activated -SafeState SpecialValidated -Stage Completed -Source $source
+    $accepted=Complete-CcodControllerRun -Result $valid -ExpectedTransactionId $valid.transactionId -ExpectedAction RepairStale -ExpectedRuntimeId 'runtime-1' -ExpectedSource $expected
+    Assert-CcodExactEqual 'Active' $accepted.SessionState 'only the exact full stale source reaches Active'
+
+    foreach($mutation in @(
+        @{Name='pid';Value=[int]4597},
+        @{Name='creationTimeUtc';Value='2030-02-03T04:00:01.0000000Z'},
+        @{Name='path';Value='C:\Other\ChatGPT.exe'},
+        @{Name='rendererPort';Value=[int]42001},
+        @{Name='mainPort';Value=[int]42002}
+    )){
+        $fabricated=New-CcodResultStaleSource $expected;$fabricated.($mutation.Name)=$mutation.Value
+        $result=New-CcodControllerResult -Action RepairStale -Outcome Activated -SafeState SpecialValidated -Stage Completed -Source $fabricated
+        $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction RepairStale -ExpectedRuntimeId 'runtime-1' -ExpectedSource $expected
+        Assert-CcodExactEqual 'Error' $reduced.SessionState "$($mutation.Name) fabrication cannot reach Active"
+        Assert-CcodExactEqual 'CCOD_CONTROLLER_RESULT_INVALID' $reduced.ErrorCode "$($mutation.Name) fabrication is an invalid correlated result"
     }
 }
 

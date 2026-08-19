@@ -847,6 +847,40 @@ try {
         $supervisorMismatch=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId 'b3f60f6a-672e-4daf-b5d7-44932c74e8cd') -Paths $paths -Adapters $supervisorAdapters
         Assert-CcodEqual 'CCOD_SOURCE_CHANGED' $supervisorMismatch.error.code 'repair authority is bound to live supervisor PID and creation time'
         Assert-CcodEqual 0 $supervisorEvents.Count 'supervisor replacement blocks before state process or launch activity'
+
+        $preActionGoneEvents=[Collections.Generic.List[string]]::new();$preActionGoneState=[pscustomobject]@{Finds=0}
+        $preActionGoneAdapters=New-CcodEngineAdapters -Probe $probe -Events $preActionGoneEvents
+        $preActionGoneAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)$preActionGoneState.Finds++;if($preActionGoneState.Finds -eq 1){[pscustomobject][ordered]@{Outcome='Confirmed';Snapshot=$old}}else{[pscustomobject][ordered]@{Outcome='NoCandidate';Snapshot=$null}}}.GetNewClosure()
+        $preActionGoneAdapters.GetStaleTree={param($Root,$Package)@($old)}.GetNewClosure()
+        $preActionGoneAdapters.RequestStaleGracefulClose={param($Expected,$Package)$preActionGoneEvents.Add('GracefulClose:SourceExited');[pscustomobject]@{Outcome='SourceExited';Snapshot=$null}}.GetNewClosure()
+        $preActionGoneAdapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$preActionGoneEvents.Add('StartSpecial');throw 'must not start'}.GetNewClosure()
+        $preActionGone=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId 'f84d6806-f44e-4d92-a2bf-9ad5ebd90cd4') -Paths $paths -Adapters $preActionGoneAdapters
+        Assert-CcodEqual 'CCOD_STALE_PACKAGE_UNPROVEN' $preActionGone.error.code 'root disappearance before an exact close signal is unproven'
+        Assert-CcodTrue ($preActionGoneEvents -cnotcontains 'StartSpecial') 'pre-action root disappearance never authorizes special launch'
+
+        $reusedRoot=$old|Select-Object *;$reusedRoot.CreationTimeUtc='2030-02-03T04:00:09.0000000Z'
+        $changedRootEvents=[Collections.Generic.List[string]]::new();$changedRootState=[pscustomobject]@{Finds=0}
+        $changedRootAdapters=New-CcodEngineAdapters -Probe $probe -Events $changedRootEvents
+        $changedRootAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)$changedRootState.Finds++;if($changedRootState.Finds -eq 1){[pscustomobject][ordered]@{Outcome='Confirmed';Snapshot=$old}}else{[pscustomobject][ordered]@{Outcome='NoCandidate';Snapshot=$null}}}.GetNewClosure()
+        $changedRootAdapters.GetStaleTree={param($Root,$Package)@($old)}.GetNewClosure()
+        $changedRootAdapters.RequestStaleGracefulClose={param($Expected,$Package)[pscustomobject]@{Outcome='NotRequested';Snapshot=$Expected}}
+        $changedRootAdapters.GetStaleProcess={param($ProcessId,$Package)$reusedRoot}.GetNewClosure()
+        $changedRootAdapters.StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds)$changedRootEvents.Add('StopStale');throw 'PID-reused root must not be signaled'}.GetNewClosure()
+        $changedRootAdapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$changedRootEvents.Add('StartSpecial');throw 'must not start'}.GetNewClosure()
+        $changedRoot=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId '356f44c9-f600-4899-85eb-85411631a40e') -Paths $paths -Adapters $changedRootAdapters
+        Assert-CcodEqual 'CCOD_STALE_PACKAGE_UNPROVEN' $changedRoot.error.code 'root PID reuse before a verified terminate action is unproven'
+        Assert-CcodEqual 0 @($changedRootEvents|Where-Object{$_ -in @('StopStale','StartSpecial')}).Count 'PID-reused root is neither signaled nor hidden by launch'
+
+        $recoveryState=[pscustomobject]@{Finds=0};$recoveryAdapters=New-CcodEngineAdapters -Probe $probe -Processes @($old)
+        $recoveryAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)$recoveryState.Finds++;if($recoveryState.Finds -eq 1){[pscustomobject][ordered]@{Outcome='Confirmed';Snapshot=$old}}else{[pscustomobject][ordered]@{Outcome='NoCandidate';Snapshot=$null}}}.GetNewClosure()
+        $recoveryAdapters.GetStaleTree={param($Root,$Package)@($old)}.GetNewClosure()
+        $recoveryAdapters.RequestStaleGracefulClose={param($Expected,$Package)[pscustomobject]@{Outcome='Requested';Snapshot=$Expected}}
+        $recoveryAdapters.WaitStaleProcessExit={param($Expected,$Package,$TimeoutMilliseconds)[pscustomobject]@{Outcome='SourceExited';Snapshot=$null}}
+        $recoveryAdapters.GetStaleProcess={param($ProcessId,$Package)$null}
+        $recoveryAdapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)[pscustomobject]@{Outcome='Failed';Snapshot=$null;Process=$null}}
+        $recovered=Invoke-CcodRepairStaleSession -Request (New-CcodEngineRequest -Action RepairStale -Source $old -TransactionId '1407e886-5a42-493f-b61a-2eb27b588fd1') -Paths $paths -Adapters $recoveryAdapters
+        Assert-CcodEqual 'Recovered' $recovered.outcome 'post-closure activation failure still performs the existing ordinary recovery'
+        Assert-CcodEqual 301 $recovered.source.pid 'recovered result source describes the proven ordinary recovery, not the closed stale root'
     }
 
     Invoke-CcodTest 'discovers one existing ordinary source and rejects manual Start root ambiguity' {

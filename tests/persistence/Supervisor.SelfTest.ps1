@@ -751,9 +751,11 @@ Invoke-CcodTest 'uses a constrained stale reconciliation candidate for only an e
     Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'same constrained candidate cannot create a second worker while the repair slot is owned'
 
+    $completionExpectedSource=[pscustomobject]@{Value=$null}
     $fixture.Fake.Adapters.CompleteControllerRun={
-        param($Result,$TransactionId,$Action,$RuntimeId)
+        param($Result,$TransactionId,$Action,$RuntimeId,$ExpectedSource)
         $world.Calls.Add("Reduce:$Action")
+        $completionExpectedSource.Value=$ExpectedSource
         [pscustomobject][ordered]@{SessionState='Error';BlockAutomaticActions=$true;AttemptKey=$repairKey;RecoveryIgnoreKey=$null;SuppressionKey=$null;ErrorCode='CCOD_STALE_PACKAGE_UNPROVEN';Reason='ControllerFailed'}
     }.GetNewClosure()
     $world.WorkerResult=[pscustomobject][ordered]@{ok=$false;outcome='Error';safeState='Error';special=$null}
@@ -761,13 +763,29 @@ Invoke-CcodTest 'uses a constrained stale reconciliation candidate for only an e
     $world.Poll=[pscustomobject][ordered]@{Completed=$true;ExitCode=[int]1;StdoutText=$stdout;StdoutByteCount=[int]$stdout.Length;StdoutOverflow=$false;StderrByteCount=[int]0;StderrOverflow=$false}
     $world.Calls.Clear();Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
     Assert-CcodTrue ($null -eq $hostState.WorkerSlot -and $hostState.BlockAutomaticActions) 'failed stale repair clears only the worker slot and remains blocked'
+    Assert-CcodEqual ($repairRequest.source|ConvertTo-Json -Depth 10 -Compress) ($completionExpectedSource.Value|ConvertTo-Json -Depth 10 -Compress) 'reducer receives the exact dispatched stale source contract'
+    Assert-CcodEqual $repairKey $hostState.FailedStaleRepairKey 'failed worker persists the exact dispatched stale lifecycle key'
     $world.Calls.Clear();$world.Elapsed.Enqueue([long]1000);$hostState.ForceReconcile=$true
     Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'failed exact stale lifecycle is not redispatched on the next supervisor tick'
 
+    $candidateB=$repairRequest.source.PSObject.Copy();$candidateB.Pid=[int]202;$candidateB.CreationTimeUtc='2030-02-03T03:03:00.0000000Z'
+    $candidateBKey='202|2030-02-03T03:03:00.0000000Z';$hostState.StaleReconciliationCandidate=$candidateB;$hostState.AttemptKeys[$candidateBKey]=$true
+    $unrelatedPackage='OpenAI.Codex_2.0.0.0_x64__2p2nqsd0c76g0';$unrelatedHash=('b'*64);$unrelatedSuppression="$unrelatedPackage|$unrelatedHash|runtime-1"
+    $hostState.PackageFullName=$unrelatedPackage;$hostState.AppAsarSha256=$unrelatedHash;$hostState.SuppressionKeys[$unrelatedSuppression]=$true
+    $unrelatedRecord=[pscustomobject][ordered]@{packageFullName=$unrelatedPackage;packageVersion='2.0.0.0';appAsarSha256=$unrelatedHash;runtimeId='runtime-1';staticClassification='CandidateCompatible';dynamicOutcome='Failed';probeState='NotRun';confirmedAtUtc='2030-02-03T03:03:30.0000000Z'}
+    $state.VerifiedPackages.packages|Add-Member -NotePropertyName $unrelatedSuppression -NotePropertyValue $unrelatedRecord
+    $world.Calls.Clear()
     Invoke-CcodSupervisorCommand $hostState $fixture.Fake.Adapters ([pscustomobject][ordered]@{Kind='ManualRetry';Value=$null;EnqueuedAtUtc='2030-02-03T03:04:05.0000000Z'})
-    Assert-CcodTrue (-not $hostState.AttemptKeys.Contains($repairKey)) 'explicit manual retry clears only the stale lifecycle suppression'
+    Assert-CcodTrue (-not $hostState.AttemptKeys.Contains($repairKey)) 'explicit manual retry clears the failed request lifecycle A'
+    Assert-CcodTrue $hostState.AttemptKeys.Contains($candidateBKey) 'observation B does not redirect retry away from failed lifecycle A'
+    Assert-CcodTrue $hostState.SuppressionKeys.Contains($unrelatedSuppression) 'stale retry preserves unrelated package suppression'
+    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -eq 'Manual:Clear'}).Count 'stale retry never clears an unrelated package failed-attempt record'
+    Assert-CcodEqual $null $hostState.FailedStaleRepairKey 'successful retry consumption clears the stored failed stale key only'
     Assert-CcodEqual $false $hostState.BlockAutomaticActions 'explicit manual retry reopens reconciliation after a stale repair failure'
+
+    [void]$hostState.AttemptKeys.Remove($candidateBKey);[void]$hostState.SuppressionKeys.Remove($unrelatedSuppression);[void]$state.VerifiedPackages.packages.PSObject.Properties.Remove($unrelatedSuppression)
+    $hostState.PackageFullName=$null;$hostState.AppAsarSha256=$null
 
     [void]$definitions.Remove('201')
     $definitions['202']=[pscustomobject][ordered]@{Pid=[int]202;CreationTimeUtc='2030-02-03T03:03:00.0000000Z';Path=$liveExecutable;CommandLine=('"'+$liveExecutable+'"');Arguments=@($liveExecutable)}

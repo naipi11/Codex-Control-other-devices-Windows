@@ -411,6 +411,15 @@ function Get-CcodCurrentPackageRoots {
     }|Sort-Object CreationTimeUtc,Pid)
 }
 
+function ConvertTo-CcodSessionStaleSource($Snapshot) {
+    if ($null -eq $Snapshot) { return $null }
+    [pscustomobject][ordered]@{
+        pid=[int]$Snapshot.Pid;creationTimeUtc=[string]$Snapshot.CreationTimeUtc;sessionId=[int]$Snapshot.SessionId;userSid=[string]$Snapshot.UserSid
+        path=[string]$Snapshot.Path;packageFamilyName=[string]$Snapshot.PackageFamilyName;commandLine=[string]$Snapshot.CommandLine;parentPid=$Snapshot.ParentPid
+        isTopLevel=[bool]$Snapshot.IsTopLevel;mode=[string]$Snapshot.Mode;rendererPort=[int]$Snapshot.RendererPort;mainPort=[int]$Snapshot.MainPort
+    }
+}
+
 function Assert-CcodLiveSupervisorIdentity {
     param($Request,[hashtable]$Adapter)
     $identity=& $Adapter.CurrentIdentity
@@ -477,6 +486,7 @@ function Invoke-CcodRecoveryOperation {
     & $Adapter.CompleteTransition $Paths.TransitionPath $Paths.TransitionLogPath $PriorTransactionId 'Recovered'|Out-Null
     $ignore=Get-CcodRecoveryIgnoreKey -Pid $ordinary.Pid -CreationTimeUtc $ordinary.CreationTimeUtc -TransactionId $PriorTransactionId
     $suppression=Get-CcodSuppressionKey -PackageFullName $Probe.PackageFullName -AppAsarSha256 $Probe.AppAsarSha256 -RuntimeId $Request.runtimeId
+    $Result.source=ConvertTo-CcodSessionSource $ordinary
     $Result.recovery=[pscustomobject][ordered]@{pid=[int]$ordinary.Pid;creationTimeUtc=$ordinary.CreationTimeUtc;ignoreKey=$ignore;suppressionKey=$suppression;portsClosed=$portsClosed;disposition=$disposition;priorTransactionId=$PriorTransactionId}
     $Result.ok=$true;$Result.outcome='Recovered';$Result.safeState='OrdinaryRunning';$Result.stage='Recovered';$Result.special=$null
     return $Result
@@ -604,25 +614,48 @@ function Close-CcodVerifiedStalePackageRoot {
     if($tree.Count -lt 1 -or @($tree|Where-Object{$_ -ne $null -and $_.Pid -eq $root.Pid -and (& $Adapter.ProcessMatch $root $_)}).Count -ne 1){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package process tree could not be proven before close' $tree}
     $byPid=@{};foreach($member in $tree){$byPid[[int]$member.Pid]=$member}
     $ordered=@($tree|Sort-Object @{Expression={-(Get-CcodTreeDepth $_ $byPid)}},@{Expression={$_.Pid}})
+    $rootShutdownProven=$false
     $close=& $Adapter.RequestStaleGracefulClose $root $package
     if($close.Outcome -ceq 'IdentityChanged'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root identity changed before graceful close' $close}
     if($close.Outcome -ceq 'SourceExited'){
-        # The root exited, but its captured children and remote ports still require proof below.
+        Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root disappeared before an exact graceful-close signal' $close
     }elseif($close.Outcome -ceq 'Requested'){
+        if($null -eq $close.Snapshot -or -not (& $Adapter.ProcessMatch $root $close.Snapshot)){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Graceful-close request lacks exact root identity proof' $close}
+        $rootShutdownProven=$true
         $wait=& $Adapter.WaitStaleProcessExit $root $package $TimeoutMilliseconds
         if($wait.Outcome -ceq 'SourceExited'){
             # The root exited, but its captured children and remote ports still require proof below.
         }elseif($wait.Outcome -ceq 'IdentityChanged'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root identity changed while waiting for graceful close' $wait}
-        elseif($wait.Outcome -cne 'StillRunning'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root graceful-close result is invalid' $wait}
-    }elseif($close.Outcome -cne 'NotRequested'){
+        elseif($wait.Outcome -ceq 'StillRunning'){
+            if($null -eq $wait.Snapshot -or -not (& $Adapter.ProcessMatch $root $wait.Snapshot)){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Graceful-close wait lacks exact root identity proof' $wait}
+        }else{Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root graceful-close result is invalid' $wait}
+    }elseif($close.Outcome -ceq 'NotRequested'){
+        if($null -eq $close.Snapshot -or -not (& $Adapter.ProcessMatch $root $close.Snapshot)){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Graceful-close refusal lacks exact root identity proof' $close}
+    }else{
         Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root graceful-close result is invalid' $close
     }
     foreach($member in $ordered){
+        $isRoot=$member.Pid -eq $root.Pid -and $member.CreationTimeUtc -ceq $root.CreationTimeUtc
         $current=& $Adapter.GetStaleProcess $member.Pid $package
-        if($null -eq $current -or -not (& $Adapter.ProcessMatch $member $current)){continue}
+        if($null -eq $current){
+            if($isRoot -and -not $rootShutdownProven){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root disappeared before a verified shutdown action' $member}
+            if(-not $isRoot -and -not $rootShutdownProven){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Captured child disappeared before root shutdown was proven' $member}
+            continue
+        }
+        if(-not (& $Adapter.ProcessMatch $member $current)){
+            if($isRoot -and -not $rootShutdownProven){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root identity changed before a verified shutdown action' $member}
+            continue
+        }
         $stop=& $Adapter.StopStaleProcess $member $package $TimeoutMilliseconds
-        if($stop.Outcome -ne 'Stopped' -and $stop.Outcome -ne 'SourceExited'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package tree member could not be stopped with an exact identity receipt' $stop}
+        if($stop.Outcome -ceq 'Stopped'){
+            if($stop.StoppedByController -isnot [bool] -or -not $stop.StoppedByController -or $null -eq $stop.Snapshot -or
+               -not (& $Adapter.ProcessMatch $member $stop.Snapshot)){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package stop receipt does not prove an exact controller action' $stop}
+            if($isRoot){$rootShutdownProven=$true}
+        }elseif($stop.Outcome -ceq 'SourceExited'){
+            if(-not $rootShutdownProven){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package tree member exited before root shutdown was proven' $stop}
+        }else{Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package tree member could not be stopped with an exact identity receipt' $stop}
     }
+    if(-not $rootShutdownProven){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root shutdown action was never proven' $root}
     foreach($member in $tree){
         $current=& $Adapter.GetStaleProcess $member.Pid $package
         if($null -ne $current -and (& $Adapter.ProcessMatch $member $current)){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package tree member remains alive after close' $member}
@@ -958,7 +991,7 @@ function Invoke-CcodActivationSession {
         if($probe.StaticClassification -cne 'CandidateCompatible' -or -not $probe.Ready -or (-not $state.AutomaticCandidateTrialsAllowed -and -not $priorSucceeded)){Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Package is not authorized for activation' $probe}
         $source=$Request.source
         if($repairStale){
-            $result.source=ConvertTo-CcodSessionSource $source
+            $result.source=ConvertTo-CcodSessionStaleSource $source
             if([string]$source.SessionId -cne [string]$Request.supervisorIdentity.sessionId -or $source.UserSid -cne $repairIdentity.UserSid -or
                $source.PackageFamilyName -cne $probe.PackageFamilyName -or
                $source.Path.Equals($probe.ExecutablePath,[StringComparison]::OrdinalIgnoreCase)){

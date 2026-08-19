@@ -260,7 +260,7 @@ function Get-CcodSupervisorDefaultAdapters {
     }
     $defaults.GetSupervisorDecision={param($Context)Get-CcodSupervisorDecision -Context $Context}
     $defaults.AddObservedEvent={param($Observed,$ProcessId,$Created)Add-CcodObservedEvent -ObservedKeys $Observed -ProcessId $ProcessId -CreationTimeUtc $Created}
-    $defaults.CompleteControllerRun={param($Result,$TransactionId,$Action,$RuntimeId)Complete-CcodControllerRun -Result $Result -ExpectedTransactionId $TransactionId -ExpectedAction $Action -ExpectedRuntimeId $RuntimeId}
+    $defaults.CompleteControllerRun={param($Result,$TransactionId,$Action,$RuntimeId,$ExpectedSource)Complete-CcodControllerRun -Result $Result -ExpectedTransactionId $TransactionId -ExpectedAction $Action -ExpectedRuntimeId $RuntimeId -ExpectedSource $ExpectedSource}
     $defaults.HandoffRenderer={
         param($Result,$RendererPort)
         $layout=Get-CcodRendererLayout
@@ -418,7 +418,7 @@ function New-CcodSupervisorHostState {
         ObservedKeys=[ordered]@{};AttemptKeys=[ordered]@{};RecoveryIgnoreKeys=[ordered]@{};SuppressionKeys=[ordered]@{}
         StaticCache=[ordered]@{};TransportRetries=[ordered]@{};TerminalRecoveries=[ordered]@{}
         PackageFullName=$null;AppAsarSha256=$null;Classification=$null
-        Ordinary=[object[]]@();Special=[object[]]@();SpecialNeedsInspect=$false;SpecialProof=$null;StaleReconciliationCandidate=$null
+        Ordinary=[object[]]@();Special=[object[]]@();SpecialNeedsInspect=$false;SpecialProof=$null;StaleReconciliationCandidate=$null;FailedStaleRepairKey=$null
         SessionState='Idle';BlockAutomaticActions=$false;Reason='Idle';ObservationDirty=$false;NextObservationMilliseconds=[long]0
         ForceReconcile=$true;NextReconcileMilliseconds=[long]0;LastDecision=$null
         RuntimeCleanupCodes=[Collections.Generic.List[string]]::new()
@@ -575,6 +575,10 @@ function Invoke-CcodSupervisorRendererHandoff {
 function Invoke-CcodSupervisorPollSlot {
     param($HostState,[hashtable]$Adapters)
     $slot=$HostState.WorkerSlot
+    $staleRepairKey=$null
+    if($slot.Kind -ceq 'Controller' -and $slot.Action -ceq 'RepairStale' -and $null -ne $slot.Request.source){
+        $staleRepairKey=('{0}|{1}' -f $slot.Request.source.Pid,$slot.Request.source.CreationTimeUtc)
+    }
     $poll=Invoke-CcodSupervisorAdapter $Adapters.PollWorker @($slot) 1
     $fields=@('Completed','ExitCode','StdoutText','StdoutByteCount','StdoutOverflow','StderrByteCount','StderrOverflow')
     if(-not (Test-CcodSupervisorExactProperties $poll $fields) -or $poll.Completed -isnot [bool] -or $poll.StdoutText -isnot [string] -or
@@ -589,7 +593,8 @@ function Invoke-CcodSupervisorPollSlot {
             $fromStdout=$poll.StdoutText|ConvertFrom-Json -ErrorAction Stop
             if(($fromStdout|ConvertTo-Json -Depth 20 -Compress) -cne ($result|ConvertTo-Json -Depth 20 -Compress)){throw 'worker frames differ'}
             if($slot.Kind -ceq 'Controller'){
-                $reduced=Invoke-CcodSupervisorAdapter $Adapters.CompleteControllerRun @($result,$slot.Request.transactionId,$slot.Action,$slot.RuntimeId) 1
+                $expectedSource=if($slot.Action -ceq 'RepairStale'){$slot.Request.source}else{$null}
+                $reduced=Invoke-CcodSupervisorAdapter $Adapters.CompleteControllerRun @($result,$slot.Request.transactionId,$slot.Action,$slot.RuntimeId,$expectedSource) 1
                 if($null -ne $reduced){
                     $HostState.SessionState=[string]$reduced.SessionState
                     $HostState.BlockAutomaticActions=[bool]$reduced.BlockAutomaticActions
@@ -597,6 +602,10 @@ function Invoke-CcodSupervisorPollSlot {
                     if(-not [string]::IsNullOrWhiteSpace([string]$reduced.AttemptKey)){$HostState.AttemptKeys[[string]$reduced.AttemptKey]=$true}
                     if(-not [string]::IsNullOrWhiteSpace([string]$reduced.RecoveryIgnoreKey)){$HostState.RecoveryIgnoreKeys[[string]$reduced.RecoveryIgnoreKey]=$true}
                     if(-not [string]::IsNullOrWhiteSpace([string]$reduced.SuppressionKey)){$HostState.SuppressionKeys[[string]$reduced.SuppressionKey]=$true}
+                    if($slot.Action -ceq 'RepairStale'){
+                        if($reduced.SessionState -ceq 'Error' -or $reduced.BlockAutomaticActions){$HostState.FailedStaleRepairKey=$staleRepairKey}
+                        elseif($HostState.FailedStaleRepairKey -ceq $staleRepairKey){$HostState.FailedStaleRepairKey=$null}
+                    }
                     if($slot.Action -ceq 'Inspect'){
                         $HostState.SpecialNeedsInspect=$false
                         if($reduced.Reason -ceq 'StalePackageStatus' -and @($HostState.Special).Count -eq 1){$HostState.SpecialProof=$HostState.Special[0].Snapshot}
@@ -621,7 +630,10 @@ function Invoke-CcodSupervisorPollSlot {
                 }
             }
         }
-    }catch{$HostState.SessionState='Error';$HostState.BlockAutomaticActions=$true;$HostState.Reason='WorkerFramingFailed'}
+    }catch{
+        $HostState.SessionState='Error';$HostState.BlockAutomaticActions=$true;$HostState.Reason='WorkerFramingFailed'
+        if($null -ne $staleRepairKey){$HostState.FailedStaleRepairKey=$staleRepairKey}
+    }
     finally{Clear-CcodSupervisorWorkerSlot $HostState $Adapters}
 }
 
@@ -715,10 +727,13 @@ function Invoke-CcodSupervisorCommand {
         'SetCandidateCompatibleOptIn' {if($Command.Value -is [bool]){Invoke-CcodSupervisorAdapter $Adapters.SetCandidateOptIn @($HostState.Layout.StateRoot,[bool]$Command.Value) 0;$HostState.ForceReconcile=$true}}
         'OpenLogs' {Invoke-CcodSupervisorAdapter $Adapters.OpenLogs @($HostState.Layout.LogDirectory) 0}
         'ManualRetry' {
-            if($null -ne $HostState.StaleReconciliationCandidate){
-                $staleKey=('{0}|{1}' -f $HostState.StaleReconciliationCandidate.Pid,$HostState.StaleReconciliationCandidate.CreationTimeUtc)
+            if(-not [string]::IsNullOrWhiteSpace([string]$HostState.FailedStaleRepairKey)){
+                $staleKey=[string]$HostState.FailedStaleRepairKey
                 if($HostState.AttemptKeys.Contains($staleKey)){[void]$HostState.AttemptKeys.Remove($staleKey)}
+                $HostState.FailedStaleRepairKey=$null
                 $HostState.BlockAutomaticActions=$false
+                $HostState.ForceReconcile=$true
+                return
             }
             $retryKey=$null
             if(-not [string]::IsNullOrWhiteSpace([string]$HostState.PackageFullName) -and
