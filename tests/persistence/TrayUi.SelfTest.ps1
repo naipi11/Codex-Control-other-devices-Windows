@@ -253,27 +253,94 @@ $results.Add((Invoke-CcodTest 'exports exactly the six frozen TrayUi functions' 
     Assert-CcodEqual $expected $actual 'public export surface remains exact'
 }))
 
-$results.Add((Invoke-CcodTest 'production adapters create the required native menu boundary types' {
+$results.Add((Invoke-CcodTest 'skips every UI write for an equal fingerprint and repaints a locale-only change once' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        $active=New-CcodValidPresentation
+        Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        $englishFingerprint=$context.LastAppliedFingerprint
+        Assert-CcodTrue ($englishFingerprint -is [string] -and $englishFingerprint.Length -gt 0) 'the applied presentation has a bounded fingerprint'
+        $englishWrites=@($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count
+
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation) -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        Assert-CcodEqual $englishWrites @($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count 'an equal presentation and locale produce zero UI property writes'
+        Assert-CcodEqual $englishFingerprint $context.LastAppliedFingerprint 'an equal render preserves the applied fingerprint'
+
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation) -Catalog $script:TestChineseCatalog -LanguageMode zh-CN -SystemCultureName zh-CN
+        $chineseWrites=@($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count
+        Assert-CcodTrue ($chineseWrites -gt $englishWrites) 'a locale-only change repaints the existing card'
+        Assert-CcodTrue ($context.LastAppliedFingerprint -cne $englishFingerprint) 'locale participates in the applied fingerprint'
+        $chineseFingerprint=$context.LastAppliedFingerprint
+
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation) -Catalog $script:TestChineseCatalog -LanguageMode zh-CN -SystemCultureName zh-CN
+        Assert-CcodEqual $chineseWrites @($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count 'the equal localized render also produces zero UI property writes'
+        Assert-CcodEqual $chineseFingerprint $context.LastAppliedFingerprint 'the localized fingerprint is stable'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'hides without closing and flushes only the newest popup render exactly once' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
+        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Left'})
+        Assert-CcodEqual $true $context.IsPopupOpen 'left click opens the one reusable popup'
+
+        $warning=New-CcodValidPresentation;$warning.Color='Yellow';$warning.StateKey='Inspecting'
+        $blocked=New-CcodValidPresentation;$blocked.Color='Red';$blocked.StateKey='Error'
+        Set-CcodTrayPresentation -Context $context -Presentation $warning
+        Set-CcodTrayPresentation -Context $context -Presentation $blocked
+        Assert-CcodEqual 'Error' $context.PendingRender.Presentation.StateKey 'only the newest popup presentation remains pending'
+        $writesBeforeHide=@($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count
+
+        & $context.Menu.Events.Deactivated $context.Menu $null
+        $writesAfterHide=@($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count
+        Assert-CcodEqual $false $context.IsPopupOpen 'deactivation hides instead of closing the reusable popup'
+        Assert-CcodEqual $null $context.PendingRender 'the newest pending render is cleared after one flush'
+        Assert-CcodTrue ($writesAfterHide -gt $writesBeforeHide) 'hide flushes the changed pending presentation'
+        Assert-CcodEqual 'Red' $context.NotifyIcon.Properties.Icon.Color 'the flush applies only the newest pending status'
+
+        & $context.Menu.Events.Deactivated $context.Menu $null
+        Assert-CcodEqual $writesAfterHide @($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count 'reentrant deactivation cannot flush or hide twice'
+        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        Assert-CcodEqual $true $context.IsPopupOpen 'the hidden card reopens from the other tray button'
+        $closingArgs=[pscustomobject]@{Cancel=$false}
+        & $context.Menu.Events.Closing $context.Menu $closingArgs
+        Assert-CcodEqual $true $closingArgs.Cancel 'an ordinary window close request is converted to Hide'
+        Assert-CcodEqual $false $context.IsPopupOpen 'an ordinary window close request keeps the reusable card alive but hidden'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'production adapters create the WPF popup-card boundary types' {
     $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
     $objects=[Collections.Generic.List[object]]::new()
     try{
-        foreach($spec in @(@('Menu','Menu'),@('Row','TitleRow'),@('MenuItem','ApplyNowItem'),@('Separator','StatusSeparator'))){$objects.Add((& $production.CreateUiObject $spec[0] $spec[1]))}
-        Assert-CcodEqual 'System.Windows.Forms.ContextMenuStrip' $objects[0].GetType().FullName 'menu is native ContextMenuStrip'
-        Assert-CcodEqual 'System.Windows.Forms.ToolStripMenuItem' $objects[1].GetType().FullName 'row is native ToolStripMenuItem'
-        Assert-CcodEqual 'System.Windows.Forms.ToolStripMenuItem' $objects[2].GetType().FullName 'command is native ToolStripMenuItem'
-        Assert-CcodEqual 'System.Windows.Forms.ToolStripSeparator' $objects[3].GetType().FullName 'separator is native ToolStripSeparator'
+        foreach($spec in @(@('Menu','Menu'),@('Row','TitleRow'),@('MenuItem','ApplyNowItem'),@('Separator','StatusSeparator'),@('NotifyIcon','NotifyIcon'))){$objects.Add((& $production.CreateUiObject $spec[0] $spec[1]))}
+        Assert-CcodEqual 'System.Windows.Window' $objects[0].GetType().FullName 'menu host is a borderless WPF window'
+        Assert-CcodEqual 'System.Windows.Controls.TextBlock' $objects[1].GetType().FullName 'status rows are WPF text blocks'
+        Assert-CcodEqual 'System.Windows.Controls.Button' $objects[2].GetType().FullName 'commands are WPF buttons'
+        Assert-CcodEqual 'System.Windows.Controls.Separator' $objects[3].GetType().FullName 'separators are WPF separators'
+        Assert-CcodTrue ($objects[0].ShowInTaskbar -eq $false -and $objects[0].WindowStyle -eq [Windows.WindowStyle]::None) 'popup host is non-taskbar and borderless'
+        Assert-CcodEqual 320 $objects[0].Width 'popup width is exactly 320 device-independent pixels'
+        Assert-CcodTrue ($objects[2].Focusable -and [Windows.Input.KeyboardNavigation]::GetIsTabStop($objects[2])) 'interactive WPF controls retain keyboard focus and logical tab stops'
+        & $production.SetUiProperty $objects[2] 'Text' 'Apply now'
+        Assert-CcodEqual 'Apply now' ([Windows.Automation.AutomationProperties]::GetName($objects[2])) 'interactive controls expose an automation name'
+        & $production.SetUiProperty $objects[4] 'ContextMenuStrip' $null
+        Assert-CcodEqual $null $objects[4].ContextMenuStrip 'NotifyIcon never owns a classic ContextMenuStrip'
     }finally{foreach($object in $objects){& $production.DisposeUiObject $object}}
 }))
 
-$results.Add((Invoke-CcodTest 'production AddUiChild uses the native ToolStripMenuItem dropdown collection' {
+$results.Add((Invoke-CcodTest 'production AddUiChild attaches language choices to the WPF card' {
     $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
     $parent=$null;$child=$null
     try{
         $parent=& $production.CreateUiObject 'MenuItem' 'LanguageItem'
         $child=& $production.CreateUiObject 'MenuItem' 'EnglishItem'
         & $production.AddUiChild $parent $child
-        Assert-CcodEqual 1 $parent.DropDownItems.Count 'nested language item is attached to DropDownItems'
-        Assert-CcodTrue ([object]::ReferenceEquals($parent.DropDownItems[0],$child)) 'nested language item identity is preserved'
+        Assert-CcodEqual 'System.Windows.Controls.Expander' $parent.GetType().FullName 'language choices use a WPF disclosure control'
+        Assert-CcodEqual 1 $parent.Content.Children.Count 'nested language item is attached to WPF content'
+        Assert-CcodTrue ([object]::ReferenceEquals($parent.Content.Children[0],$child)) 'nested language item identity is preserved'
     }finally{
         if($null -ne $parent){& $production.DisposeUiObject $parent}
         elseif($null -ne $child){& $production.DisposeUiObject $child}
@@ -479,6 +546,12 @@ $results.Add((Invoke-CcodTest 'constructs one fake-first STA tray graph and clos
     Assert-CcodEqual 0 @($context.Icons.Values|Where-Object {$_.DisposeCount -gt 1}).Count 'no owned icon clone is disposed twice'
     Assert-CcodEqual 1 $context.TitleImage.DisposeCount 'owned title bitmap is disposed exactly once'
     Assert-CcodEqual 1 $context.TitleFont.DisposeCount 'owned bold font is disposed exactly once'
+    Assert-CcodEqual $true $context.PopupCloseIssued 'final teardown latches the one permitted WPF Close'
+    Assert-CcodEqual 1 $context.Menu.DisposeCount 'the reusable card owner closes exactly once at final teardown'
+    $menuCloseIndex=$fake.State.Calls.IndexOf('DisposeUi:TrayMenu')
+    $lastDetachIndex=-1
+    for($index=0;$index -lt $fake.State.Calls.Count;$index++){if($fake.State.Calls[$index] -like 'Detach:*'){$lastDetachIndex=$index}}
+    Assert-CcodTrue ($lastDetachIndex -ge 0 -and $lastDetachIndex -lt $menuCloseIndex) 'callbacks detach before the final WPF Close'
     $callCount=$fake.State.Calls.Count
     $second=Close-CcodTrayContext -Context $context
     Assert-CcodEqual $true $second.Closed 'second close is a success no-op'
@@ -544,6 +617,40 @@ $results.Add((Invoke-CcodTest 'renders the optional External renderer handoff wa
         Assert-CcodEqual 'External renderer handoff was not completed; Codex remains active' $context.Rows.Status.Properties.Text 'External renderer warning uses the localized status string'
         Assert-CcodEqual 'Codex device connection: working' $context.NotifyIcon.Properties.Text 'External renderer warning keeps the active tooltip'
         Assert-CcodEqual 'Yellow' $context.NotifyIcon.Properties.Icon.Color 'External renderer warning uses the yellow icon'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'opens the WPF popup from either mouse button, freezes visuals, and coalesces its pending render on close' {
+    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$ticks=[pscustomobject]@{Count=0};$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue $queue -OnTick ({$ticks.Count++}.GetNewClosure()) -Adapters $fake.Adapters
+        $active=New-CcodValidPresentation
+        Set-CcodTrayPresentation -Context $context -Presentation $active
+        $sameVisualSetCount=@($fake.State.Calls|Where-Object {$_ -like 'Set:*'}).Count
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
+        Assert-CcodEqual $sameVisualSetCount @($fake.State.Calls|Where-Object {$_ -like 'Set:*'}).Count 'an unchanged presentation fingerprint does not repeat visual writes'
+
+        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Left'})
+        Assert-CcodTrue $context.IsPopupOpen 'left click opens the popup'
+        & $context.Timer.Events.Tick $context.Timer $null
+        Assert-CcodEqual 1 $ticks.Count 'the 250ms safety tick continues while the popup is open'
+
+        $error=New-CcodValidPresentation;$error.Color='Red';$error.StateKey='Error';$error.ApplyNowVisible=$true;$error.ApplyNowEnabled=$true
+        $beforeDeferred=@($fake.State.Calls|Where-Object {$_ -like 'Set:*'}).Count
+        Set-CcodTrayPresentation -Context $context -Presentation $error
+        Assert-CcodEqual $beforeDeferred @($fake.State.Calls|Where-Object {$_ -like 'Set:*'}).Count 'an open popup freezes visual writes'
+        Assert-CcodTrue ($null -ne $context.PendingRender) 'an open popup retains only a pending render'
+
+        & $context.Menu.Events.KeyDown $context.Menu ([pscustomobject]@{Key='Escape'})
+        Assert-CcodEqual $false $context.IsPopupOpen 'Escape hides the popup'
+        Assert-CcodEqual 'Red' $context.NotifyIcon.Properties.Icon.Color 'Escape applies the most recent pending icon once'
+        Assert-CcodEqual 'Codex connection actions blocked' $context.NotifyIcon.Properties.Text 'Escape applies the most recent pending tooltip once'
+        Assert-CcodEqual $null $context.PendingRender 'pending render is cleared after it is applied'
+
+        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        Assert-CcodTrue $context.IsPopupOpen 'right click opens the popup'
+        & $context.Menu.Events.Deactivated $context.Menu $null
+        Assert-CcodEqual $false $context.IsPopupOpen 'deactivation hides the popup'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
@@ -718,9 +825,9 @@ $results.Add((Invoke-CcodTest 'continues every tray and watcher cleanup stage wi
     $context.Adapters.DetachUiCallback={param($Receipt)$cleanup.Detach++;throw 'SECRET_DETACH'}.GetNewClosure()
     $context.Adapters.ExitUiContext={param($Object)$cleanup.Exit++;throw 'SECRET_EXIT'}.GetNewClosure()
     $receipt=Close-CcodTrayContext -Context $context
-    $expected='CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED,CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED,CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
+    $expected='CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED,CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED,CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED,CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
     Assert-CcodEqual $expected (@($receipt.CleanupCodes)-join ',') 'tray cleanup codes are ordered deduplicated and allowlisted'
-    Assert-CcodTrue ($cleanup.Hide -ge 1 -and $cleanup.Stop -eq 1 -and $cleanup.Ui -ge 4 -and $cleanup.Icon -eq 10 -and $cleanup.Detach -eq 10 -and $cleanup.Exit -eq 1) 'all tray cleanup stages continue after title resources and callback failures'
+    Assert-CcodTrue ($cleanup.Hide -ge 1 -and $cleanup.Stop -eq 1 -and $cleanup.Ui -ge 4 -and $cleanup.Icon -eq 10 -and $cleanup.Detach -eq 14 -and $cleanup.Exit -eq 1) 'callbacks detach before the WPF card closes and every cleanup stage continues after failures'
     Assert-CcodTrue (($receipt|ConvertTo-Json -Compress) -cnotmatch 'SECRET') 'tray receipt exposes no injected text'
 
     $fake2=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$watcher=Start-CcodProcessWatcher -Queue $queue -OnFullReconciliationRequired {} -Adapters $fake2.Adapters;$queue.Enqueue('hint')

@@ -419,7 +419,8 @@ function New-CcodSupervisorHostState {
         StaticCache=[ordered]@{};TransportRetries=[ordered]@{};TerminalRecoveries=[ordered]@{}
         PackageFullName=$null;AppAsarSha256=$null;Classification=$null
         Ordinary=[object[]]@();Special=[object[]]@();SpecialNeedsInspect=$false;SpecialProof=$null;StaleReconciliationCandidate=$null
-        SessionState='Idle';BlockAutomaticActions=$false;Reason='Idle';ForceReconcile=$true;NextReconcileMilliseconds=[long]0;LastDecision=$null
+        SessionState='Idle';BlockAutomaticActions=$false;Reason='Idle';ObservationDirty=$false;NextObservationMilliseconds=[long]0
+        ForceReconcile=$true;NextReconcileMilliseconds=[long]0;LastDecision=$null
         RuntimeCleanupCodes=[Collections.Generic.List[string]]::new()
     }
 }
@@ -884,7 +885,31 @@ function Invoke-CcodSupervisorTick {
         Invoke-CcodSupervisorAdapter $Adapters.RequestUiExit @($HostState.Tray) 0
         return
     }
-    if($null -ne $HostState.WorkerSlot){Invoke-CcodSupervisorPollSlot $HostState $Adapters;return}
+    if($null -ne $HostState.WorkerSlot){
+        Invoke-CcodSupervisorPollSlot $HostState $Adapters
+        if($null -eq $HostState.WorkerSlot){$HostState.ObservationDirty=$true}
+        return
+    }
+    $elapsed=Invoke-CcodSupervisorAdapter $Adapters.GetElapsedMilliseconds @($HostState.Clock) 1
+    if(($elapsed -isnot [int] -and $elapsed -isnot [long]) -or $elapsed -lt 0){throw 'observation clock is invalid'}
+    $observationDue=$HostState.ObservationDirty -or $HostState.ForceReconcile -or [long]$elapsed -ge [long]$HostState.NextObservationMilliseconds
+    if(-not $observationDue){
+        if($null -ne $HostState.Journal){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Recover' $null|Out-Null;return}
+        if($HostState.SpecialNeedsInspect){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Inspect' $null|Out-Null;return}
+        $queueArgument=[object[]]::new(1);$queueArgument[0]=$HostState.CommandQueue
+        $dequeued=Invoke-CcodSupervisorAdapter $Adapters.TryDequeue $queueArgument 1
+        if(-not (Test-CcodSupervisorExactProperties $dequeued @('Succeeded','Value')) -or $dequeued.Succeeded -isnot [bool]){throw 'command queue receipt is invalid'}
+        if($dequeued.Succeeded){
+            $forceBefore=[bool]$HostState.ForceReconcile
+            Invoke-CcodSupervisorCommand $HostState $Adapters $dequeued.Value
+            if(-not $forceBefore -and $HostState.ForceReconcile){$HostState.ObservationDirty=$true}
+        }
+        return
+    }
+    $observationDeadline=[long]$HostState.NextObservationMilliseconds
+    if($observationDeadline -le 0){$observationDeadline=1000}
+    while($observationDeadline -le [long]$elapsed){$observationDeadline+=1000}
+    $HostState.NextObservationMilliseconds=$observationDeadline;$HostState.ObservationDirty=$false
     $readStateArguments=[object[]]::new(2)
     $readStateArguments[0]=$HostState.Layout.StateRoot
     if(-not [string]::IsNullOrWhiteSpace([string]$HostState.PackageFullName) -and
@@ -898,8 +923,6 @@ function Invoke-CcodSupervisorTick {
     $HostState.Journal=Invoke-CcodSupervisorNullableAdapter $Adapters.ReadJournal @($HostState.Layout.TransitionPath)
     if($null -ne $HostState.Journal){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Recover' $null|Out-Null;return}
     if($HostState.Reason -ceq 'StalePackageStatus' -and ($null -ne $HostState.SpecialProof -or $null -ne $HostState.StaleReconciliationCandidate)){
-        $elapsed=Invoke-CcodSupervisorAdapter $Adapters.GetElapsedMilliseconds @($HostState.Clock) 1
-        if(($elapsed -isnot [int] -and $elapsed -isnot [long]) -or $elapsed -lt 0){throw 'reconciliation clock is invalid'}
         if($HostState.ForceReconcile -or [long]$elapsed -ge $HostState.NextReconcileMilliseconds){
             Invoke-CcodSupervisorRefreshObservations $HostState $Adapters
             $deadline=[long]$HostState.NextReconcileMilliseconds
@@ -918,9 +941,12 @@ function Invoke-CcodSupervisorTick {
     $queueArgument=[object[]]::new(1);$queueArgument[0]=$HostState.CommandQueue
     $dequeued=Invoke-CcodSupervisorAdapter $Adapters.TryDequeue $queueArgument 1
     if(-not (Test-CcodSupervisorExactProperties $dequeued @('Succeeded','Value')) -or $dequeued.Succeeded -isnot [bool]){throw 'command queue receipt is invalid'}
-    if($dequeued.Succeeded){Invoke-CcodSupervisorCommand $HostState $Adapters $dequeued.Value;return}
-    $elapsed=Invoke-CcodSupervisorAdapter $Adapters.GetElapsedMilliseconds @($HostState.Clock) 1
-    if(($elapsed -isnot [int] -and $elapsed -isnot [long]) -or $elapsed -lt 0){throw 'reconciliation clock is invalid'}
+    if($dequeued.Succeeded){
+        $forceBefore=[bool]$HostState.ForceReconcile
+        Invoke-CcodSupervisorCommand $HostState $Adapters $dequeued.Value
+        if(-not $forceBefore -and $HostState.ForceReconcile){$HostState.ObservationDirty=$true}
+        return
+    }
     if($HostState.ForceReconcile -or [long]$elapsed -ge $HostState.NextReconcileMilliseconds){
         Invoke-CcodSupervisorRefreshObservations $HostState $Adapters
         $deadline=[long]$HostState.NextReconcileMilliseconds

@@ -545,6 +545,54 @@ Invoke-CcodTest 'gives Shutdown absolute priority over a slot journal command an
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Poll:*' -or $_ -like 'Start:*' -or $_ -eq 'Read:State'}).Count 'no lower priority work runs'
 }
 
+Invoke-CcodTest 'observes and renders at 0 and 1000ms but not at intervening 250ms safety ticks' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    foreach($elapsed in @([long]0,[long]250,[long]500,[long]750,[long]999,[long]1000)){$world.Elapsed.Enqueue($elapsed)}
+
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual 1 $world.StateReads 'initial zero-millisecond tick reads state once'
+    Assert-CcodEqual 1 $world.JournalReads 'initial zero-millisecond tick reads journal once'
+    Assert-CcodEqual 1 $world.PresentationArguments.Count 'initial zero-millisecond tick renders once'
+    Assert-CcodEqual 1 @($world.Calls|Where-Object {$_ -eq 'Enumerate'}).Count 'initial forced reconcile observes processes once'
+
+    foreach($elapsed in @(250,500,750,999)){
+        Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+        Assert-CcodEqual 1 $world.StateReads "$elapsed millisecond safety tick does not reread state"
+        Assert-CcodEqual 1 $world.JournalReads "$elapsed millisecond safety tick does not reread journal"
+        Assert-CcodEqual 1 $world.PresentationArguments.Count "$elapsed millisecond safety tick does not rewrite the presentation"
+        Assert-CcodEqual 1 @($world.Calls|Where-Object {$_ -eq 'Enumerate'}).Count "$elapsed millisecond safety tick does not repurpose the three-second reconcile deadline"
+    }
+
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual 2 $world.StateReads '1000 millisecond deadline reads state again'
+    Assert-CcodEqual 2 $world.JournalReads '1000 millisecond deadline reads journal again'
+    Assert-CcodEqual 2 $world.PresentationArguments.Count '1000 millisecond deadline renders exactly once more'
+    Assert-CcodEqual 1 @($world.Calls|Where-Object {$_ -eq 'Enumerate'}).Count 'one-second observation leaves the separate three-second process deadline intact'
+}
+
+Invoke-CcodTest 'keeps queued commands and shutdown immediate inside the observation throttle window' {
+    $commandFixture=New-CcodTickFixture;$commandWorld=$commandFixture.Fake.World;$commandHost=$commandFixture.Host
+    $commandWorld.Elapsed.Enqueue([long]0);$commandWorld.Elapsed.Enqueue([long]250)
+    Invoke-CcodSupervisorTick $commandHost $commandFixture.Fake.Adapters
+    $commandWorld.CommandQueue.Enqueue([pscustomobject][ordered]@{Kind='OpenLogs';Value=$null;EnqueuedAtUtc='2030-02-03T03:04:05.0000000Z'})
+    Invoke-CcodSupervisorTick $commandHost $commandFixture.Fake.Adapters
+    Assert-CcodTrue ($commandWorld.Calls.Contains('Open:Logs')) 'a queued command executes on the next 250 millisecond tick'
+    Assert-CcodEqual 1 $commandWorld.StateReads 'command tick does not force an unrelated state read'
+    Assert-CcodEqual 1 $commandWorld.JournalReads 'command tick does not force an unrelated journal read'
+    Assert-CcodEqual 1 $commandWorld.PresentationArguments.Count 'nonvisual command does not force a presentation write'
+
+    $shutdownFixture=New-CcodTickFixture;$shutdownWorld=$shutdownFixture.Fake.World;$shutdownHost=$shutdownFixture.Host
+    $shutdownWorld.Elapsed.Enqueue([long]0)
+    Invoke-CcodSupervisorTick $shutdownHost $shutdownFixture.Fake.Adapters
+    $shutdownWorld.ShutdownSignaled=$true
+    Invoke-CcodSupervisorTick $shutdownHost $shutdownFixture.Fake.Adapters
+    Assert-CcodTrue $shutdownHost.ShutdownRequested 'shutdown latches on the next 250 millisecond tick'
+    Assert-CcodTrue ($shutdownWorld.Calls.Contains('Exit:UI')) 'shutdown requests UI exit without waiting for observation'
+    Assert-CcodEqual 1 $shutdownWorld.StateReads 'shutdown tick performs no state read'
+    Assert-CcodEqual 1 $shutdownWorld.JournalReads 'shutdown tick performs no journal read'
+    Assert-CcodEqual 1 $shutdownWorld.PresentationArguments.Count 'shutdown tick performs no presentation write'
+}
+
 Invoke-CcodTest 'reserves the whole tick for a slot that existed at tick entry' {
     foreach($completed in @($false,$true)){
         $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
