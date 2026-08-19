@@ -1224,9 +1224,9 @@ $results += Invoke-CcodTest 'README and release workflow publish current install
     Assert-CcodTrue ($readme -cmatch 'uninstall \*\*CodexRemote-fix\*\* from') 'English uninstall instructions use the public product name'
     Assert-CcodTrue ($readmeChinese -cmatch '(?s)Windows .{0,100}\*\*CodexRemote-fix\*\*') 'Chinese uninstall instructions use the public product name'
 
-    $workflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\release.yml') -Raw
-    Assert-CcodTrue ($workflow -cmatch '(?m)^name: CodexRemote-fix release$') 'release workflow uses public product branding'
-    Assert-CcodTrue ($workflow -cmatch '(?m)^\s+name: CodexRemote-fix installer$') 'uploaded artifact uses public product branding'
+    $workflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\release.yml') -Raw -Encoding UTF8
+    Assert-CcodTrue ($workflow -cmatch '(?m)^name: CodexRemote-fix release\r?$') 'release workflow uses public product branding'
+    Assert-CcodTrue ($workflow -cmatch '(?m)^\s+name: CodexRemote-fix installer\r?$') 'uploaded artifact uses public product branding'
     Assert-CcodTrue ($workflow -cmatch '--title "CodexRemote-fix \$version"') 'GitHub release title uses public product branding'
 }
 
