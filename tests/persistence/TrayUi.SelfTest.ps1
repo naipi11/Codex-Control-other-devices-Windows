@@ -37,6 +37,7 @@ function Invoke-CcodPostedUiCallbacks {
 
 function Invoke-CcodTrayShellRightMouseUp {
     param($Fake,$Context)
+    # WinForms displays an assigned NotifyIcon.ContextMenuStrip before MouseUp on WM_RBUTTONUP.
     if($null -ne $Context.NotifyIcon.Properties.ContextMenuStrip){
         $Fake.State.NativeFallbackWasPreemptive=$true
         $Fake.State.NativeFallbackShowCount++
@@ -164,7 +165,7 @@ function New-CcodTrayFakeAdapters {
     }
     $trayAdapterNames=& (Get-Module TrayUi) {@($script:TrayAdapterNames)}
     if($trayAdapterNames -ccontains 'PostUiCallback'){
-        $adapters.PostUiCallback={param($Object,[scriptblock]$Callback)$state.Calls.Add("Post:$($Object.Name)");$state.PostedUiCallbacks.Enqueue($Callback)}.GetNewClosure()
+        $adapters.PostUiCallback={param($Object,[scriptblock]$Callback,[scriptblock]$OnAborted)$state.Calls.Add("Post:$($Object.Name)");$state.PostedUiCallbacks.Enqueue($Callback);$true}.GetNewClosure()
     }
     if($trayAdapterNames -ccontains 'ShowNativeMenu'){
         $adapters.ShowNativeMenu={param($Menu)$state.Calls.Add("ShowNativeMenu:$($Menu.Name)");$state.NativeFallbackShowCount++}.GetNewClosure()
@@ -395,7 +396,7 @@ $results.Add((Invoke-CcodTest 'production adapters create the WPF popup-card bou
     }finally{foreach($object in $objects){& $production.DisposeUiObject $object}}
 }))
 
-$results.Add((Invoke-CcodTest 'real STA NotifyIcon MouseUp reaches the WPF path without an assigned native fallback menu' {
+$results.Add((Invoke-CcodTest 'real STA NotifyIcon delegate boundary forwards MouseUp without an assigned native fallback menu' {
     $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
     $notify=$null;$fallback=$null;$fallbackItem=$null;$attachment=$null
     try{
@@ -417,7 +418,17 @@ $results.Add((Invoke-CcodTest 'real STA NotifyIcon MouseUp reaches the WPF path 
     }
 }))
 
-$results.Add((Invoke-CcodTest 'real right-click ordering defers WPF and never preempts it with a native menu' {
+$results.Add((Invoke-CcodTest 'real STA dispatcher post returns an accepted scheduling acknowledgement' {
+    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
+    $menu=$null
+    try{
+        $menu=& $production.CreateUiObject 'Menu' 'TrayMenu'
+        $accepted=& $production.PostUiCallback $menu ({}.GetNewClosure()) ({}.GetNewClosure())
+        Assert-CcodEqual $true $accepted 'the real WPF DispatcherOperation acknowledges an accepted queued callback'
+    }finally{if($null -ne $menu){& $production.DisposeUiObject $menu}}
+}))
+
+$results.Add((Invoke-CcodTest 'modeled shell right-click ordering defers WPF and never preempts it with a native menu' {
     $fake=New-CcodTrayFakeAdapters;$context=$null
     try{
         $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
@@ -462,6 +473,22 @@ $results.Add((Invoke-CcodTest 'a stale deferred show cannot open a later right-c
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
+$results.Add((Invoke-CcodTest 'deactivation hides an already-visible card while canceling its newer deferred right-click' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        Invoke-CcodTrayShellRightMouseUp $fake $context
+        & $fake.State.PostedUiCallbacks.Dequeue()
+        Assert-CcodEqual $true $context.IsPopupOpen 'the first deferred right-click opens the card'
+        Invoke-CcodTrayShellRightMouseUp $fake $context
+        Assert-CcodEqual 1 $fake.State.PostedUiCallbacks.Count 'a second right-click queues a newer popup transition while the card is visible'
+        & $context.Menu.Events.Deactivated $context.Menu $null
+        Assert-CcodEqual $false $context.IsPopupOpen 'genuine deactivation hides the currently visible topmost card even when a newer show is pending'
+        & $fake.State.PostedUiCallbacks.Dequeue()
+        Assert-CcodEqual $false $context.IsPopupOpen 'the canceled newer callback cannot reopen the card after deactivation'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
 $results.Add((Invoke-CcodTest 'dispatcher-post failure explicitly shows the native fallback once' {
     $fake=New-CcodTrayFakeAdapters;$context=$null
     try{
@@ -471,6 +498,59 @@ $results.Add((Invoke-CcodTest 'dispatcher-post failure explicitly shows the nati
         Assert-CcodEqual $false $context.IsPopupOpen 'a dispatcher-post failure does not claim the WPF card is open'
         Assert-CcodEqual $true $context.CallbackFailure 'a dispatcher-post failure remains observable to the supervisor'
         Assert-CcodEqual 1 $fake.State.NativeFallbackShowCount 'a dispatcher-post failure explicitly displays one native fallback menu'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'a refused dispatcher post clears the pending request and shows fallback once' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $fake.Adapters.PostUiCallback={param($Object,[scriptblock]$Callback,[scriptblock]$OnAborted)$false}.GetNewClosure()
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        Invoke-CcodTrayShellRightMouseUp $fake $context
+        Assert-CcodEqual $false $context.PopupShowScheduled 'a refused dispatcher post cannot leave the popup request pending'
+        Assert-CcodEqual $false $context.IsPopupOpen 'a refused dispatcher post does not claim the card is open'
+        Assert-CcodEqual $true $context.CallbackFailure 'a refused dispatcher post remains observable to the supervisor'
+        Assert-CcodEqual 1 $fake.State.NativeFallbackShowCount 'a refused dispatcher post explicitly shows one native fallback menu'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'an accepted dispatcher post that aborts clears the pending request and shows fallback once' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $aborts=[Collections.Generic.Queue[scriptblock]]::new();$state=$fake.State
+        $fake.Adapters.PostUiCallback={
+            param($Object,[scriptblock]$Callback,[scriptblock]$OnAborted)
+            $aborts.Enqueue($OnAborted)
+            $true
+        }.GetNewClosure()
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        Invoke-CcodTrayShellRightMouseUp $fake $context
+        Assert-CcodEqual $true $context.PopupShowScheduled 'an accepted dispatcher post records one pending popup request'
+        Assert-CcodEqual 1 $aborts.Count 'the dispatcher post supplies one abort callback for a later shutdown race'
+        & $aborts.Dequeue()
+        Assert-CcodEqual $false $context.PopupShowScheduled 'an aborted dispatcher post clears the pending popup request'
+        Assert-CcodEqual $true $context.CallbackFailure 'an aborted dispatcher post remains observable to the supervisor'
+        Assert-CcodEqual 1 $state.NativeFallbackShowCount 'an aborted dispatcher post explicitly shows one native fallback menu'
+
+        $context.Adapters.PostUiCallback={param($Object,[scriptblock]$Callback,[scriptblock]$OnAborted)$state.PostedUiCallbacks.Enqueue($Callback);$true}.GetNewClosure()
+        Invoke-CcodTrayShellRightMouseUp $fake $context
+        Assert-CcodEqual 1 $state.PostedUiCallbacks.Count 'a later click can schedule normally after the aborted post is cleared'
+        & $state.PostedUiCallbacks.Dequeue()
+        Assert-CcodEqual $true $context.IsPopupOpen 'a later accepted dispatcher post still opens the WPF card'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'closing the tray invalidates a queued dispatcher show without fallback or reopening' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        Invoke-CcodTrayShellRightMouseUp $fake $context
+        Assert-CcodEqual 1 $fake.State.PostedUiCallbacks.Count 'one deferred show is pending before tray cleanup'
+        Close-CcodTrayContext -Context $context|Out-Null
+        Assert-CcodEqual 'Closed' $context.State 'tray cleanup reaches the terminal state before a queued callback can run'
+        & $fake.State.PostedUiCallbacks.Dequeue()
+        Assert-CcodEqual $false $context.IsPopupOpen 'a callback released after cleanup cannot reopen the disposed WPF card'
+        Assert-CcodEqual 0 $fake.State.NativeFallbackShowCount 'cleanup suppresses fallback display for the invalidated callback'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 

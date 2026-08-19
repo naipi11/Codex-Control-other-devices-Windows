@@ -442,14 +442,19 @@ function Get-CcodTrayDefaultAdapters {
         $Object.Visible=[bool]$Visible
     }
     $defaults.PostUiCallback={
-        param($Object,[scriptblock]$Callback)
+        param($Object,[scriptblock]$Callback,[scriptblock]$OnAborted)
         Initialize-CcodTrayWpf
-        if($Object -isnot [Windows.Window] -or $Callback -isnot [scriptblock]){throw 'WPF dispatcher callback is invalid'}
+        if($Object -isnot [Windows.Window] -or $Callback -isnot [scriptblock] -or $OnAborted -isnot [scriptblock]){throw 'WPF dispatcher callback is invalid'}
         $dispatcher=$Object.Dispatcher
         if($null -eq $dispatcher -or $dispatcher.HasShutdownStarted -or $dispatcher.HasShutdownFinished){throw 'WPF dispatcher is unavailable'}
         $callbackRef=$Callback
         $action=[Action] {& $callbackRef}.GetNewClosure()
-        [void]$dispatcher.BeginInvoke($action,[Windows.Threading.DispatcherPriority]::ContextIdle)
+        $operation=$dispatcher.BeginInvoke($action,[Windows.Threading.DispatcherPriority]::ContextIdle)
+        if($null -eq $operation){return $false}
+        $onAbortedRef=$OnAborted
+        $aborted=[EventHandler]{param($sender,$eventArgs)& $onAbortedRef}.GetNewClosure()
+        $operation.add_Aborted($aborted)
+        return [bool](@('Pending','Executing','Completed') -ccontains [string]$operation.Status)
     }
     $defaults.ShowNativeMenu={
         param($Menu)
@@ -967,6 +972,17 @@ function Show-CcodTrayNativeFallback {
     catch{if($Context.State -ceq 'Open'){$Context.CallbackFailure=$true}}
 }
 
+function Reject-CcodDeferredTrayPopupShow {
+    param($Context,[long]$RequestGeneration)
+    [Threading.Monitor]::Enter($Context.QueueGate)
+    try{
+        if($Context.State -cne 'Open' -or -not $Context.PopupShowScheduled -or $Context.PopupShowGeneration -ne $RequestGeneration){return}
+        $Context.PopupShowScheduled=$false
+        $Context.CallbackFailure=$true
+        Show-CcodTrayNativeFallback $Context
+    }finally{[Threading.Monitor]::Exit($Context.QueueGate)}
+}
+
 function Invoke-CcodDeferredTrayPopupShow {
     param($Context,[long]$RequestGeneration)
     [Threading.Monitor]::Enter($Context.QueueGate)
@@ -997,14 +1013,13 @@ function Show-CcodTrayPopup {
         }
         $Context.PopupShowScheduled=$true
         $Context.PopupShowGeneration=[long]($Context.PopupShowGeneration+1)
-        $contextRef=$Context;$requestGeneration=$Context.PopupShowGeneration;$invokeDeferredShowRef=${function:Invoke-CcodDeferredTrayPopupShow}
+        $contextRef=$Context;$requestGeneration=$Context.PopupShowGeneration;$invokeDeferredShowRef=${function:Invoke-CcodDeferredTrayPopupShow};$rejectDeferredShowRef=${function:Reject-CcodDeferredTrayPopupShow}
         $deferredShow={& $invokeDeferredShowRef $contextRef $requestGeneration}.GetNewClosure()
-        try{Invoke-CcodTrayAdapter $Context.Adapters.PostUiCallback @($Context.Menu,$deferredShow) 0 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'}
-        catch{
-            $Context.PopupShowScheduled=$false
-            if($Context.State -ceq 'Open'){$Context.CallbackFailure=$true}
-            Show-CcodTrayNativeFallback $Context
-        }
+        $postAborted={& $rejectDeferredShowRef $contextRef $requestGeneration}.GetNewClosure()
+        try{
+            $accepted=Invoke-CcodTrayAdapter $Context.Adapters.PostUiCallback @($Context.Menu,$deferredShow,$postAborted) 1 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'
+            if($accepted -isnot [bool] -or -not $accepted){& $rejectDeferredShowRef $contextRef $requestGeneration}
+        }catch{& $rejectDeferredShowRef $contextRef $requestGeneration}
     }finally{[Threading.Monitor]::Exit($Context.QueueGate)}
 }
 
@@ -1013,7 +1028,7 @@ function Hide-CcodTrayPopup {
     [Threading.Monitor]::Enter($Context.QueueGate)
     try{
         if($Context.State -cne 'Open' -or $Context.PopupFinalClose -or $Context.PopupTransitionInProgress){return}
-        if($Context.PopupShowScheduled){$Context.PopupShowScheduled=$false;return}
+        if($Context.PopupShowScheduled){$Context.PopupShowScheduled=$false}
         if(-not $Context.IsPopupOpen){return}
         $Context.PopupTransitionInProgress=$true
         $Context.IsPopupOpen=$false
