@@ -617,17 +617,21 @@ Invoke-CcodTest 'bounds stale-package special reconciliation to one live process
     Assert-CcodEqual $attemptsBefore ($hostState.AttemptKeys|ConvertTo-Json -Compress) 'changed identity recovery does not clear key membership'
 }
 
-Invoke-CcodTest 'uses a constrained stale reconciliation candidate without elevating unproven debug processes' {
+Invoke-CcodTest 'uses a constrained stale reconciliation candidate for only an exact persisted old MSIX path' {
     $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
-    $live=[pscustomobject][ordered]@{Found=$true;FullName='OpenAI.Codex_2.0.0.0_x64__2p2nqsd0c76g0';FamilyName='OpenAI.Codex_2p2nqsd0c76g0';Version='2.0.0.0';ExecutablePath='C:\Codex\ChatGPT.exe'}
+    $oldInstall='C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';$oldExecutable=$oldInstall+'\app\ChatGPT.exe'
+    $liveInstall='C:\Program Files\WindowsApps\OpenAI.Codex_2.0.0.0_x64__2p2nqsd0c76g0';$liveExecutable=$liveInstall+'\app\ChatGPT.exe'
+    $mismatchedOldExecutable='C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0-tampered\app\ChatGPT.exe'
+    $live=[pscustomobject][ordered]@{Found=$true;FullName='OpenAI.Codex_2.0.0.0_x64__2p2nqsd0c76g0';FamilyName='OpenAI.Codex_2p2nqsd0c76g0';Version='2.0.0.0';InstallLocation=$liveInstall;ExecutablePath=$liveExecutable}
     $definitions=[ordered]@{}
-    $definitions['201']=[pscustomobject][ordered]@{Pid=[int]201;CreationTimeUtc='2030-02-03T03:02:00.0000000Z';CommandLine='"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002';Arguments=@('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002')}
-    $definitions['333']=[pscustomobject][ordered]@{Pid=[int]333;CreationTimeUtc='2030-02-03T03:02:30.0000000Z';CommandLine='"C:\Codex\ChatGPT.exe" --inspect=127.0.0.1:49999';Arguments=@('C:\Codex\ChatGPT.exe','--inspect=127.0.0.1:49999')}
+    $definitions['201']=[pscustomobject][ordered]@{Pid=[int]201;CreationTimeUtc='2030-02-03T03:02:00.0000000Z';Path=$oldExecutable;CommandLine=('"'+$oldExecutable+'" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002');Arguments=@($oldExecutable,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002')}
+    $definitions['333']=[pscustomobject][ordered]@{Pid=[int]333;CreationTimeUtc='2030-02-03T03:02:30.0000000Z';Path=$oldExecutable;CommandLine=('"'+$oldExecutable+'" --inspect=127.0.0.1:49999');Arguments=@($oldExecutable,'--inspect=127.0.0.1:49999')}
+    $definitions['334']=[pscustomobject][ordered]@{Pid=[int]334;CreationTimeUtc='2030-02-03T03:02:40.0000000Z';Path=$mismatchedOldExecutable;CommandLine=('"'+$mismatchedOldExecutable+'" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002');Arguments=@($mismatchedOldExecutable,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002')}
     $snapshotAdapters=@{
         GetPackageIdentity={$live}.GetNewClosure()
         GetCurrentSessionId={[int]1}
         GetCurrentUserSid={'S-1-5-21-111-222-333-1001'}
-        GetNativeProcess={param($ProcessId)$entry=$definitions[[string][int]$ProcessId];if($null -eq $entry){return $null};[pscustomobject][ordered]@{Pid=[int]$entry.Pid;CreationTimeUtc=[string]$entry.CreationTimeUtc;SessionId=[int]1;UserSid='S-1-5-21-111-222-333-1001';Path=$live.ExecutablePath;PackageFamilyName=$live.FamilyName}}.GetNewClosure()
+        GetNativeProcess={param($ProcessId)$entry=$definitions[[string][int]$ProcessId];if($null -eq $entry){return $null};[pscustomobject][ordered]@{Pid=[int]$entry.Pid;CreationTimeUtc=[string]$entry.CreationTimeUtc;SessionId=[int]1;UserSid='S-1-5-21-111-222-333-1001';Path=[string]$entry.Path;PackageFamilyName=$live.FamilyName}}.GetNewClosure()
         GetCimProcess={param($ProcessId)$entry=$definitions[[string][int]$ProcessId];if($null -eq $entry){return $null};[pscustomobject][ordered]@{ProcessId=[int]$entry.Pid;ParentProcessId=[int]0;CommandLine=[string]$entry.CommandLine}}.GetNewClosure()
         ParseCommandLine={param($CommandLine)foreach($entry in @($definitions.Values)){if($entry.CommandLine -ceq $CommandLine){return @($entry.Arguments)}};return $null}.GetNewClosure()
         ProbeSpecial={param($ProcessId,$RendererPort,$MainPort)[pscustomobject][ordered]@{Valid=$true;RendererUrl='app://-/index.html'}}
@@ -637,6 +641,13 @@ Invoke-CcodTest 'uses a constrained stale reconciliation candidate without eleva
     $key='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0|'+('a'*64)+'|runtime-old'
     $record=[pscustomobject][ordered]@{packageFullName=$codex.packageFullName;packageVersion=$codex.packageVersion;appAsarSha256=$codex.appAsarSha256;runtimeId='runtime-old';staticClassification='CandidateCompatible';dynamicOutcome='Succeeded';probeState='Valid';confirmedAtUtc='2030-02-03T03:01:00.0000000Z'}
     $state=[pscustomobject][ordered]@{AutomationEnabled=$true;AutomaticCandidateTrialsAllowed=$false;Settings=[pscustomobject][ordered]@{candidateCompatibleOptIn=$true};Status=$status;VerifiedPackages=[pscustomobject][ordered]@{schemaVersion=[int]1;packages=[pscustomobject][ordered]@{$key=$record}};Damage=[pscustomobject]@{}}
+    $mismatchedCodex=[pscustomobject][ordered]@{pid=[int]334;creationTimeUtc='2030-02-03T03:02:40.0000000Z';packageFullName=$codex.packageFullName;packageVersion=$codex.packageVersion;appAsarSha256=$codex.appAsarSha256;mainPort=[int]41002;rendererPort=[int]41001;mainProbe='Closed';rendererProbe='BridgeValid'}
+    $mismatchedStatus=[pscustomobject][ordered]@{schemaVersion=[int]1;session=[pscustomobject][ordered]@{supervisorPid=[int]41;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId='runtime-old';sessionState='Active';codex=$mismatchedCodex}}
+    $mismatchedState=[pscustomobject][ordered]@{AutomationEnabled=$true;AutomaticCandidateTrialsAllowed=$false;Settings=[pscustomobject][ordered]@{candidateCompatibleOptIn=$true};Status=$mismatchedStatus;VerifiedPackages=$state.VerifiedPackages;Damage=[pscustomobject]@{}}
+    $inactiveSession=$status.session.PSObject.Copy();$inactiveSession.sessionState='Idle'
+    $inactiveStatus=$status.PSObject.Copy();$inactiveStatus.session=$inactiveSession
+    $inactiveState=[pscustomobject][ordered]@{AutomationEnabled=$true;AutomaticCandidateTrialsAllowed=$false;Settings=[pscustomobject][ordered]@{candidateCompatibleOptIn=$true};Status=$inactiveStatus;VerifiedPackages=$state.VerifiedPackages;Damage=[pscustomobject]@{}}
+    $unverifiedState=[pscustomobject][ordered]@{AutomationEnabled=$true;AutomaticCandidateTrialsAllowed=$false;Settings=[pscustomobject][ordered]@{candidateCompatibleOptIn=$true};Status=$status;VerifiedPackages=[pscustomobject][ordered]@{schemaVersion=[int]1;packages=[pscustomobject][ordered]@{}};Damage=[pscustomobject]@{}}
     $stateBefore=$state|ConvertTo-Json -Depth 20 -Compress
     $hostState.AttemptKeys['preserved-attempt']=$true;$hostState.RecoveryIgnoreKeys['preserved-ignore']=$true;$hostState.SuppressionKeys['preserved-suppression']=$true
     $keysBefore=($hostState.AttemptKeys|ConvertTo-Json -Compress)+($hostState.RecoveryIgnoreKeys|ConvertTo-Json -Compress)+($hostState.SuppressionKeys|ConvertTo-Json -Compress)
@@ -644,15 +655,21 @@ Invoke-CcodTest 'uses a constrained stale reconciliation candidate without eleva
     $fixture.Fake.Adapters.ReadState={param($StateRoot,$SuppressionKey)$state}.GetNewClosure()
     $fixture.Fake.Adapters.GetPackageIdentity={$live}.GetNewClosure()
     $fixture.Fake.Adapters.GetProcessSnapshot={param($ProcessId,$StatusEvidence)$world.Calls.Add("Snapshot:$ProcessId");$seenStatusEvidence.Add($StatusEvidence);Get-CcodProcessSnapshot -ProcessId ([int]$ProcessId) -StatusEvidence $StatusEvidence -Adapters $snapshotAdapters}.GetNewClosure()
+    $fixture.Fake.Adapters.ParseStaleCandidateCommandLine={param($CommandLine)foreach($entry in @($definitions.Values)){if($entry.CommandLine -ceq $CommandLine){return @($entry.Arguments)}};return $null}.GetNewClosure()
     $fixture.Fake.Adapters.GetSupervisorDecision={param($Context)$world.Calls.Add('Decision');Get-CcodSupervisorDecision -Context $Context}.GetNewClosure()
     $unproven=Get-CcodProcessSnapshot -ProcessId 201 -StatusEvidence $status -Adapters $snapshotAdapters
     $arbitrary=Get-CcodProcessSnapshot -ProcessId 333 -StatusEvidence $status -Adapters $snapshotAdapters
+    $mismatched=Get-CcodProcessSnapshot -ProcessId 334 -StatusEvidence $mismatchedStatus -Adapters $snapshotAdapters
+    $arbitraryExact=$unproven.PSObject.Copy();$arbitraryExact.CommandLine=$definitions['333'].CommandLine
     Assert-CcodEqual 'Unrelated' $unproven.Mode 'stale package proof never elevates an exact debug launch to Special'
+    Assert-CcodEqual $false $unproven.IsTopLevel 'normal current-package path remains strict for the old executable'
     Assert-CcodEqual 'Unrelated' $arbitrary.Mode 'arbitrary debug arguments are never elevated to Special'
-    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $state $arbitrary $live $hostState.Identity) 'arbitrary debug arguments never become a stale candidate'
-    $unverifiedState=$state|ConvertTo-Json -Depth 20|ConvertFrom-Json
-    $unverifiedState.VerifiedPackages=[pscustomobject][ordered]@{schemaVersion=[int]1;packages=[pscustomobject]@{}}
-    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $unverifiedState $unproven $live $hostState.Identity) 'stale candidate requires exact successful prior verification'
+    Assert-CcodEqual 'Unrelated' $mismatched.Mode 'mismatched old path is never elevated to Special'
+    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $state $arbitrary $live $hostState.Identity $fixture.Fake.Adapters) 'arbitrary debug process identity never becomes a stale candidate'
+    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $state $arbitraryExact $live $hostState.Identity $fixture.Fake.Adapters) 'arbitrary debug arguments never become a stale candidate even with the exact old identity'
+    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $mismatchedState $mismatched $live $hostState.Identity $fixture.Fake.Adapters) 'mismatched old MSIX executable path never becomes a stale candidate'
+    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $inactiveState $unproven $live $hostState.Identity $fixture.Fake.Adapters) 'stale candidate requires an Active persisted status'
+    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $unverifiedState $unproven $live $hostState.Identity $fixture.Fake.Adapters) 'stale candidate requires exact successful prior verification'
 
     $world.Calls.Clear();$world.ProcessIds=@(201,333);$hostState.ForceReconcile=$true
     Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
@@ -668,7 +685,7 @@ Invoke-CcodTest 'uses a constrained stale reconciliation candidate without eleva
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'same constrained candidate cannot cause unbounded Inspect'
 
     [void]$definitions.Remove('201')
-    $definitions['202']=[pscustomobject][ordered]@{Pid=[int]202;CreationTimeUtc='2030-02-03T03:03:00.0000000Z';CommandLine='"C:\Codex\ChatGPT.exe"';Arguments=@('C:\Codex\ChatGPT.exe')}
+    $definitions['202']=[pscustomobject][ordered]@{Pid=[int]202;CreationTimeUtc='2030-02-03T03:03:00.0000000Z';Path=$liveExecutable;CommandLine=('"'+$liveExecutable+'"');Arguments=@($liveExecutable)}
     $world.Calls.Clear();$world.ProcessIds=@(202,333);$hostState.ForceReconcile=$true
     Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
     Assert-CcodTrue ($null -eq $candidateProperty.Value) 'changed PID and creation time clear the stale candidate'

@@ -11,7 +11,7 @@ $script:CcodSupervisorLogPath=$null
 $script:CcodSupervisorAdapterNames=@(
     'GetIdentity','ResolveLayout','StartClock','GetElapsedMilliseconds','GetUtcNow',
     'EnterLease','ExitLease','OpenReadyEvent','OpenShutdownEvent','IsEventSignaled','SignalEvent','CloseEvent',
-    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','StartUninstall','EnumerateProcessIds','GetProcessSnapshot','GetPackageIdentity','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','HandoffRenderer','GetTrayPresentation',
+    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','StartUninstall','EnumerateProcessIds','GetProcessSnapshot','ParseStaleCandidateCommandLine','GetPackageIdentity','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','HandoffRenderer','GetTrayPresentation',
     'NewQueue','GetQueueCount','TryDequeue','NewTray','SetTrayPresentation','StopTrayTimer','RequestUiExit','CloseTray','NewWatcher','StopWatcher',
     'GetWorkerLeafState','WriteWorkerRequest','StartWorker','PollWorker','ReadWorkerResult','WaitWorker','GetWorkerIdentity','TerminateWorker','DisposeWorker','DeleteWorkerFile',
     'ClearFailedAttempt','SetAutomationEnabled','SetCandidateOptIn','OpenLogs','WriteLog','RunUiContext'
@@ -207,6 +207,17 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.StartUninstall={param($InstallRoot,$RuntimeRoot,$PowerShellPath)Start-CcodTrayUninstall -InstallRoot $InstallRoot -RuntimeRoot $RuntimeRoot -PowerShellPath $PowerShellPath}
     $defaults.EnumerateProcessIds={Get-CcodChatGptProcessIds}
     $defaults.GetProcessSnapshot={param($ProcessId,$StatusEvidence)Get-CcodProcessSnapshot -ProcessId $ProcessId -StatusEvidence $StatusEvidence}
+    $defaults.ParseStaleCandidateCommandLine={
+        param($CommandLine)
+        if($CommandLine -isnot [string] -or [string]::IsNullOrWhiteSpace($CommandLine)){return}
+        $processControl=Get-Module -Name ProcessControl
+        if($null -eq $processControl){throw 'process command-line parser is unavailable'}
+        & $processControl {
+            param($Value)
+            Initialize-CcodProcessNativeApi
+            [Ccod.Persistence.Native.CommandLineV1]::Parse([string]$Value)
+        } $CommandLine
+    }
     $defaults.GetPackageIdentity={
         if($null -eq (Get-Command Get-CcodPackageIdentity -ErrorAction SilentlyContinue)){
             $modulePath=Join-Path (Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'modules') 'CompatibilityProbe.psm1'
@@ -719,8 +730,49 @@ function Get-CcodSupervisorExactVerifiedRecord {
     return $null
 }
 
+function Get-CcodSupervisorExpectedStaleExecutablePath {
+    param($LivePackage,[string]$StalePackageFullName)
+    try{
+        if($null -eq $LivePackage -or $StalePackageFullName -isnot [string] -or [string]::IsNullOrWhiteSpace($StalePackageFullName) -or
+           [IO.Path]::IsPathRooted($StalePackageFullName) -or $StalePackageFullName.IndexOfAny([char[]]@('\','/',':')) -ge 0 -or
+           [IO.Path]::GetFileName($StalePackageFullName) -cne $StalePackageFullName -or
+           $LivePackage.FullName -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.FullName) -or
+           $LivePackage.InstallLocation -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.InstallLocation) -or
+           $LivePackage.ExecutablePath -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.ExecutablePath) -or
+           -not [IO.Path]::IsPathRooted($LivePackage.InstallLocation) -or -not [IO.Path]::IsPathRooted($LivePackage.ExecutablePath)){return $null}
+        $liveInstall=[IO.Path]::GetFullPath($LivePackage.InstallLocation).TrimEnd([char[]]@('\','/'))
+        if([string]::IsNullOrWhiteSpace($liveInstall) -or [IO.Path]::GetFileName($liveInstall) -cne $LivePackage.FullName){return $null}
+        $liveExecutable=[IO.Path]::GetFullPath($LivePackage.ExecutablePath)
+        $expectedLiveExecutable=[IO.Path]::GetFullPath([IO.Path]::Combine($liveInstall,'app','ChatGPT.exe'))
+        if(-not [string]::Equals($liveExecutable,$expectedLiveExecutable,[StringComparison]::OrdinalIgnoreCase)){return $null}
+        $packageRoot=[IO.Path]::GetDirectoryName($liveInstall)
+        if([string]::IsNullOrWhiteSpace($packageRoot)){return $null}
+        $oldInstall=[IO.Path]::GetFullPath([IO.Path]::Combine($packageRoot,$StalePackageFullName))
+        if(-not [string]::Equals([IO.Path]::GetDirectoryName($oldInstall),$packageRoot,[StringComparison]::OrdinalIgnoreCase)){return $null}
+        return [IO.Path]::GetFullPath([IO.Path]::Combine($oldInstall,'app','ChatGPT.exe'))
+    }catch{return $null}
+}
+
+function Test-CcodSupervisorExactStaleLaunch {
+    param($Snapshot,[string]$ExpectedExecutablePath,[int]$RendererPort,[int]$MainPort,[hashtable]$Adapters)
+    try{
+        if($null -eq $Snapshot -or $Snapshot.CommandLine -isnot [string] -or [string]::IsNullOrWhiteSpace($Snapshot.CommandLine) -or
+           $Adapters -isnot [hashtable] -or $Adapters.ParseStaleCandidateCommandLine -isnot [scriptblock]){return $false}
+        $capture=Invoke-CcodSupervisorAdapterCapture $Adapters.ParseStaleCandidateCommandLine @($Snapshot.CommandLine)
+        if($capture.Threw -or $capture.Items.Count -ne 4){return $false}
+        $expected=@($ExpectedExecutablePath,'--remote-debugging-address=127.0.0.1',("--remote-debugging-port={0}" -f $RendererPort),("--inspect=127.0.0.1:{0}" -f $MainPort))
+        for($index=0;$index -lt $expected.Count;$index++){
+            $actual=$capture.Items[$index]
+            if(Test-CcodSupervisorDiagnosticRecord $actual -or $actual -isnot [string]){return $false}
+            if($index -eq 0){if(-not [string]::Equals($actual,$expected[$index],[StringComparison]::OrdinalIgnoreCase)){return $false}}
+            elseif($actual -cne $expected[$index]){return $false}
+        }
+        return $true
+    }catch{return $false}
+}
+
 function Get-CcodSupervisorStaleReconciliationCandidate {
-    param($State,$Snapshot,$LivePackage,$Identity)
+    param($State,$Snapshot,$LivePackage,$Identity,[hashtable]$Adapters)
     try{
         if($null -eq $State -or $null -eq $Snapshot -or $null -eq $LivePackage -or $null -eq $Identity -or
            -not(Test-CcodSupervisorExactProperties $State.Status @('schemaVersion','session')) -or $State.Status.schemaVersion -isnot [int] -or $State.Status.schemaVersion -ne 1 -or
@@ -735,8 +787,10 @@ function Get-CcodSupervisorStaleReconciliationCandidate {
            $codex.mainProbe -cne 'Closed' -or $codex.rendererProbe -cne 'BridgeValid'){return $null}
         if($LivePackage.Found -isnot [bool] -or -not $LivePackage.Found -or $LivePackage.FullName -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.FullName) -or
            $LivePackage.FamilyName -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.FamilyName) -or $LivePackage.Version -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.Version) -or
-           $LivePackage.ExecutablePath -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.ExecutablePath) -or
+           $LivePackage.InstallLocation -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.InstallLocation) -or $LivePackage.ExecutablePath -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.ExecutablePath) -or
            ($LivePackage.FullName -ceq $codex.packageFullName -and $LivePackage.Version -ceq $codex.packageVersion)){return $null}
+        $expectedOldExecutable=Get-CcodSupervisorExpectedStaleExecutablePath $LivePackage $codex.packageFullName
+        if($expectedOldExecutable -isnot [string]){return $null}
         $key=('{0}|{1}|{2}' -f $codex.packageFullName,$codex.appAsarSha256,$State.Status.session.runtimeId)
         if($null -eq $State.VerifiedPackages -or -not(Test-CcodSupervisorExactProperties $State.VerifiedPackages @('schemaVersion','packages')) -or $State.VerifiedPackages.schemaVersion -isnot [int] -or $State.VerifiedPackages.schemaVersion -ne 1){return $null}
         $record=Get-CcodSupervisorExactVerifiedRecord $State.VerifiedPackages.packages $key
@@ -747,8 +801,9 @@ function Get-CcodSupervisorStaleReconciliationCandidate {
         if(-not(Test-CcodSupervisorExactProperties $Snapshot @('Pid','CreationTimeUtc','SessionId','UserSid','Path','PackageFamilyName','CommandLine','ParentPid','IsTopLevel','Mode','RendererPort','MainPort')) -or
            $Snapshot.Pid -isnot [int] -or $Snapshot.Pid -ne $codex.pid -or $Snapshot.CreationTimeUtc -isnot [string] -or $Snapshot.CreationTimeUtc -cne $codex.creationTimeUtc -or
            $Snapshot.SessionId -isnot [int] -or $Snapshot.SessionId -ne $Identity.SessionId -or $Snapshot.UserSid -isnot [string] -or $Snapshot.UserSid -cne $Identity.UserSid -or
-           $Snapshot.Path -isnot [string] -or -not $Snapshot.Path.Equals($LivePackage.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or $Snapshot.PackageFamilyName -isnot [string] -or $Snapshot.PackageFamilyName -cne $LivePackage.FamilyName -or
-           $Snapshot.IsTopLevel -isnot [bool] -or -not $Snapshot.IsTopLevel -or $Snapshot.Mode -cne 'Unrelated' -or $Snapshot.RendererPort -isnot [int] -or $Snapshot.RendererPort -ne $codex.rendererPort -or $Snapshot.MainPort -isnot [int] -or $Snapshot.MainPort -ne $codex.mainPort){return $null}
+           $Snapshot.Path -isnot [string] -or -not [string]::Equals($Snapshot.Path,$expectedOldExecutable,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($Snapshot.Path) -ine 'ChatGPT.exe' -or $Snapshot.PackageFamilyName -isnot [string] -or $Snapshot.PackageFamilyName -cne $LivePackage.FamilyName -or
+           $Snapshot.ParentPid -isnot [int] -or $Snapshot.ParentPid -lt 0 -or $Snapshot.IsTopLevel -isnot [bool] -or $Snapshot.IsTopLevel -or $Snapshot.Mode -cne 'Unrelated' -or $null -ne $Snapshot.RendererPort -or $null -ne $Snapshot.MainPort -or
+           -not(Test-CcodSupervisorExactStaleLaunch $Snapshot $expectedOldExecutable $codex.rendererPort $codex.mainPort $Adapters)){return $null}
         return $Snapshot
     }catch{return $null}
 }
@@ -763,12 +818,12 @@ function Invoke-CcodSupervisorRefreshObservations {
         if($pidValue -isnot [int] -or $pidValue -lt 1){continue}
         $snapshot=Invoke-CcodSupervisorNullableAdapter $Adapters.GetProcessSnapshot @([int]$pidValue,$statusEvidence)
         if($null -eq $snapshot){continue}
-        if($snapshot.UserSid -cne $HostState.Identity.UserSid -or $snapshot.SessionId -ne $HostState.Identity.SessionId -or -not $snapshot.IsTopLevel){continue}
-        if($snapshot.Mode -ceq 'Ordinary'){$ordinary.Add($snapshot)}
-        elseif($snapshot.Mode -ceq 'Special'){$special.Add([pscustomobject][ordered]@{Snapshot=$snapshot;IdentityValid=$true;ProbeValid=$false})}
+        if($snapshot.UserSid -cne $HostState.Identity.UserSid -or $snapshot.SessionId -ne $HostState.Identity.SessionId){continue}
+        if($snapshot.Mode -ceq 'Ordinary' -and $snapshot.IsTopLevel){$ordinary.Add($snapshot)}
+        elseif($snapshot.Mode -ceq 'Special' -and $snapshot.IsTopLevel){$special.Add([pscustomobject][ordered]@{Snapshot=$snapshot;IdentityValid=$true;ProbeValid=$false})}
         elseif($snapshot.Mode -ceq 'Unrelated'){
             if(-not $livePackageRead){$livePackage=Invoke-CcodSupervisorNullableAdapter $Adapters.GetPackageIdentity @();$livePackageRead=$true}
-            $candidate=Get-CcodSupervisorStaleReconciliationCandidate $HostState.State $snapshot $livePackage $HostState.Identity
+            $candidate=Get-CcodSupervisorStaleReconciliationCandidate $HostState.State $snapshot $livePackage $HostState.Identity $Adapters
             if($null -ne $candidate){$staleCandidates.Add($candidate)}
         }
     }
