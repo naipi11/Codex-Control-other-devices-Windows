@@ -702,8 +702,9 @@ function Test-CcodContextObject {
             $Context.Separators -isnot [Collections.Specialized.OrderedDictionary] -or $Context.UnownedControls -isnot [Collections.Generic.List[object]] -or
            $Context.Icons -isnot [Collections.Specialized.OrderedDictionary] -or $Context.Callbacks -isnot [Collections.Generic.List[object]] -or
            $Context.CleanupCodes -isnot [Collections.Generic.List[string]] -or
-           -not (Test-CcodOrderedKeys $Context.CommandValues @('AutomationChecked','CandidateOptInChecked','UninstallTitle','UninstallMessage')) -or
-           $Context.CommandValues.AutomationChecked -isnot [bool] -or $Context.CommandValues.CandidateOptInChecked -isnot [bool] -or
+            -not (Test-CcodOrderedKeys $Context.CommandValues @('AutomationChecked','CandidateOptInChecked','LanguageMode','UninstallTitle','UninstallMessage')) -or
+            $Context.CommandValues.AutomationChecked -isnot [bool] -or $Context.CommandValues.CandidateOptInChecked -isnot [bool] -or
+            $Context.CommandValues.LanguageMode -isnot [string] -or $script:TrayUiLanguageModes -cnotcontains $Context.CommandValues.LanguageMode -or
            $Context.CommandValues.UninstallTitle -isnot [string] -or $Context.CommandValues.UninstallTitle.Length -lt 1 -or $Context.CommandValues.UninstallTitle.Length -gt 300 -or
            $Context.CommandValues.UninstallMessage -isnot [string] -or $Context.CommandValues.UninstallMessage.Length -lt 1 -or $Context.CommandValues.UninstallMessage.Length -gt 300 -or
            (Test-CcodControlCharacter $Context.CommandValues.UninstallTitle) -or (Test-CcodControlCharacter $Context.CommandValues.UninstallMessage) -or
@@ -809,9 +810,12 @@ function Invoke-CcodTrayCommandCallback {
         if($Kind -ceq 'SetAutomationEnabled' -or $Kind -ceq 'SetCandidateCompatibleOptIn'){
             $value=Invoke-CcodTrayAdapter $Context.Adapters.GetUiProperty @($Sender,'Checked') 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
             if($value -isnot [bool]){return}
+            $verifiedValue=if($Kind -ceq 'SetAutomationEnabled'){$Context.CommandValues.AutomationChecked}else{$Context.CommandValues.CandidateOptInChecked}
+            Invoke-CcodTrayAdapter $Context.Adapters.SetUiProperty @($Sender,'Checked',[bool]$verifiedValue) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         }elseif($Kind -ceq 'SetUiLanguage'){
             if($ExplicitValue -isnot [string] -or $script:TrayUiLanguageModes -cnotcontains $ExplicitValue){return}
             $value=$ExplicitValue
+            Set-CcodTrayLanguageChecks $Context $Context.CommandValues.LanguageMode 'CCOD_TRAY_CREATE_FAILED'
         }elseif($Kind -ceq 'Uninstall'){
             $confirmed=Invoke-CcodTrayAdapter $Context.Adapters.ConfirmUninstall @($Context.CommandValues.UninstallTitle,$Context.CommandValues.UninstallMessage) 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
             if($confirmed -isnot [bool] -or -not $confirmed){return}
@@ -921,6 +925,7 @@ function Invoke-CcodTrayRenderWrite {
     Set-CcodTrayLanguageChecks $Context $Render.LanguageMode $FailureCode
     $Context.CommandValues.AutomationChecked=[bool]$presentation.AutomationChecked
     $Context.CommandValues.CandidateOptInChecked=[bool]$presentation.CandidateOptInChecked
+    $Context.CommandValues.LanguageMode=$Render.LanguageMode
     $Context.LastAppliedFingerprint=$Render.Fingerprint
 }
 
@@ -982,6 +987,7 @@ function New-CcodTrayContext {
         UnownedControls=[Collections.Generic.List[object]]::new();Icons=[ordered]@{};TitleImage=$null;TitleFont=$null
         Callbacks=[Collections.Generic.List[object]]::new();CommandValues=[ordered]@{
             AutomationChecked=$false;CandidateOptInChecked=$false
+            LanguageMode=$LanguageMode
             UninstallTitle=$localized['Dialog.UninstallTitle'];UninstallMessage=$localized['Dialog.UninstallMessage']
         }
         CleanupCodes=[Collections.Generic.List[string]]::new();CloseReceipt=$null
@@ -1257,8 +1263,11 @@ function Set-CcodTrayPresentation {
     try{
         $render=New-CcodTrayRenderState $Presentation $localized $LanguageMode $SystemCultureName
         if(-not (Test-CcodTrayRenderState $render)){Throw-CcodTrayError 'CCOD_TRAY_INPUT_INVALID' 'Tray'}
+        if($Context.IsPopupOpen){
+            if($render.Fingerprint -ceq $Context.LastAppliedFingerprint){$Context.PendingRender=$null;return}
+            $Context.PendingRender=$render;return
+        }
         if($render.Fingerprint -ceq $Context.LastAppliedFingerprint){return}
-        if($Context.IsPopupOpen){$Context.PendingRender=$render;return}
         Invoke-CcodTrayRenderWrite $Context $render 'CCOD_TRAY_PRESENTATION_FAILED'
     }catch{Throw-CcodTrayError 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'}
     }finally{[Threading.Monitor]::Exit($queueGate)}

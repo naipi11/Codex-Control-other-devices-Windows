@@ -253,6 +253,39 @@ $results.Add((Invoke-CcodTest 'exports exactly the six frozen TrayUi functions' 
     Assert-CcodEqual $expected $actual 'public export surface remains exact'
 }))
 
+$results.Add((Invoke-CcodTest 'popup state rollback A to B to A clears the stale pending render' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        $active=New-CcodValidPresentation
+        Set-CcodTrayPresentation -Context $context -Presentation $active
+        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Left'})
+        $blocked=New-CcodValidPresentation;$blocked.Color='Red';$blocked.StateKey='Error'
+        Set-CcodTrayPresentation -Context $context -Presentation $blocked
+        Assert-CcodEqual 'Error' $context.PendingRender.Presentation.StateKey 'intermediate B is pending while the popup is open'
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
+        Assert-CcodEqual $null $context.PendingRender 'latest state A cancels stale pending state B'
+        & $context.Menu.Events.Deactivated $context.Menu $null
+        Assert-CcodEqual 'Green' $context.NotifyIcon.Properties.Icon.Color 'Hide keeps the already applied state A'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'popup language rollback A to B to A clears the stale localized render' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US -Adapters $fake.Adapters
+        $active=New-CcodValidPresentation
+        Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Left'})
+        Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestChineseCatalog -LanguageMode zh-CN -SystemCultureName zh-CN
+        Assert-CcodEqual 'zh-CN' $context.PendingRender.LanguageMode 'intermediate language B is pending while the popup is open'
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation) -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        Assert-CcodEqual $null $context.PendingRender 'latest language A cancels stale pending language B'
+        & $context.Menu.Events.Deactivated $context.Menu $null
+        Assert-CcodEqual 'Codex Device Connection' $context.Rows.Title.Properties.Text 'Hide keeps the already applied language A'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
 $results.Add((Invoke-CcodTest 'skips every UI write for an equal fingerprint and repaints a locale-only change once' {
     $fake=New-CcodTrayFakeAdapters;$context=$null
     try{
@@ -1181,6 +1214,40 @@ $results.Add((Invoke-CcodTest 'keeps production defaults lazy and the Task10C2 A
         Assert-CcodEqual 0 @($commands|Where-Object {$_ -ceq $forbidden}).Count "$forbidden is absent from Task10C2 AST"
     }
     Assert-CcodTrue ((Get-Content -LiteralPath $modulePath -Raw).Contains('Register-WmiEvent -Class $ClassName')) 'production Trace default remains lazy source text only'
+}))
+
+$results.Add((Invoke-CcodTest 'real WPF toggles keep verified truth when the command cannot enter the queue' {
+    Assert-CcodEqual 'STA' ([string][Threading.Thread]::CurrentThread.GetApartmentState()) 'real WPF boundary runs on the required STA thread'
+    $fullContext=$null;$rejectedContext=$null
+    try{
+        $fullQueue=New-CcodTrayTestQueue
+        $fullContext=TrayUi\New-CcodTrayContext -CommandQueue $fullQueue -OnTick {} -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        $active=New-CcodValidPresentation
+        TrayUi\Set-CcodTrayPresentation -Context $fullContext -Presentation $active -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        foreach($index in 1..256){$fullQueue.Enqueue([pscustomobject]@{Index=$index})}
+        $automation=$fullContext.Items.SetAutomationEnabled
+        Assert-CcodTrue ($automation -is [Windows.Controls.CheckBox]) 'automation preference uses the real WPF CheckBox boundary'
+        $onClick=$automation.GetType().GetMethod('OnClick',[Reflection.BindingFlags]'Instance,NonPublic')
+        [void]$onClick.Invoke($automation,@())
+        Assert-CcodEqual $true ([bool]$automation.IsChecked) 'a full queue restores the last verified automation truth immediately'
+        Assert-CcodEqual 256 $fullQueue.Count 'a full queue remains capped after the real WPF click'
+        Assert-CcodEqual $true $fullContext.CommandOverflowed 'a full queue still records the bounded overflow condition'
+
+        $rejectedQueue=New-CcodTrayTestQueue
+        $rejectedContext=TrayUi\New-CcodTrayContext -CommandQueue $rejectedQueue -OnTick {} -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US -Adapters @{TryEnqueue={param($Queue,$Value)$false}}
+        TrayUi\Set-CcodTrayPresentation -Context $rejectedContext -Presentation (New-CcodValidPresentation) -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
+        $chinese=$rejectedContext.LanguageItems.'zh-CN'
+        Assert-CcodTrue ($chinese -is [Windows.Controls.RadioButton]) 'language preference uses the real WPF RadioButton boundary'
+        $languageClick=$chinese.GetType().GetMethod('OnClick',[Reflection.BindingFlags]'Instance,NonPublic')
+        [void]$languageClick.Invoke($chinese,@())
+        Assert-CcodEqual $false ([bool]$chinese.IsChecked) 'a rejected language enqueue restores the unselected visual truth'
+        Assert-CcodEqual $true ([bool]$rejectedContext.LanguageItems.'en-US'.IsChecked) 'a rejected language enqueue preserves the verified language selection'
+        Assert-CcodEqual 0 $rejectedQueue.Count 'a rejected enqueue creates no command'
+        Assert-CcodEqual $true $rejectedContext.CommandOverflowed 'a rejected enqueue still records the bounded failure condition'
+    }finally{
+        if($null -ne $rejectedContext -and $rejectedContext.State -cne 'Closed'){Close-CcodTrayContext -Context $rejectedContext|Out-Null}
+        if($null -ne $fullContext -and $fullContext.State -cne 'Closed'){Close-CcodTrayContext -Context $fullContext|Out-Null}
+    }
 }))
 
 $results.Add((Invoke-CcodTest 'executes only extracted production WMI action ASTs with fake Event and MessageData values' {
