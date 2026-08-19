@@ -524,6 +524,21 @@ try {
         }
     }
 
+    Invoke-CcodTest 'classifies a stale persisted package against the live package without clearing state or keys' {
+        $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
+        $status=New-CcodEngineActiveStatus -RuntimeId 'runtime-old'
+        $state=New-CcodInspectionState -Status $status -VerifiedPackages (New-CcodEngineVerifiedPackages -RuntimeId 'runtime-old')
+        $live=New-CcodPackageIdentity;$live.FullName='OpenAI.Codex_2.0.0.0_x64__2p2nqsd0c76g0';$live.Version='2.0.0.0'
+        $counts=[pscustomobject]@{Read=0;Package=0;Node=0;Invoke=0;List=0;Match=0;Persisted=0}
+        $before=$state|ConvertTo-Json -Depth 20 -Compress
+        $result=Invoke-CcodInspectSession -Request (New-CcodEngineRequest -TransactionId 'b364b7ed-0f47-435c-849a-5d4758031d46') -Paths $paths -Adapters (New-CcodInspectionAdapters -InspectionState $state -PackageIdentity $live -PreProcesses @($special) -Counters $counts)
+        Assert-CcodEqual 'Error' $result.outcome 'stale package status does not authorize a persisted special'
+        Assert-CcodEqual 'CCOD_STATE_STALE_PACKAGE' $result.error.code 'stale package status has one sanitized allowlisted diagnostic'
+        Assert-CcodEqual 0 ($counts.Node+$counts.Invoke+$counts.List+$counts.Match) 'stale package stops before live process or Node activity'
+        Assert-CcodEqual $before ($state|ConvertTo-Json -Depth 20 -Compress) 'stale package leaves persisted status and verified keys intact'
+        Assert-CcodEqual $null $result.logFile 'read-only Inspect never writes a stale-package diagnostic'
+    }
+
     Invoke-CcodTest 'fails Inspect provenance closed before Node for every stale or unauthorized tuple' {
         $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Special -RendererPort 41001 -MainPort 41002
         $status=New-CcodEngineActiveStatus -RuntimeId 'runtime-old'

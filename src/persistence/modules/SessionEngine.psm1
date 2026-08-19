@@ -17,7 +17,7 @@ $script:CcodSessionStableErrorCodes=@(
     'CCOD_MAIN_INSPECTOR_OPEN','CCOD_NODE_CANDIDATE_INVALID','CCOD_PATH_MISSING','CCOD_PATH_OUTSIDE_ROOT','CCOD_PATHS_INVALID',
     'CCOD_PORT_UNAVAILABLE','CCOD_RECOVERY_UNPROVEN','CCOD_REPARSE_PATH','CCOD_REPLAY_INPUT_INVALID','CCOD_REQUEST_INVALID',
     'CCOD_SCHEMA_UNSUPPORTED','CCOD_SESSION_FAILED','CCOD_SETTINGS_INVALID','CCOD_SOURCE_AMBIGUOUS','CCOD_SOURCE_CHANGED',
-    'CCOD_SPECIAL_START_FAILED','CCOD_STATE_ALREADY_INITIALIZED','CCOD_STATE_BLOCKED','CCOD_STATE_MALFORMED','CCOD_STATE_MISSING',
+    'CCOD_SPECIAL_START_FAILED','CCOD_STATE_ALREADY_INITIALIZED','CCOD_STATE_BLOCKED','CCOD_STATE_MALFORMED','CCOD_STATE_MISSING','CCOD_STATE_STALE_PACKAGE',
     'CCOD_STATUS_INVALID','CCOD_STOP_UNCONFIRMED','CCOD_TRANSITION_ARCHIVE_FAILED','CCOD_TRANSITION_COMPLETION_INVALID',
     'CCOD_TRANSITION_CONFLICT','CCOD_TRANSITION_INVALID','CCOD_TRANSITION_RECEIPT_INVALID','CCOD_TRANSITION_STAGE_INVALID',
     'CCOD_VERIFIED_PACKAGES_INVALID'
@@ -817,7 +817,7 @@ function Invoke-CcodInspectSession {
             Throw-CcodSessionError 'CCOD_STATE_BLOCKED' 'Persisted special status evidence is invalid' $codex
         }
         Get-CcodAuthorizedSessionProvenance $state.VerifiedPackages $session|Out-Null
-        if($package.FullName -cne $codex.packageFullName -or $package.Version -cne $codex.packageVersion){Throw-CcodSessionError 'CCOD_SOURCE_CHANGED' 'Current package build differs from persisted status' $package}
+        if($package.FullName -cne $codex.packageFullName -or $package.Version -cne $codex.packageVersion){Throw-CcodSessionError 'CCOD_STATE_STALE_PACKAGE' 'Current package build differs from persisted status' $package}
         $preRoots=@(Get-CcodInspectionRoots $state.Status $package $Request $identity $adapter)
         if($preRoots.Count -ne 1){Throw-CcodSessionError 'CCOD_SOURCE_AMBIGUOUS' 'Inspection requires exactly one eligible pre-probe root' $preRoots}
         $special=$preRoots[0];Assert-CcodInspectionSpecialSnapshot $special $codex $session $package $Request $identity

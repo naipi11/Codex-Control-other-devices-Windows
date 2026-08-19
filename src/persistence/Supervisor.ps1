@@ -534,6 +534,10 @@ function Invoke-CcodSupervisorPollSlot {
                     if(-not [string]::IsNullOrWhiteSpace([string]$reduced.AttemptKey)){$HostState.AttemptKeys[[string]$reduced.AttemptKey]=$true}
                     if(-not [string]::IsNullOrWhiteSpace([string]$reduced.RecoveryIgnoreKey)){$HostState.RecoveryIgnoreKeys[[string]$reduced.RecoveryIgnoreKey]=$true}
                     if(-not [string]::IsNullOrWhiteSpace([string]$reduced.SuppressionKey)){$HostState.SuppressionKeys[[string]$reduced.SuppressionKey]=$true}
+                    if($slot.Action -ceq 'Inspect'){
+                        $HostState.SpecialNeedsInspect=$false
+                        if($reduced.Reason -ceq 'StalePackageStatus' -and @($HostState.Special).Count -eq 1){$HostState.SpecialProof=$HostState.Special[0].Snapshot}
+                    }
                 }
                 Invoke-CcodSupervisorRendererHandoff $HostState $slot $result $Adapters
             }elseif($slot.Kind -ceq 'StaticProbe'){
@@ -714,6 +718,11 @@ function Invoke-CcodSupervisorRefreshObservations {
         if($snapshot.Mode -ceq 'Ordinary'){$ordinary.Add($snapshot)}
         elseif($snapshot.Mode -ceq 'Special'){$special.Add([pscustomobject][ordered]@{Snapshot=$snapshot;IdentityValid=$true;ProbeValid=$false})}
     }
+    $proofMatches=$false
+    if($special.Count -eq 1 -and $null -ne $HostState.SpecialProof -and
+       $null -ne $HostState.SpecialProof.PSObject.Properties['Pid'] -and $null -ne $HostState.SpecialProof.PSObject.Properties['CreationTimeUtc'] -and
+       $HostState.SpecialProof.Pid -eq $special[0].Snapshot.Pid -and $HostState.SpecialProof.CreationTimeUtc -ceq $special[0].Snapshot.CreationTimeUtc){$proofMatches=$true}
+    if(-not $proofMatches){$HostState.SpecialProof=$null}
     $HostState.Ordinary=[object[]]@($ordinary);$HostState.Special=[object[]]@($special)
     $HostState.SpecialNeedsInspect=$special.Count -gt 0 -and $null -eq $HostState.SpecialProof
 }
@@ -742,6 +751,7 @@ function Invoke-CcodSupervisorTick {
     $HostState.Journal=Invoke-CcodSupervisorNullableAdapter $Adapters.ReadJournal @($HostState.Layout.TransitionPath)
     if($null -ne $HostState.Journal){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Recover' $null|Out-Null;return}
     if($HostState.SpecialNeedsInspect){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Inspect' $null|Out-Null;return}
+    if($HostState.Reason -ceq 'StalePackageStatus' -and $null -ne $HostState.SpecialProof){Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters;return}
     $queueArgument=[object[]]::new(1);$queueArgument[0]=$HostState.CommandQueue
     $dequeued=Invoke-CcodSupervisorAdapter $Adapters.TryDequeue $queueArgument 1
     if(-not (Test-CcodSupervisorExactProperties $dequeued @('Succeeded','Value')) -or $dequeued.Succeeded -isnot [bool]){throw 'command queue receipt is invalid'}

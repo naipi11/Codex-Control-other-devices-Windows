@@ -491,6 +491,17 @@ $results += Invoke-CcodTest 'fails closed for every exact controller failure and
     Assert-CcodTrue ($null -eq $reduced.RecoveryIgnoreKey -and $null -eq $reduced.SuppressionKey) 'false result copies no recovery claims'
 }
 
+$results += Invoke-CcodTest 'reduces stale persisted-package evidence to one sanitized bounded reconciliation reason' {
+    $error=[pscustomobject][ordered]@{code='CCOD_STATE_STALE_PACKAGE';stage='InspectState';message='The session operation failed safely. See the session log for details.'}
+    $result=New-CcodControllerResult -Action Inspect -Ok $false -Outcome Error -SafeState Error -Special $null -Error $error
+    $reduced=Complete-CcodControllerRun -Result $result -ExpectedTransactionId $result.transactionId -ExpectedAction Inspect -ExpectedRuntimeId 'runtime-1'
+    Assert-CcodExactEqual 'Error' $reduced.SessionState 'stale persisted package stays fail closed'
+    Assert-CcodExactEqual $true $reduced.BlockAutomaticActions 'stale persisted package blocks repeated automatic work'
+    Assert-CcodExactEqual 'CCOD_STATE_STALE_PACKAGE' $reduced.ErrorCode 'stale package code remains in the closed controller allowlist'
+    Assert-CcodExactEqual 'StalePackageStatus' $reduced.Reason 'stale package has one fixed presentation-safe reason'
+    Assert-CcodTrue ($null -eq $reduced.AttemptKey -and $null -eq $reduced.RecoveryIgnoreKey -and $null -eq $reduced.SuppressionKey) 'stale evidence clears no state or key membership'
+}
+
 $results += Invoke-CcodTest 'fails closed on malformed contradictory or correlation-mismatched controller results' {
     $valid=New-CcodControllerResult
     $mismatch=Complete-CcodControllerRun -Result $valid -ExpectedTransactionId 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff' -ExpectedAction Apply -ExpectedRuntimeId 'runtime-1'

@@ -26,7 +26,7 @@ $script:CcodStableControllerErrorCodes = @(
     'CCOD_MAIN_INSPECTOR_OPEN','CCOD_NODE_CANDIDATE_INVALID','CCOD_PATH_MISSING','CCOD_PATH_OUTSIDE_ROOT','CCOD_PATHS_INVALID',
     'CCOD_PORT_UNAVAILABLE','CCOD_RECOVERY_UNPROVEN','CCOD_REPARSE_PATH','CCOD_REPLAY_INPUT_INVALID','CCOD_REQUEST_INVALID',
     'CCOD_SCHEMA_UNSUPPORTED','CCOD_SESSION_FAILED','CCOD_SETTINGS_INVALID','CCOD_SOURCE_AMBIGUOUS','CCOD_SOURCE_CHANGED',
-    'CCOD_SPECIAL_START_FAILED','CCOD_STATE_ALREADY_INITIALIZED','CCOD_STATE_BLOCKED','CCOD_STATE_MALFORMED','CCOD_STATE_MISSING',
+    'CCOD_SPECIAL_START_FAILED','CCOD_STATE_ALREADY_INITIALIZED','CCOD_STATE_BLOCKED','CCOD_STATE_MALFORMED','CCOD_STATE_MISSING','CCOD_STATE_STALE_PACKAGE',
     'CCOD_STATUS_INVALID','CCOD_STOP_UNCONFIRMED','CCOD_TRANSITION_ARCHIVE_FAILED','CCOD_TRANSITION_COMPLETION_INVALID',
     'CCOD_TRANSITION_CONFLICT','CCOD_TRANSITION_INVALID','CCOD_TRANSITION_RECEIPT_INVALID','CCOD_TRANSITION_STAGE_INVALID',
     'CCOD_VERIFIED_PACKAGES_INVALID'
@@ -699,7 +699,8 @@ function Complete-CcodControllerRun {
     $attemptKey = $null
     if ($null -ne $Result.source) { $attemptKey = '{0}|{1}' -f $Result.source.pid,$Result.source.creationTimeUtc }
     if (-not $Result.ok) {
-        return New-CcodControllerReduction 'Error' $true $attemptKey $null $null $Result.error.code 'ControllerFailed'
+        $reason = if ($Result.error.code -ceq 'CCOD_STATE_STALE_PACKAGE') { 'StalePackageStatus' } else { 'ControllerFailed' }
+        return New-CcodControllerReduction 'Error' $true $attemptKey $null $null $Result.error.code $reason
     }
     if (-not (Test-CcodActionOutcomeStageCompatibility $Result)) {
         return New-CcodControllerReduction 'Error' $true $null $null $null 'CCOD_CONTROLLER_RESULT_INVALID' 'ControllerResultInvalid'

@@ -573,6 +573,36 @@ Invoke-CcodTest 'starts persisted-special Inspect before a queued command' {
     Assert-CcodEqual 1 $world.CommandQueue.Count 'special Inspect leaves command queued'
 }
 
+Invoke-CcodTest 'bounds stale-package special reconciliation to one live process identity without clearing state or keys' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $special=New-CcodSupervisorTestSnapshot -ProcessId 201 -CreationTimeUtc '2030-02-03T03:02:00.0000000Z'
+    $special.Mode='Special';$special.RendererPort=[int]41001;$special.MainPort=[int]41002
+    $hostState.Special=[object[]]@([pscustomobject][ordered]@{Snapshot=$special;IdentityValid=$true;ProbeValid=$false})
+    $hostState.SpecialNeedsInspect=$true
+    $stateBefore=$hostState.State|ConvertTo-Json -Depth 20 -Compress
+    $hostState.AttemptKeys['keep']='value';$attemptsBefore=$hostState.AttemptKeys|ConvertTo-Json -Compress
+    $fixture.Fake.Adapters.ReadState={param($StateRoot,$SuppressionKey)$hostState.State}.GetNewClosure()
+    $fixture.Fake.Adapters.CompleteControllerRun={
+        param($Result,$TransactionId,$Action,$RuntimeId)
+        $world.Calls.Add("Reduce:$Action")
+        [pscustomobject][ordered]@{SessionState='Error';BlockAutomaticActions=$true;AttemptKey=$null;RecoveryIgnoreKey=$null;SuppressionKey=$null;ErrorCode='CCOD_STATE_STALE_PACKAGE';Reason='StalePackageStatus'}
+    }.GetNewClosure()
+    $world.WorkerResult=[pscustomobject][ordered]@{ok=$false;outcome='Error';safeState='Error';special=$null}
+    $stdout=$world.WorkerResult|ConvertTo-Json -Depth 20 -Compress
+    $world.Poll=[pscustomobject][ordered]@{Completed=$true;ExitCode=[int]0;StdoutText=$stdout;StdoutByteCount=[int]$stdout.Length;StdoutOverflow=$false;StderrByteCount=[int]0;StderrOverflow=$false}
+    Start-CcodSupervisorWorkerSlot $hostState $fixture.Fake.Adapters 'Controller' 'Inspect' $null|Out-Null
+    Invoke-CcodSupervisorPollSlot $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual 'StalePackageStatus' $hostState.Reason 'stale worker result exposes only the fixed reason'
+    Assert-CcodEqual $false $hostState.SpecialNeedsInspect 'completed stale inspection is not immediately rescheduled'
+    Assert-CcodTrue ([object]::ReferenceEquals($special,$hostState.SpecialProof)) 'stale suppression binds the current live special identity only'
+
+    $world.Calls.Clear();$world.ProcessIds=@(201);$world.Snapshots[201]=$special;$world.Elapsed.Enqueue([long]0);$hostState.ForceReconcile=$true
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*' -or $_ -eq 'Decision'}).Count 'matching stale identity takes no second worker or reconcile action'
+    Assert-CcodEqual $stateBefore ($hostState.State|ConvertTo-Json -Depth 20 -Compress) 'bounded stale suppression does not clear persisted state'
+    Assert-CcodEqual $attemptsBefore ($hostState.AttemptKeys|ConvertTo-Json -Compress) 'bounded stale suppression does not clear key membership'
+}
+
 Invoke-CcodTest 'processes at most one command before reducer decisions' {
     $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
     $world.Decision=[pscustomobject][ordered]@{Action='RepairRenderer';Reason='Repair';Target=$null;AttemptKey=$null;SuppressionKey=$null;EffectiveClassification=$null;RequiresController=$true}
