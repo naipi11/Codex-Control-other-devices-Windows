@@ -378,7 +378,7 @@ Invoke-CcodTest 'adds the exact localization adapters and host fields at the fro
     $fixture=New-CcodTickFixture
     $hostNames=@($fixture.Host.PSObject.Properties.Name)
     $trayIndex=[Array]::IndexOf($hostNames,'Tray')
-    Assert-CcodEqual 'Tray,UiLanguageMode,UiCatalog,State' (@($hostNames[$trayIndex..($trayIndex+3)])-join ',') 'UI host fields occur immediately after Tray'
+    Assert-CcodEqual 'Tray,TrayCallbackFailureLogged,UiLanguageMode,UiCatalog,State' (@($hostNames[$trayIndex..($trayIndex+4)])-join ',') 'UI host fields occur immediately after Tray'
 }
 
 Invoke-CcodTest 'commits one valid UI language command before refreshing the existing tray in place' {
@@ -531,6 +531,17 @@ Invoke-CcodTest 'contains error-dialog and UI-log failures independently without
     Assert-CcodEqual 1 $logWorld.TrayErrors.Count 'log failure does not suppress the localized dialog'
     Assert-CcodEqual 'System' $logHost.UiLanguageMode 'log failure preserves UI mode'
     Assert-CcodEqual $logSession $logHost.SessionState 'log failure preserves controller state'
+}
+
+Invoke-CcodTest 'logs a tray callback failure once without suppressing the supervisor tick' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $hostState.Tray | Add-Member -NotePropertyName CallbackFailure -NotePropertyValue $true
+    Invoke-CcodSupervisorTick -HostState $hostState -Adapters $fixture.Fake.Adapters
+    Assert-CcodEqual 1 $world.UiFailureRecords.Count 'the first observed tray callback failure writes one bounded record'
+    Assert-CcodEqual 'TrayCallback|CCOD_TRAY_CALLBACK_FAILED' (($world.UiFailureRecords|ForEach-Object{"$($_.stage)|$($_.code)"})-join ',') 'the tray callback diagnostic is stable and sanitized'
+    Assert-CcodEqual $true $hostState.TrayCallbackFailureLogged 'the host remembers that the sticky callback failure was reported'
+    Invoke-CcodSupervisorTick -HostState $hostState -Adapters $fixture.Fake.Adapters
+    Assert-CcodEqual 1 $world.UiFailureRecords.Count 'a sticky tray callback failure is not logged repeatedly'
 }
 
 Invoke-CcodTest 'gives Shutdown absolute priority over a slot journal command and decision' {

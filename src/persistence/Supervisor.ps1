@@ -413,7 +413,7 @@ function New-CcodSupervisorHostState {
     if(-not (Test-CcodSupervisorIdentity $Identity) -or -not (Test-CcodSupervisorLayout $Layout) -or $null -eq $Clock -or
        -not (Test-CcodSupervisorEvent $ShutdownEvent 'Shutdown') -or $null -eq $CommandQueue -or $null -eq $EventQueue -or $null -eq $State){throw 'host state inputs are invalid'}
     [pscustomobject][ordered]@{
-        SchemaVersion=1;ShutdownRequested=$false;ShutdownEvent=$ShutdownEvent;Tray=$null;UiLanguageMode=$null;UiCatalog=$null;State=$State;Journal=$Journal;WorkerSlot=$null
+        SchemaVersion=1;ShutdownRequested=$false;ShutdownEvent=$ShutdownEvent;Tray=$null;TrayCallbackFailureLogged=$false;UiLanguageMode=$null;UiCatalog=$null;State=$State;Journal=$Journal;WorkerSlot=$null
         Identity=$Identity;Layout=$Layout;CommandQueue=$CommandQueue;EventQueue=$EventQueue;Clock=$Clock
         ObservedKeys=[ordered]@{};AttemptKeys=[ordered]@{};RecoveryIgnoreKeys=[ordered]@{};SuppressionKeys=[ordered]@{}
         StaticCache=[ordered]@{};TransportRetries=[ordered]@{};TerminalRecoveries=[ordered]@{}
@@ -622,7 +622,7 @@ function Get-CcodSupervisorResourcesRoot {
 }
 
 function Write-CcodSupervisorUiFailure {
-    param($HostState,[hashtable]$Adapters,[ValidateSet('LanguageChange','LanguagePreferenceRollback','LanguageTrayRollback','UninstallStart','ErrorDialog')][string]$Stage,[string]$Code)
+    param($HostState,[hashtable]$Adapters,[ValidateSet('LanguageChange','LanguagePreferenceRollback','LanguageTrayRollback','UninstallStart','ErrorDialog','TrayCallback')][string]$Stage,[string]$Code)
     try{
         $now=Invoke-CcodSupervisorAdapter $Adapters.GetUtcNow @() 1
         if($now -is [DateTimeOffset]){$timestamp=$now.UtcDateTime.ToString('o',[Globalization.CultureInfo]::InvariantCulture)}
@@ -884,6 +884,11 @@ function Invoke-CcodSupervisorTick {
         $HostState.ShutdownRequested=$true
         Invoke-CcodSupervisorAdapter $Adapters.RequestUiExit @($HostState.Tray) 0
         return
+    }
+    if(-not $HostState.TrayCallbackFailureLogged -and $null -ne $HostState.Tray -and $null -ne $HostState.Tray.PSObject.Properties['CallbackFailure'] -and
+       $HostState.Tray.CallbackFailure -is [bool] -and $HostState.Tray.CallbackFailure){
+        $HostState.TrayCallbackFailureLogged=$true
+        Write-CcodSupervisorUiFailure $HostState $Adapters 'TrayCallback' 'CCOD_TRAY_CALLBACK_FAILED'
     }
     if($null -ne $HostState.WorkerSlot){
         Invoke-CcodSupervisorPollSlot $HostState $Adapters

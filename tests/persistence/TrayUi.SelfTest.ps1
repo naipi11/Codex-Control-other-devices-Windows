@@ -30,6 +30,11 @@ function New-CcodTrayTestQueue {
     Write-Output -NoEnumerate ([Collections.Generic.Queue[object]]::new())
 }
 
+function Invoke-CcodPostedUiCallbacks {
+    param($Fake)
+    while($Fake.State.PostedUiCallbacks.Count -gt 0){& $Fake.State.PostedUiCallbacks.Dequeue()}
+}
+
 function New-CcodTrayFakeAdapters {
     $state=[pscustomobject]@{
         Calls=[Collections.Generic.List[string]]::new()
@@ -53,6 +58,7 @@ function New-CcodTrayFakeAdapters {
         TraceReceipt=$null
         IntrinsicReceipt=$null
         ActiveSources=@{}
+        PostedUiCallbacks=[Collections.Generic.Queue[scriptblock]]::new()
     }
     $adapters=@{
         GetUtcNow={ $state.Calls.Add('Clock:GetUtcNow'); $state.Now }.GetNewClosure()
@@ -144,6 +150,10 @@ function New-CcodTrayFakeAdapters {
         UnregisterWatcher={param($SourceIdentifier)$state.Calls.Add("WatcherUnregister:$SourceIdentifier");[void]$state.ActiveSources.Remove($SourceIdentifier)}.GetNewClosure()
         RemoveWatcherJob={param($JobId)$state.Calls.Add("WatcherRemoveJob:$JobId")}.GetNewClosure()
         DisposeWatcherResource={param($Resource)$state.Calls.Add("WatcherDispose:$($Resource.Kind)");$Resource.Disposed=$true}.GetNewClosure()
+    }
+    $trayAdapterNames=& (Get-Module TrayUi) {@($script:TrayAdapterNames)}
+    if($trayAdapterNames -ccontains 'PostUiCallback'){
+        $adapters.PostUiCallback={param($Object,[scriptblock]$Callback)$state.Calls.Add("Post:$($Object.Name)");$state.PostedUiCallbacks.Enqueue($Callback)}.GetNewClosure()
     }
     [pscustomobject]@{State=$state;Adapters=$adapters}
 }
@@ -259,12 +269,13 @@ $results.Add((Invoke-CcodTest 'popup state rollback A to B to A clears the stale
         $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
         $active=New-CcodValidPresentation
         Set-CcodTrayPresentation -Context $context -Presentation $active
-        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Left'})
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Left'})
         $blocked=New-CcodValidPresentation;$blocked.Color='Red';$blocked.StateKey='Error'
         Set-CcodTrayPresentation -Context $context -Presentation $blocked
         Assert-CcodEqual 'Error' $context.PendingRender.Presentation.StateKey 'intermediate B is pending while the popup is open'
         Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
         Assert-CcodEqual $null $context.PendingRender 'latest state A cancels stale pending state B'
+        Invoke-CcodPostedUiCallbacks $fake
         & $context.Menu.Events.Deactivated $context.Menu $null
         Assert-CcodEqual 'Green' $context.NotifyIcon.Properties.Icon.Color 'Hide keeps the already applied state A'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
@@ -276,11 +287,12 @@ $results.Add((Invoke-CcodTest 'popup language rollback A to B to A clears the st
         $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US -Adapters $fake.Adapters
         $active=New-CcodValidPresentation
         Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
-        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Left'})
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Left'})
         Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestChineseCatalog -LanguageMode zh-CN -SystemCultureName zh-CN
         Assert-CcodEqual 'zh-CN' $context.PendingRender.LanguageMode 'intermediate language B is pending while the popup is open'
         Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation) -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
         Assert-CcodEqual $null $context.PendingRender 'latest language A cancels stale pending language B'
+        Invoke-CcodPostedUiCallbacks $fake
         & $context.Menu.Events.Deactivated $context.Menu $null
         Assert-CcodEqual 'Codex Device Connection' $context.Rows.Title.Properties.Text 'Hide keeps the already applied language A'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
@@ -317,7 +329,7 @@ $results.Add((Invoke-CcodTest 'hides without closing and flushes only the newest
     try{
         $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
         Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
-        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Left'})
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Left'})
         Assert-CcodEqual $true $context.IsPopupOpen 'left click opens the one reusable popup'
 
         $warning=New-CcodValidPresentation;$warning.Color='Yellow';$warning.StateKey='Inspecting'
@@ -327,6 +339,7 @@ $results.Add((Invoke-CcodTest 'hides without closing and flushes only the newest
         Assert-CcodEqual 'Error' $context.PendingRender.Presentation.StateKey 'only the newest popup presentation remains pending'
         $writesBeforeHide=@($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count
 
+        Invoke-CcodPostedUiCallbacks $fake
         & $context.Menu.Events.Deactivated $context.Menu $null
         $writesAfterHide=@($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count
         Assert-CcodEqual $false $context.IsPopupOpen 'deactivation hides instead of closing the reusable popup'
@@ -336,7 +349,7 @@ $results.Add((Invoke-CcodTest 'hides without closing and flushes only the newest
 
         & $context.Menu.Events.Deactivated $context.Menu $null
         Assert-CcodEqual $writesAfterHide @($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count 'reentrant deactivation cannot flush or hide twice'
-        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
         Assert-CcodEqual $true $context.IsPopupOpen 'the hidden card reopens from the other tray button'
         $closingArgs=[pscustomobject]@{Cancel=$false}
         & $context.Menu.Events.Closing $context.Menu $closingArgs
@@ -360,8 +373,63 @@ $results.Add((Invoke-CcodTest 'production adapters create the WPF popup-card bou
         & $production.SetUiProperty $objects[2] 'Text' 'Apply now'
         Assert-CcodEqual 'Apply now' ([Windows.Automation.AutomationProperties]::GetName($objects[2])) 'interactive controls expose an automation name'
         & $production.SetUiProperty $objects[4] 'ContextMenuStrip' $null
-        Assert-CcodEqual $null $objects[4].ContextMenuStrip 'NotifyIcon never owns a classic ContextMenuStrip'
+        Assert-CcodEqual $null $objects[4].ContextMenuStrip 'NotifyIcon permits clearing a classic ContextMenuStrip'
     }finally{foreach($object in $objects){& $production.DisposeUiObject $object}}
+}))
+
+$results.Add((Invoke-CcodTest 'real STA NotifyIcon MouseUp reaches the WPF path and owns a native fallback menu' {
+    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
+    $notify=$null;$fallback=$null;$fallbackItem=$null;$attachment=$null
+    try{
+        $notify=& $production.CreateUiObject 'NotifyIcon' 'TrayNotifyIcon'
+        $fallback=& $production.CreateUiObject 'ContextMenuStrip' 'TrayNativeFallback'
+        $fallbackItem=& $production.CreateUiObject 'NativeFallbackItem' 'TrayNativeFallbackOpen'
+        & $production.AddUiChild $fallback $fallbackItem
+        & $production.SetUiProperty $fallbackItem 'Text' 'Codex Device Connection'
+        & $production.SetUiProperty $notify 'ContextMenuStrip' $fallback
+        Assert-CcodTrue ([object]::ReferenceEquals($fallback,$notify.ContextMenuStrip)) 'the real NotifyIcon retains its native fallback ContextMenuStrip'
+
+        $seen=[pscustomobject]@{Button=$null}
+        $callback={param($Sender,$EventArgs)$seen.Button=[string]$EventArgs.Button}.GetNewClosure()
+        $attachment=& $production.AttachUiCallback $notify 'MouseUp' $callback
+        $attachment.Handler.Invoke($notify,[Windows.Forms.MouseEventArgs]::new([Windows.Forms.MouseButtons]::Right,1,0,0,0))
+        Assert-CcodEqual 'Right' $seen.Button 'the real NotifyIcon MouseUp delegate forwards a right-button release'
+    }finally{
+        if($null -ne $attachment){& $production.DetachUiCallback $attachment}
+        foreach($object in @($fallbackItem,$fallback,$notify)){if($null -ne $object){& $production.DisposeUiObject $object}}
+    }
+}))
+
+$results.Add((Invoke-CcodTest 'right MouseUp keeps the WPF card through the shell deactivation and exposes native fallback on show failure' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        Assert-CcodTrue ($null -ne $context.NotifyIcon.Properties.ContextMenuStrip) 'the tray owns a native fallback menu before right-click delivery'
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        Assert-CcodEqual $true $context.IsPopupOpen 'right MouseUp opens the reusable WPF card'
+        $openingArgs=[pscustomobject]@{Cancel=$false}
+        & $context.NativeFallback.Events.Opening $context.NativeFallback $openingArgs
+        Assert-CcodEqual $true $openingArgs.Cancel 'the native menu defers to the visible WPF card when the show succeeds'
+        & $context.Menu.Events.Deactivated $context.Menu $null
+        Assert-CcodEqual $true $context.IsPopupOpen 'the shell deactivation caused by the tray click does not immediately hide the card'
+        Assert-CcodEqual 1 $fake.State.PostedUiCallbacks.Count 'activation suppression clears on the queued UI turn'
+        & $fake.State.PostedUiCallbacks.Dequeue()
+        & $context.Menu.Events.Deactivated $context.Menu $null
+        Assert-CcodEqual $false $context.IsPopupOpen 'a later genuine deactivation still hides the reusable card'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $fake.Adapters.SetUiVisible={param($Object,$Visible)if($Object.Name -ceq 'TrayMenu' -and $Visible){throw 'WPF_SHOW_FAILED'};$Object.Properties['Visible']=[bool]$Visible}.GetNewClosure()
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        Assert-CcodEqual $false $context.IsPopupOpen 'a WPF show failure does not claim the card is open'
+        Assert-CcodEqual $true $context.CallbackFailure 'a WPF show failure remains observable to the supervisor'
+        Assert-CcodTrue ($null -ne $context.NotifyIcon.Properties.ContextMenuStrip) 'the native fallback remains attached after WPF show failure'
+        $openingArgs=[pscustomobject]@{Cancel=$false}
+        & $context.NativeFallback.Events.Opening $context.NativeFallback $openingArgs
+        Assert-CcodEqual $false $openingArgs.Cancel 'the native fallback remains available when the WPF card cannot show'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
 $results.Add((Invoke-CcodTest 'production AddUiChild attaches language choices to the WPF card' {
@@ -663,7 +731,7 @@ $results.Add((Invoke-CcodTest 'opens the WPF popup from either mouse button, fre
         Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
         Assert-CcodEqual $sameVisualSetCount @($fake.State.Calls|Where-Object {$_ -like 'Set:*'}).Count 'an unchanged presentation fingerprint does not repeat visual writes'
 
-        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Left'})
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Left'})
         Assert-CcodTrue $context.IsPopupOpen 'left click opens the popup'
         & $context.Timer.Events.Tick $context.Timer $null
         Assert-CcodEqual 1 $ticks.Count 'the 250ms safety tick continues while the popup is open'
@@ -680,8 +748,9 @@ $results.Add((Invoke-CcodTest 'opens the WPF popup from either mouse button, fre
         Assert-CcodEqual 'Codex connection actions blocked' $context.NotifyIcon.Properties.Text 'Escape applies the most recent pending tooltip once'
         Assert-CcodEqual $null $context.PendingRender 'pending render is cleared after it is applied'
 
-        & $context.NotifyIcon.Events.MouseClick $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
         Assert-CcodTrue $context.IsPopupOpen 'right click opens the popup'
+        Invoke-CcodPostedUiCallbacks $fake
         & $context.Menu.Events.Deactivated $context.Menu $null
         Assert-CcodEqual $false $context.IsPopupOpen 'deactivation hides the popup'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
@@ -858,9 +927,9 @@ $results.Add((Invoke-CcodTest 'continues every tray and watcher cleanup stage wi
     $context.Adapters.DetachUiCallback={param($Receipt)$cleanup.Detach++;throw 'SECRET_DETACH'}.GetNewClosure()
     $context.Adapters.ExitUiContext={param($Object)$cleanup.Exit++;throw 'SECRET_EXIT'}.GetNewClosure()
     $receipt=Close-CcodTrayContext -Context $context
-    $expected='CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED,CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED,CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED,CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
+    $expected='CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED,CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED,CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED,CCOD_TRAY_CLEANUP_NATIVE_MENU_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
     Assert-CcodEqual $expected (@($receipt.CleanupCodes)-join ',') 'tray cleanup codes are ordered deduplicated and allowlisted'
-    Assert-CcodTrue ($cleanup.Hide -ge 1 -and $cleanup.Stop -eq 1 -and $cleanup.Ui -ge 4 -and $cleanup.Icon -eq 10 -and $cleanup.Detach -eq 14 -and $cleanup.Exit -eq 1) 'callbacks detach before the WPF card closes and every cleanup stage continues after failures'
+    Assert-CcodTrue ($cleanup.Hide -ge 1 -and $cleanup.Stop -eq 1 -and $cleanup.Ui -ge 4 -and $cleanup.Icon -eq 10 -and $cleanup.Detach -eq 16 -and $cleanup.Exit -eq 1) 'callbacks detach before the WPF card closes and every cleanup stage continues after failures'
     Assert-CcodTrue (($receipt|ConvertTo-Json -Compress) -cnotmatch 'SECRET') 'tray receipt exposes no injected text'
 
     $fake2=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$watcher=Start-CcodProcessWatcher -Queue $queue -OnFullReconciliationRequired {} -Adapters $fake2.Adapters;$queue.Enqueue('hint')
@@ -1064,7 +1133,7 @@ $results.Add((Invoke-CcodTest 'does not dispose a child twice when AddUiChild at
     $fake.Adapters.AddUiChild={
         param($Parent,$Child)
         & $originalAdd $Parent $Child
-        Write-Warning 'SECRET_ADD_AFTER_ATTACH'
+        if($Parent.Name -ceq 'TrayMenu'){Write-Warning 'SECRET_ADD_AFTER_ATTACH'}
     }.GetNewClosure()
     Assert-CcodThrows {New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters} 'CCOD_TRAY_CREATE_FAILED'
     $titleRows=@($fake.State.Objects|Where-Object {$_.Name -ceq 'TitleRow'})
