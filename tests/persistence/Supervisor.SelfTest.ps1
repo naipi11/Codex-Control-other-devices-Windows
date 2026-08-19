@@ -601,6 +601,16 @@ Invoke-CcodTest 'bounds stale-package special reconciliation to one live process
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*' -or $_ -eq 'Decision'}).Count 'matching stale identity takes no second worker or reconcile action'
     Assert-CcodEqual $stateBefore ($hostState.State|ConvertTo-Json -Depth 20 -Compress) 'bounded stale suppression does not clear persisted state'
     Assert-CcodEqual $attemptsBefore ($hostState.AttemptKeys|ConvertTo-Json -Compress) 'bounded stale suppression does not clear key membership'
+
+    $changed=New-CcodSupervisorTestSnapshot -ProcessId 202 -CreationTimeUtc '2030-02-03T03:03:00.0000000Z'
+    $changed.Mode='Special';$changed.RendererPort=[int]42001;$changed.MainPort=[int]42002
+    $world.Calls.Clear();$world.ProcessIds=@(202);$world.Snapshots[202]=$changed;$hostState.ForceReconcile=$true
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual $null $hostState.SpecialProof 'changed live special identity clears stale suppression'
+    Assert-CcodTrue ($world.Calls.Contains('Enumerate')) 'changed identity is observed before stale handling'
+    Assert-CcodTrue ($world.Calls.Contains('Start:Controller:Inspect')) 'changed identity re-enters normal current-package validation'
+    Assert-CcodEqual $stateBefore ($hostState.State|ConvertTo-Json -Depth 20 -Compress) 'changed identity recovery does not clear persisted state'
+    Assert-CcodEqual $attemptsBefore ($hostState.AttemptKeys|ConvertTo-Json -Compress) 'changed identity recovery does not clear key membership'
 }
 
 Invoke-CcodTest 'processes at most one command before reducer decisions' {
