@@ -517,6 +517,11 @@ function Merge-CcodSessionAdapters($Adapters) {
         RequestGracefulClose={ param($Expected,$StatusEvidence) Request-CcodProcessGracefulCloseIfMatch -Expected $Expected -StatusEvidence $StatusEvidence }
         WaitProcessExit={ param($Expected,$StatusEvidence,$TimeoutMilliseconds) Wait-CcodProcessExitIfMatch -Expected $Expected -StatusEvidence $StatusEvidence -TimeoutMilliseconds $TimeoutMilliseconds }
         FindStalePackageRoot={param($Package,$StatusEvidence)Get-CcodStalePackageRootResult -Package $Package}
+        GetStaleTree={param($Root,$Package) Get-CcodVerifiedStaleProcessTree -Root $Root -Package $Package}
+        GetStaleProcess={param($ProcessId,$Package) Get-CcodStalePackageProcessSnapshot -ProcessId $ProcessId -Package $Package -Adapter @{} }
+        StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds) Stop-CcodStaleProcessIfMatch -Expected $Expected -Package $Package -TimeoutMilliseconds $TimeoutMilliseconds}
+        RequestStaleGracefulClose={param($Expected,$Package) Request-CcodStaleProcessGracefulCloseIfMatch -Expected $Expected -Package $Package}
+        WaitStaleProcessExit={param($Expected,$Package,$TimeoutMilliseconds) Wait-CcodStaleProcessExitIfMatch -Expected $Expected -Package $Package -TimeoutMilliseconds $TimeoutMilliseconds}
         GetPreferredRendererPort={ param($Excluded) Get-CcodRendererPreferredPort -ExcludedPorts $Excluded }
         GetPort={ param($Excluded) Get-CcodAvailableLoopbackPort -ExcludedPorts $Excluded }
         StartSpecial={ param($RendererPort,$MainPort,$TimeoutMilliseconds) Start-CcodProcess -Mode Special -RendererPort $RendererPort -MainPort $MainPort -StartupTimeoutMilliseconds $TimeoutMilliseconds }
@@ -557,21 +562,36 @@ function Close-CcodVerifiedStalePackageRoot {
     if($candidate.Outcome -ceq 'NoCandidate'){return}
     if($candidate.Outcome -ceq 'Ambiguous'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_AMBIGUOUS' 'Multiple old-package remote server roots were found' $candidate}
     if($candidate.Outcome -cne 'Confirmed' -or $null -eq $candidate.Snapshot){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package remote server identity could not be proven' $candidate}
-    $root=$candidate.Snapshot;$close=& $Adapter.RequestGracefulClose $root $StatusEvidence
+    $root=$candidate.Snapshot;$tree=@(& $Adapter.GetStaleTree $root $package)
+    if($tree.Count -lt 1 -or @($tree|Where-Object{$_ -ne $null -and $_.Pid -eq $root.Pid -and (& $Adapter.ProcessMatch $root $_)}).Count -ne 1){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package process tree could not be proven before close' $tree}
+    $byPid=@{};foreach($member in $tree){$byPid[[int]$member.Pid]=$member}
+    $ordered=@($tree|Sort-Object @{Expression={-(Get-CcodTreeDepth $_ $byPid)}},@{Expression={$_.Pid}})
+    $close=& $Adapter.RequestStaleGracefulClose $root $package
     if($close.Outcome -ceq 'IdentityChanged'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root identity changed before graceful close' $close}
-    if($close.Outcome -ceq 'SourceExited'){return}
-    if($close.Outcome -ceq 'Requested'){
-        $wait=& $Adapter.WaitProcessExit $root $StatusEvidence $TimeoutMilliseconds
-        if($wait.Outcome -ceq 'SourceExited'){return}
-        if($wait.Outcome -ceq 'IdentityChanged'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root identity changed while waiting for graceful close' $wait}
-        if($wait.Outcome -cne 'StillRunning'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root graceful-close result is invalid' $wait}
+    if($close.Outcome -ceq 'SourceExited'){
+        # The root exited, but its captured children and remote ports still require proof below.
+    }elseif($close.Outcome -ceq 'Requested'){
+        $wait=& $Adapter.WaitStaleProcessExit $root $package $TimeoutMilliseconds
+        if($wait.Outcome -ceq 'SourceExited'){
+            # The root exited, but its captured children and remote ports still require proof below.
+        }elseif($wait.Outcome -ceq 'IdentityChanged'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root identity changed while waiting for graceful close' $wait}
+        elseif($wait.Outcome -cne 'StillRunning'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root graceful-close result is invalid' $wait}
     }elseif($close.Outcome -cne 'NotRequested'){
         Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root graceful-close result is invalid' $close
     }
-    $stop=& $Adapter.StopProcess $root $StatusEvidence $TimeoutMilliseconds
-    if($stop.Outcome -ne 'Stopped' -and $stop.Outcome -ne 'SourceExited'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root could not be stopped with an exact identity receipt' $stop}
-    $final=& $Adapter.WaitProcessExit $root $StatusEvidence $TimeoutMilliseconds
-    if($final.Outcome -ne 'SourceExited'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package root exit was not proven before special launch' $final}
+    foreach($member in $ordered){
+        $current=& $Adapter.GetStaleProcess $member.Pid $package
+        if($null -eq $current -or -not (& $Adapter.ProcessMatch $member $current)){continue}
+        $stop=& $Adapter.StopStaleProcess $member $package $TimeoutMilliseconds
+        if($stop.Outcome -ne 'Stopped' -and $stop.Outcome -ne 'SourceExited'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package tree member could not be stopped with an exact identity receipt' $stop}
+    }
+    foreach($member in $tree){
+        $current=& $Adapter.GetStaleProcess $member.Pid $package
+        if($null -ne $current -and (& $Adapter.ProcessMatch $member $current)){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package tree member remains alive after close' $member}
+    }
+    foreach($port in @($root.RendererPort,$root.MainPort)){
+        if(-not (& $Adapter.WaitPortClosed $port $TimeoutMilliseconds)){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package remote server port did not explicitly refuse before launch' $port}
+    }
 }
 
 function Get-CcodExactPropertyValue {

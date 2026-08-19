@@ -285,6 +285,11 @@ function New-CcodEngineAdapters {
             [pscustomobject]@{ Outcome=$stopValue; StoppedByController=($stopValue -ceq 'Stopped'); Snapshot=if($stopValue -ceq 'SourceExited'){$null}else{$Expected} }
         }.GetNewClosure()
         FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='NoCandidate';Snapshot=$null}}
+        GetStaleTree={param($Root,$Package)@()}
+        GetStaleProcess={param($ProcessId,$Package)$null}
+        StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds)[pscustomobject]@{Outcome='SourceExited';StoppedByController=$false;Snapshot=$null}}
+        RequestStaleGracefulClose={param($Expected,$Package)[pscustomobject]@{Outcome='SourceExited';Snapshot=$null}}
+        WaitStaleProcessExit={param($Expected,$Package,$TimeoutMilliseconds)[pscustomobject]@{Outcome='SourceExited';Snapshot=$null}}
         GetPreferredRendererPort={ param($Excluded) 9335 }
         GetPort={ param($Excluded) if(@($Excluded) -contains 9335 -or @($Excluded) -contains 41001){41002}else{41001} }
         StartSpecial={
@@ -775,19 +780,44 @@ try {
         $old=New-CcodEngineSnapshot -Pid 4596 -Mode Unrelated -RendererPort 41001 -MainPort 41002
         $old.Path='C:\Program Files\WindowsApps\OpenAI.Codex_26.814.5167.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
         $old.CommandLine='"' + $old.Path + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
-        $events=[Collections.Generic.List[string]]::new();$state=[pscustomobject]@{Alive=$true;Waits=0;Stops=0;Starts=0};$snapshotFactory=${function:New-CcodEngineSnapshot}
-        $adapters=New-CcodEngineAdapters -Probe $probe -Processes @($old) -Events $events
+        $child=New-CcodEngineSnapshot -Pid 4597 -CreationTimeUtc '2030-02-03T04:00:01.0000000Z' -Mode Unrelated -ParentPid 4596
+        $child.Path=$old.Path;$child.PackageFamilyName=$old.PackageFamilyName;$child.CommandLine='"' + $child.Path + '" --type=renderer'
+        $events=[Collections.Generic.List[string]]::new();$state=[pscustomobject]@{AliveByPid=@{4596=$old;4597=$child};Waits=0;Stops=0;Starts=0};$snapshotFactory=${function:New-CcodEngineSnapshot}
+        $adapters=New-CcodEngineAdapters -Probe $probe -Processes @($old,$child) -Events $events
         $adapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='Confirmed';Snapshot=$old}}.GetNewClosure()
-        $adapters.ListProcesses={param($StatusEvidence)if($state.Alive){@($old)}else{@()}}.GetNewClosure()
-        $adapters.GetProcess={param($Pid,$StatusEvidence)if($state.Alive -and $Pid -eq 4596){$old}else{$null}}.GetNewClosure()
-        $adapters.RequestGracefulClose={param($Expected,$StatusEvidence)$events.Add('GracefulClose');[pscustomobject]@{Outcome='Requested';Snapshot=$Expected}}.GetNewClosure()
-        $adapters.WaitProcessExit={param($Expected,$StatusEvidence,$TimeoutMilliseconds)$state.Waits++;$events.Add('WaitExit');if($state.Alive){[pscustomobject]@{Outcome='StillRunning';Snapshot=$Expected}}else{[pscustomobject]@{Outcome='SourceExited';Snapshot=$null}}}.GetNewClosure()
-        $adapters.StopProcess={param($Expected,$StatusEvidence,$TimeoutMilliseconds)$state.Stops++;$events.Add('StopStale');$state.Alive=$false;[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
+        $adapters.GetStaleTree={param($Root,$Package)@($child,$old)}.GetNewClosure()
+        $adapters.GetStaleProcess={param($Pid,$Package)if($state.AliveByPid.ContainsKey([int]$Pid)){$state.AliveByPid[[int]$Pid]}else{$null}}.GetNewClosure()
+        $adapters.RequestStaleGracefulClose={param($Expected,$Package)$events.Add('GracefulClose');[pscustomobject]@{Outcome='Requested';Snapshot=$Expected}}.GetNewClosure()
+        $adapters.WaitStaleProcessExit={param($Expected,$Package,$TimeoutMilliseconds)$state.Waits++;$events.Add('WaitExit');[pscustomobject]@{Outcome='StillRunning';Snapshot=$Expected}}.GetNewClosure()
+        $adapters.StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds)$state.Stops++;$events.Add("StopStale:$($Expected.Pid)");$state.AliveByPid.Remove([int]$Expected.Pid);[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
+        $adapters.WaitPortClosed={param($Port,$TimeoutMilliseconds)$events.Add("Port:$Port");$true}.GetNewClosure()
         $adapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$state.Starts++;$events.Add('StartSpecial');[pscustomobject]@{Outcome='Started';Snapshot=(& $snapshotFactory -Pid 201 -Mode Unrelated -RendererPort $RendererPort -MainPort $MainPort);Process=[pscustomobject]@{Id=201}}}.GetNewClosure()
         $activated=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $null -ExistingOnly $false) -Paths $paths -Adapters $adapters
         Assert-CcodEqual 'Activated' $activated.outcome 'one exact old-package remote root is closed before launch'
-        Assert-CcodEqual 'GracefulClose,WaitExit,StopStale,WaitExit,StartSpecial' (($events | Where-Object { $_ -in @('GracefulClose','WaitExit','StopStale','StartSpecial') }) -join ',') 'graceful close and exact-exit proof precede special launch'
-        Assert-CcodEqual 1 $state.Stops 'force termination occurs only after the graceful wait did not exit'
+        Assert-CcodEqual 'GracefulClose,WaitExit,StopStale:4597,StopStale:4596,Port:41001,Port:41002,StartSpecial' (($events | Where-Object { $_ -match '^(GracefulClose|WaitExit|StopStale:|Port:|StartSpecial)' }) -join ',') 'child-first exact tree closure and both port refusals precede special launch'
+        Assert-CcodEqual 2 $state.Stops 'every surviving recorded tree member is stopped only after the graceful wait'
+
+        $survivingEvents=[Collections.Generic.List[string]]::new();$survivingState=[pscustomobject]@{AliveByPid=@{4596=$old;4597=$child}}
+        $survivingAdapters=New-CcodEngineAdapters -Probe $probe -Processes @($old,$child) -Events $survivingEvents
+        $survivingAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject]@{Outcome='Confirmed';Snapshot=$old}}.GetNewClosure();$survivingAdapters.GetStaleTree={param($Root,$Package)@($child,$old)}.GetNewClosure()
+        $survivingAdapters.GetStaleProcess={param($Pid,$Package)if($survivingState.AliveByPid.ContainsKey([int]$Pid)){$survivingState.AliveByPid[[int]$Pid]}else{$null}}.GetNewClosure()
+        $survivingAdapters.RequestStaleGracefulClose={param($Expected,$Package)[pscustomobject]@{Outcome='NotRequested';Snapshot=$Expected}}
+        $survivingAdapters.StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds)if($Expected.Pid -eq 4596){$survivingState.AliveByPid.Remove(4596)};[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
+        $survivingAdapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$survivingEvents.Add('StartSpecial');throw 'must not start'}.GetNewClosure()
+        $surviving=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $false -TransactionId 'a92ec482-6dcf-4b9a-af19-18d9bd4b7ec1') -Paths $paths -Adapters $survivingAdapters
+        Assert-CcodEqual 'CCOD_STALE_PACKAGE_UNPROVEN' $surviving.error.code 'a recorded stale child that remains alive blocks special launch'
+        Assert-CcodTrue ($survivingEvents -cnotcontains 'StartSpecial') 'surviving stale child never permits a second remote server'
+
+        $portEvents=[Collections.Generic.List[string]]::new();$portState=[pscustomobject]@{AliveByPid=@{4596=$old}}
+        $portAdapters=New-CcodEngineAdapters -Probe $probe -Processes @($old) -Events $portEvents
+        $portAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject]@{Outcome='Confirmed';Snapshot=$old}}.GetNewClosure();$portAdapters.GetStaleTree={param($Root,$Package)@($old)}.GetNewClosure()
+        $portAdapters.GetStaleProcess={param($Pid,$Package)if($portState.AliveByPid.ContainsKey([int]$Pid)){$portState.AliveByPid[[int]$Pid]}else{$null}}.GetNewClosure()
+        $portAdapters.RequestStaleGracefulClose={param($Expected,$Package)[pscustomobject]@{Outcome='NotRequested';Snapshot=$Expected}}
+        $portAdapters.StopStaleProcess={param($Expected,$Package,$TimeoutMilliseconds)$portState.AliveByPid.Remove([int]$Expected.Pid);[pscustomobject]@{Outcome='Stopped';StoppedByController=$true;Snapshot=$Expected}}.GetNewClosure()
+        $portAdapters.WaitPortClosed={param($Port,$TimeoutMilliseconds)$Port -ne 41002}.GetNewClosure();$portAdapters.StartSpecial={param($RendererPort,$MainPort,$TimeoutMilliseconds)$portEvents.Add('StartSpecial');throw 'must not start'}.GetNewClosure()
+        $openPort=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $false -TransactionId '55a91c89-723d-4bd1-aac0-a0f1b9a2a9fc') -Paths $paths -Adapters $portAdapters
+        Assert-CcodEqual 'CCOD_STALE_PACKAGE_UNPROVEN' $openPort.error.code 'a stale remote port that remains open blocks special launch'
+        Assert-CcodTrue ($portEvents -cnotcontains 'StartSpecial') 'open stale remote port never permits a second server'
 
         $other=$old|Select-Object *;$other.Pid=4597;$other.CreationTimeUtc='2030-02-03T04:00:01.0000000Z'
         $ambiguousEvents=[Collections.Generic.List[string]]::new();$ambiguousAdapters=New-CcodEngineAdapters -Probe $probe -Processes @($old,$other) -Events $ambiguousEvents

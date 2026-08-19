@@ -233,6 +233,20 @@ try {
         Assert-CcodEqual 4596 $result.Snapshot.Pid 'the exact old root is retained'
         Assert-CcodEqual 6 $calls.Reads 'candidate identity is bracketed and reread before it can be closed'
 
+        $gracefulCalls=[pscustomobject]@{Close=0;Dispose=0};$fakeStaleProcess=[pscustomobject]@{Id=4596}
+        $oldAdapters.GetGracefulCloseProcess={param($ProcessId)$fakeStaleProcess}.GetNewClosure()
+        $oldAdapters.GetGracefulCloseCreationTimeUtc={param($Process)'2026-08-02T00:00:01.0000000Z'}
+        $oldAdapters.CloseGracefulProcess={param($Process)$gracefulCalls.Close++;$true}.GetNewClosure()
+        $oldAdapters.DisposeGracefulProcess={param($Process)$gracefulCalls.Dispose++}.GetNewClosure()
+        $staleReuse=Request-CcodStaleProcessGracefulCloseIfMatch -Expected $result.Snapshot -Package $current -Adapters $oldAdapters
+        Assert-CcodEqual 'IdentityChanged' $staleReuse.Outcome 'raw stale close rejects PID reuse at the production graceful boundary'
+        Assert-CcodEqual 0 $gracefulCalls.Close 'raw stale close never signals the replacement process'
+        Assert-CcodEqual 1 $gracefulCalls.Dispose 'raw stale graceful process object is disposed after identity proof'
+
+        $oldAdapters.ListProcessIds={@(4596)}
+        $staleTree=Get-CcodVerifiedStaleProcessTree -Root $result.Snapshot -Package $current -Adapters $oldAdapters
+        Assert-CcodEqual '4596' (($staleTree|ForEach-Object Pid)-join ',') 'default stale-tree composition retains the exact raw root before any close'
+
         $currentRoot = New-CcodSnapshot -ProcessId 26700 -Path $current.ExecutablePath -Mode Unrelated -RendererPort 41003 -MainPort 41004 -CommandLine ('"' + $current.ExecutablePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41003 --inspect=127.0.0.1:41004')
         $currentRoot.IsTopLevel = $true
         $currentResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($currentRoot) -Adapters @{ GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'};GetProcess = { param($ProcessId, $StatusEvidence) $currentRoot } }
@@ -243,6 +257,15 @@ try {
         $futureAdapters.GetPackageIdentity = { $current }.GetNewClosure()
         $futureResult = Get-CcodStalePackageRootResult -Package $current -ProcessIds @(26701) -Adapters $futureAdapters
         Assert-CcodEqual 'NoCandidate' $futureResult.Outcome 'a same-family newer package version is never a stale closure target'
+
+        $extraDebug = $result.Snapshot | Select-Object *
+        $extraDebug.CommandLine = '"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002 --inspect-brk=127.0.0.1:41003'
+        $extraDebugResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($extraDebug) -Adapters @{
+            GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'}
+            ParseCommandLine={param($CommandLine)@($oldPath,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002','--inspect-brk=127.0.0.1:41003')}
+            GetProcess={param($ProcessId,$StatusEvidence)$extraDebug}.GetNewClosure()
+        }
+        Assert-CcodEqual 'NoCandidate' $extraDebugResult.Outcome 'extra or conflicting debug argv cannot become a stale closure target'
 
         foreach($unsafePath in @(
             'C:\PROGRA~1\WindowsApps\OpenAI.Codex_26.814.5167.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe',
@@ -277,6 +300,7 @@ try {
             GetProcess = { param($ProcessId, $StatusEvidence) $script:unused = $StatusEvidence; $reuseReads.Count++; if ($reuseReads.Count -eq 1) { $rawOld } else { $reused } }.GetNewClosure()
         }
         Assert-CcodEqual 'Incomplete' $reusedResult.Outcome 'PID reuse or creation-time drift blocks stale-root closure'
+
     }
 
     Invoke-CcodTest 'classifies the current renderer-only CDP launch as an ordinary root' {
@@ -452,6 +476,22 @@ try {
         }
         Assert-CcodStopResultContract -Result $changed -Outcome IdentityChanged -Stopped $false -Snapshot $reused -Message 'PID reuse'
         Assert-CcodEqual 0 $calls.Stop 'dangerous boundary is unreachable without an exact reread'
+    }
+
+    Invoke-CcodTest 'default graceful-close adapter rejects PID reuse on the same process object before signaling it' {
+        $expected=New-CcodSnapshot
+        $calls=[pscustomobject]@{Close=0;Dispose=0}
+        $fakeProcess=[pscustomobject]@{Id=100}
+        $result=Request-CcodProcessGracefulCloseIfMatch -Expected $expected -Adapters @{
+            GetProcess={param($ProcessId,$StatusEvidence)$expected}.GetNewClosure()
+            GetGracefulCloseProcess={param($ProcessId)$fakeProcess}.GetNewClosure()
+            GetGracefulCloseCreationTimeUtc={param($Process)'2026-08-02T00:00:01.0000000Z'}
+            CloseGracefulProcess={param($Process)$calls.Close++;$true}.GetNewClosure()
+            DisposeGracefulProcess={param($Process)$calls.Dispose++}.GetNewClosure()
+        }
+        Assert-CcodEqual 'IdentityChanged' $result.Outcome 'production graceful boundary refuses a reused PID before CloseMainWindow'
+        Assert-CcodEqual 0 $calls.Close 'PID reuse never signals the replacement process'
+        Assert-CcodEqual 1 $calls.Dispose 'the checked process object is still disposed'
     }
 
     Invoke-CcodTest 'requires an exact confirmed stop receipt' {
