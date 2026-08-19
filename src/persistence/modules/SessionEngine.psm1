@@ -516,6 +516,7 @@ function Merge-CcodSessionAdapters($Adapters) {
         StopProcess={ param($Expected,$StatusEvidence,$TimeoutMilliseconds) Stop-CcodProcessIfMatch -Expected $Expected -StatusEvidence $StatusEvidence -TimeoutMilliseconds $TimeoutMilliseconds }
         RequestGracefulClose={ param($Expected,$StatusEvidence) Request-CcodProcessGracefulCloseIfMatch -Expected $Expected -StatusEvidence $StatusEvidence }
         WaitProcessExit={ param($Expected,$StatusEvidence,$TimeoutMilliseconds) Wait-CcodProcessExitIfMatch -Expected $Expected -StatusEvidence $StatusEvidence -TimeoutMilliseconds $TimeoutMilliseconds }
+        FindStalePackageRoot={param($Package,$StatusEvidence)Get-CcodStalePackageRootResult -Package $Package}
         GetPreferredRendererPort={ param($Excluded) Get-CcodRendererPreferredPort -ExcludedPorts $Excluded }
         GetPort={ param($Excluded) Get-CcodAvailableLoopbackPort -ExcludedPorts $Excluded }
         StartSpecial={ param($RendererPort,$MainPort,$TimeoutMilliseconds) Start-CcodProcess -Mode Special -RendererPort $RendererPort -MainPort $MainPort -StartupTimeoutMilliseconds $TimeoutMilliseconds }
@@ -552,9 +553,7 @@ function Merge-CcodSessionAdapters($Adapters) {
 function Close-CcodVerifiedStalePackageRoot {
     param($Probe,$StatusEvidence,[hashtable]$Adapter,[int]$TimeoutMilliseconds)
     $package=[pscustomobject][ordered]@{Found=$true;FullName=$Probe.PackageFullName;FamilyName=$Probe.PackageFamilyName;Version=$Probe.PackageVersion;ExecutablePath=$Probe.ExecutablePath}
-    $reads=@(& $Adapter.ListProcesses $StatusEvidence)
-    $reReadAdapter=@{GetProcess={param($ProcessId,$IgnoredStatus)& $Adapter.GetProcess $ProcessId $null}.GetNewClosure()}
-    $candidate=Get-CcodStalePackageRootResult -Package $package -Snapshots $reads -Adapters $reReadAdapter
+    $candidate=& $Adapter.FindStalePackageRoot $package $StatusEvidence
     if($candidate.Outcome -ceq 'NoCandidate'){return}
     if($candidate.Outcome -ceq 'Ambiguous'){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_AMBIGUOUS' 'Multiple old-package remote server roots were found' $candidate}
     if($candidate.Outcome -cne 'Confirmed' -or $null -eq $candidate.Snapshot){Throw-CcodSessionError 'CCOD_STALE_PACKAGE_UNPROVEN' 'Old-package remote server identity could not be proven' $candidate}

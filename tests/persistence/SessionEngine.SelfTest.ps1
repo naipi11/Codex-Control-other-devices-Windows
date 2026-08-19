@@ -284,6 +284,7 @@ function New-CcodEngineAdapters {
             $eventsValue.Add('StopProcess')
             [pscustomobject]@{ Outcome=$stopValue; StoppedByController=($stopValue -ceq 'Stopped'); Snapshot=if($stopValue -ceq 'SourceExited'){$null}else{$Expected} }
         }.GetNewClosure()
+        FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='NoCandidate';Snapshot=$null}}
         GetPreferredRendererPort={ param($Excluded) 9335 }
         GetPort={ param($Excluded) if(@($Excluded) -contains 9335 -or @($Excluded) -contains 41001){41002}else{41001} }
         StartSpecial={
@@ -776,6 +777,7 @@ try {
         $old.CommandLine='"' + $old.Path + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002'
         $events=[Collections.Generic.List[string]]::new();$state=[pscustomobject]@{Alive=$true;Waits=0;Stops=0;Starts=0};$snapshotFactory=${function:New-CcodEngineSnapshot}
         $adapters=New-CcodEngineAdapters -Probe $probe -Processes @($old) -Events $events
+        $adapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='Confirmed';Snapshot=$old}}.GetNewClosure()
         $adapters.ListProcesses={param($StatusEvidence)if($state.Alive){@($old)}else{@()}}.GetNewClosure()
         $adapters.GetProcess={param($Pid,$StatusEvidence)if($state.Alive -and $Pid -eq 4596){$old}else{$null}}.GetNewClosure()
         $adapters.RequestGracefulClose={param($Expected,$StatusEvidence)$events.Add('GracefulClose');[pscustomobject]@{Outcome='Requested';Snapshot=$Expected}}.GetNewClosure()
@@ -789,6 +791,7 @@ try {
 
         $other=$old|Select-Object *;$other.Pid=4597;$other.CreationTimeUtc='2030-02-03T04:00:01.0000000Z'
         $ambiguousEvents=[Collections.Generic.List[string]]::new();$ambiguousAdapters=New-CcodEngineAdapters -Probe $probe -Processes @($old,$other) -Events $ambiguousEvents
+        $ambiguousAdapters.FindStalePackageRoot={param($Package,$StatusEvidence)[pscustomobject][ordered]@{Outcome='Ambiguous';Snapshot=$null}}.GetNewClosure()
         $ambiguous=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -ExistingOnly $false -TransactionId '8394cc7a-69dc-4da0-b229-6fcffb32ec50') -Paths $paths -Adapters $ambiguousAdapters
         Assert-CcodEqual 'CCOD_STALE_PACKAGE_AMBIGUOUS' $ambiguous.error.code 'multiple stale same-family roots block special launch'
         Assert-CcodTrue ($ambiguousEvents -cnotcontains 'StartSpecial') 'ambiguity never launches a second special root'
@@ -900,7 +903,7 @@ try {
         $adapters.Delay={param($Milliseconds)$clock.Delayed+=$Milliseconds}.GetNewClosure()
         $adapters.ListProcesses={param($StatusEvidence)$clock.Polls++;if($clock.Polls -ge 4){@($ordinary)}else{@()}}.GetNewClosure()
         $adopted=Invoke-CcodApplySession -Request (New-CcodEngineRequest -Action Apply -Source $source) -Paths $paths -Adapters $adapters
-        Assert-CcodEqual 2000 $clock.Delayed 'one pre-launch stale-root scan precedes recovery observation, then ordinary is adopted after two fake seconds'
+        Assert-CcodEqual 3000 $clock.Delayed 'ordinary appearing in the fourth poll is adopted after three fake seconds'
         Assert-CcodEqual 0 $counters.OrdinaryStart 'adoption avoids an ordinary launch'
         Assert-CcodEqual 301 $adopted.recovery.pid 'adoption returns the exact ordinary snapshot'
 

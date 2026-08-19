@@ -737,12 +737,14 @@ Invoke-CcodTest 'uses a constrained stale reconciliation candidate for only an e
     Assert-CcodEqual 'StalePackageStatus' $hostState.Reason 'one constrained stale candidate produces the fixed reason'
     $candidateProperty=$hostState.PSObject.Properties['StaleReconciliationCandidate']
     Assert-CcodTrue ($null -ne $candidateProperty -and $null -ne $candidateProperty.Value -and $candidateProperty.Value.Pid -eq 201) 'candidate binds only the exact prior verified process identity'
-    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'candidate diagnosis starts no controller worker'
+    Assert-CcodTrue ($world.Calls.Contains('Start:Controller:Apply')) 'one exact stale root dispatches the controller repair path'
+    Assert-CcodTrue ($null -eq $hostState.WorkerSlot.Request.source -and -not $hostState.WorkerSlot.Request.existingOnly) 'stale-only repair uses the explicit source-less Apply contract'
 
     $world.Calls.Clear();$seenStatusEvidence.Clear();$hostState.ForceReconcile=$true
     Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
-    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'same constrained candidate cannot cause unbounded Inspect'
+    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'same constrained candidate cannot create a second worker while the repair slot is owned'
 
+    $hostState.WorkerSlot=$null
     [void]$definitions.Remove('201')
     $definitions['202']=[pscustomobject][ordered]@{Pid=[int]202;CreationTimeUtc='2030-02-03T03:03:00.0000000Z';Path=$liveExecutable;CommandLine=('"'+$liveExecutable+'"');Arguments=@($liveExecutable)}
     $world.Calls.Clear();$world.ProcessIds=@(202,333);$hostState.ForceReconcile=$true
@@ -811,6 +813,9 @@ Invoke-CcodTest 'Apply controller request carries the full process snapshot sour
     Assert-CcodEqual $target.CreationTimeUtc $request.source.CreationTimeUtc 'source creation time survives'
     Assert-CcodEqual $target.Path $request.source.Path 'source executable path survives'
     Assert-CcodTrue ($request.existingOnly -and $request.restartOrdinary -and $null -eq $request.rendererPort -and $null -eq $request.mainPort) 'Apply flags stay consistent'
+
+    $staleOnly=New-CcodSupervisorControllerRequest -HostState $fixture.Host -Action 'Apply' -Target $null
+    Assert-CcodTrue ($null -eq $staleOnly.source -and -not $staleOnly.existingOnly -and $staleOnly.restartOrdinary) 'stale-only Apply is an explicit source-less repair request'
 }
 
 Invoke-CcodTest 'Apply rejects a partial source target before a worker request is written' {

@@ -591,10 +591,7 @@ function Get-CcodProcessSnapshot {
         -not [object]::Equals($before.CreationTimeUtc, $after.CreationTimeUtc)) { return $null }
 
     $commandLine = if ($null -eq $cim.PSObject.Properties['CommandLine']) { $null } else { $cim.CommandLine }
-    # Parse argv[0] against the process image, not the current package image.  This
-    # retains a verifiable top-level shape for an older same-family package after
-    # Store servicing, while eligibility below remains exact-current-path only.
-    $launchArguments = Get-CcodParsedLaunchArguments -CommandLine $commandLine -ExecutablePath ([string]$before.Path) -Adapters $adapter
+    $launchArguments = Get-CcodParsedLaunchArguments -CommandLine $commandLine -ExecutablePath $package.ExecutablePath -Adapters $adapter
     $isTopLevel = $launchArguments.Valid -and $launchArguments.IsTopLevel
     $currentSessionId = & $adapter.GetCurrentSessionId
     $currentUserSid = & $adapter.GetCurrentUserSid
@@ -656,6 +653,46 @@ function Test-CcodProcessMatch {
     return $true
 }
 
+function Get-CcodStalePackageProcessSnapshot {
+    param(
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)]$Package,
+        [Parameter(Mandatory)][hashtable]$Adapter
+    )
+
+    $before = & $Adapter.GetNativeProcess $ProcessId
+    if ($null -eq $before -or $before.Pid -isnot [int] -or -not [object]::Equals($before.Pid, $ProcessId)) { return $null }
+    $cim = & $Adapter.GetCimProcess $ProcessId
+    if ($null -eq $cim -or $null -eq $cim.PSObject.Properties['ProcessId']) { return $null }
+    $cimProcessId = ConvertTo-CcodProcessIdValue -Value $cim.ProcessId
+    if (-not $cimProcessId.Valid -or -not [object]::Equals($cimProcessId.Value, $ProcessId)) { return $null }
+    $parentProcessId = $null
+    if ($null -ne $cim.PSObject.Properties['ParentProcessId'] -and $null -ne $cim.ParentProcessId) {
+        $convertedParent = ConvertTo-CcodProcessIdValue -Value $cim.ParentProcessId -Minimum 0
+        if (-not $convertedParent.Valid) { return $null }
+        $parentProcessId = $convertedParent.Value
+    }
+    $after = & $Adapter.GetNativeProcess $ProcessId
+    if ($null -eq $after -or $after.Pid -isnot [int] -or -not [object]::Equals($after.Pid, $ProcessId) -or
+        -not [object]::Equals($before.CreationTimeUtc, $after.CreationTimeUtc)) { return $null }
+    $commandLine = if ($null -eq $cim.PSObject.Properties['CommandLine']) { $null } else { $cim.CommandLine }
+    $launchArguments = Get-CcodParsedLaunchArguments -CommandLine $commandLine -ExecutablePath ([string]$before.Path) -Adapters $Adapter
+    return [pscustomobject][ordered]@{
+        Pid = [int]$before.Pid
+        CreationTimeUtc = [string]$before.CreationTimeUtc
+        SessionId = [int]$before.SessionId
+        UserSid = [string]$before.UserSid
+        Path = [string]$before.Path
+        PackageFamilyName = [string]$before.PackageFamilyName
+        CommandLine = $commandLine
+        ParentPid = $parentProcessId
+        IsTopLevel = [bool]($launchArguments.Valid -and $launchArguments.IsTopLevel)
+        Mode = 'Unrelated'
+        RendererPort = if ($null -eq $launchArguments.RendererPort) { $null } else { [int]$launchArguments.RendererPort }
+        MainPort = if ($null -eq $launchArguments.MainPort) { $null } else { [int]$launchArguments.MainPort }
+    }
+}
+
 function New-CcodStalePackageRootResult {
     param(
         [Parameter(Mandatory)][ValidateSet('Confirmed', 'NoCandidate', 'Incomplete', 'Ambiguous')][string]$Outcome,
@@ -707,10 +744,18 @@ function Test-CcodStalePackageRootSnapshot {
         [IO.Path]::GetFileName($Snapshot.Path) -ine 'ChatGPT.exe' -or
         $null -eq (ConvertTo-CcodDateTimeOffset -Value $Snapshot.CreationTimeUtc)) { return $false }
 
+    # Path is native process-image evidence paired with GetPackageFamilyName.  Accept
+    # only the protected WindowsApps long-path spelling; aliases/reparse-like forms
+    # are not normalized into the closure boundary.
     $pathPattern = '^C:\\Program Files\\WindowsApps\\' + [regex]::Escape($PackageParts.Name) + '_(?<version>\d+\.\d+\.\d+\.\d+)_' +
         [regex]::Escape($PackageParts.Architecture) + '__' + [regex]::Escape($PackageParts.Publisher) + '\\app\\ChatGPT\.exe$'
     $pathMatch = [regex]::Match($Snapshot.Path, $pathPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant)
-    if (-not $pathMatch.Success -or $pathMatch.Groups['version'].Value -ceq $PackageParts.Version) { return $false }
+    if (-not $pathMatch.Success) { return $false }
+    try {
+        $candidateVersion = [Version]$pathMatch.Groups['version'].Value
+        $currentVersion = [Version]$PackageParts.Version
+    } catch { return $false }
+    if ($candidateVersion.CompareTo($currentVersion) -ge 0) { return $false }
     return $true
 }
 
@@ -719,18 +764,29 @@ function Get-CcodStalePackageRootResult {
     param(
         [Parameter(Mandatory)]$Package,
         [AllowEmptyCollection()][object[]]$Snapshots = @(),
+        [AllowEmptyCollection()][int[]]$ProcessIds = @(),
         [hashtable]$Adapters
     )
 
     $parts = Get-CcodPackageFullNameParts -Package $Package
     if ($null -eq $parts) { return New-CcodStalePackageRootResult -Outcome Incomplete -Snapshot $null }
     $adapter = Get-CcodProcessAdapters -Adapters $Adapters
-    $candidates = @($Snapshots | Where-Object { Test-CcodStalePackageRootSnapshot -Snapshot $_ -Package $Package -PackageParts $parts } | Sort-Object CreationTimeUtc, Pid)
+    $rawMode = $PSBoundParameters.ContainsKey('ProcessIds') -or -not $PSBoundParameters.ContainsKey('Snapshots')
+    $observed = if ($rawMode) {
+        $ids = if ($PSBoundParameters.ContainsKey('ProcessIds')) { @($ProcessIds) } else { @(& $adapter.ListProcessIds) }
+        @($ids | Sort-Object -Unique | ForEach-Object { Get-CcodStalePackageProcessSnapshot -ProcessId $_ -Package $Package -Adapter $adapter })
+    } else { @($Snapshots) }
+    $currentSessionId = & $adapter.GetCurrentSessionId
+    $currentUserSid = & $adapter.GetCurrentUserSid
+    $candidates = @($observed | Where-Object {
+        $_.SessionId -eq $currentSessionId -and $_.UserSid -ceq $currentUserSid -and
+        (Test-CcodStalePackageRootSnapshot -Snapshot $_ -Package $Package -PackageParts $parts)
+    } | Sort-Object CreationTimeUtc, Pid)
     if ($candidates.Count -eq 0) { return New-CcodStalePackageRootResult -Outcome NoCandidate -Snapshot $null }
     if ($candidates.Count -ne 1) { return New-CcodStalePackageRootResult -Outcome Ambiguous -Snapshot $null }
     $candidate = $candidates[0]
-    $first = & $adapter.GetProcess ([int]$candidate.Pid) $null
-    $second = & $adapter.GetProcess ([int]$candidate.Pid) $null
+    $first = if ($rawMode) { Get-CcodStalePackageProcessSnapshot -ProcessId ([int]$candidate.Pid) -Package $Package -Adapter $adapter } else { & $adapter.GetProcess ([int]$candidate.Pid) $null }
+    $second = if ($rawMode) { Get-CcodStalePackageProcessSnapshot -ProcessId ([int]$candidate.Pid) -Package $Package -Adapter $adapter } else { & $adapter.GetProcess ([int]$candidate.Pid) $null }
     if ($null -eq $first -or $null -eq $second -or -not (Test-CcodProcessMatch -Expected $candidate -Actual $first) -or
         -not (Test-CcodProcessMatch -Expected $first -Actual $second) -or
         -not (Test-CcodStalePackageRootSnapshot -Snapshot $second -Package $Package -PackageParts $parts)) {

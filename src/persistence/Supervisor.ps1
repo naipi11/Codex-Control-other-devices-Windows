@@ -463,6 +463,13 @@ function New-CcodSupervisorControllerRequest {
     if($transactionId -isnot [string] -or $transactionId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'){throw 'transaction identity is invalid'}
     $source=$null
     if($Action -ceq 'Apply'){
+        if($null -eq $Target){
+            return [pscustomobject][ordered]@{
+                schemaVersion=1;action=$Action;transactionId=$transactionId;runtimeId=$HostState.Layout.RuntimeId
+                supervisorIdentity=[pscustomobject][ordered]@{pid=[int]$HostState.Identity.Pid;creationTimeUtc=$HostState.Identity.CreationTimeUtc;sessionId=$HostState.Identity.SessionId.ToString([Globalization.CultureInfo]::InvariantCulture)}
+                source=$null;existingOnly=$false;rendererPort=$null;mainPort=$null;timeoutMilliseconds=[int]30000;restartOrdinary=$true
+            }
+        }
         $sourceFields=@('Pid','CreationTimeUtc','SessionId','UserSid','Path','PackageFamilyName','CommandLine','ParentPid','IsTopLevel','Mode','RendererPort','MainPort')
         $actual=@($Target.PSObject.Properties.Name)
         if($null -eq $Target -or ($Target -isnot [pscustomobject]) -or $actual.Count -ne $sourceFields.Count){throw 'Apply target is invalid'}
@@ -961,7 +968,7 @@ function Invoke-CcodSupervisorTick {
     }
     if($null -ne $HostState.StaleReconciliationCandidate){
         $HostState.SessionState='Error';$HostState.BlockAutomaticActions=$true;$HostState.Reason='StalePackageStatus'
-        Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters;return
+        Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Apply' $null|Out-Null;return
     }
     $context=New-CcodSupervisorEngineContext $HostState
     $decision=Invoke-CcodSupervisorAdapter $Adapters.GetSupervisorDecision @($context) 1

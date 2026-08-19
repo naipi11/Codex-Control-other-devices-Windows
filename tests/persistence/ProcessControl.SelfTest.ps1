@@ -223,37 +223,58 @@ try {
         $oldAdapters = New-CcodSnapshotAdapters -Path $oldPath -CommandLine $oldCommand -ParsedArguments $oldArgs
         $oldAdapters.GetPackageIdentity = { $current }.GetNewClosure()
         $old = Get-CcodProcessSnapshot -ProcessId 4596 -Adapters $oldAdapters
-        Assert-CcodEqual $true $old.IsTopLevel 'old-package argv[0] is independently parsed against its own image path'
+        Assert-CcodEqual $false $old.IsTopLevel 'normal current-package snapshot keeps old-package argv[0] outside the managed root contract'
         Assert-CcodEqual 'Unrelated' $old.Mode 'old package is never adopted as the current managed root'
         $calls = [pscustomobject]@{ Reads = 0 }
-        $result = Get-CcodStalePackageRootResult -Package $current -Snapshots @($old) -Adapters @{
-            GetProcess = { param($ProcessId, $StatusEvidence) $calls.Reads++; $old }.GetNewClosure()
-        }
+        $oldAdapters.GetNativeProcess = { param($ProcessId) $calls.Reads++; [pscustomobject]@{Pid=$ProcessId;CreationTimeUtc='2026-08-02T00:00:00.0000000Z';SessionId=1;UserSid='S-1-5-21-test';Path=$oldPath;PackageFamilyName='OpenAI.Codex_2p2nqsd0c76g0'} }.GetNewClosure()
+        $result = Get-CcodStalePackageRootResult -Package $current -ProcessIds @(4596) -Adapters $oldAdapters
 
         Assert-CcodEqual 'Confirmed' $result.Outcome 'one verifiable old-version same-family root is a stale remote-server candidate'
         Assert-CcodEqual 4596 $result.Snapshot.Pid 'the exact old root is retained'
-        Assert-CcodEqual 2 $calls.Reads 'candidate identity is reread before it can be closed'
+        Assert-CcodEqual 6 $calls.Reads 'candidate identity is bracketed and reread before it can be closed'
 
         $currentRoot = New-CcodSnapshot -ProcessId 26700 -Path $current.ExecutablePath -Mode Unrelated -RendererPort 41003 -MainPort 41004 -CommandLine ('"' + $current.ExecutablePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41003 --inspect=127.0.0.1:41004')
         $currentRoot.IsTopLevel = $true
-        $currentResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($currentRoot) -Adapters @{ GetProcess = { param($ProcessId, $StatusEvidence) $currentRoot } }
+        $currentResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($currentRoot) -Adapters @{ GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'};GetProcess = { param($ProcessId, $StatusEvidence) $currentRoot } }
         Assert-CcodEqual 'NoCandidate' $currentResult.Outcome 'the current managed package root is never classified stale'
+
+        $futurePath = 'C:\Program Files\WindowsApps\OpenAI.Codex_26.814.9999.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
+        $futureAdapters = New-CcodSnapshotAdapters -Path $futurePath -CommandLine ('"' + $futurePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006') -ParsedArguments @($futurePath,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=41005','--inspect=127.0.0.1:41006')
+        $futureAdapters.GetPackageIdentity = { $current }.GetNewClosure()
+        $futureResult = Get-CcodStalePackageRootResult -Package $current -ProcessIds @(26701) -Adapters $futureAdapters
+        Assert-CcodEqual 'NoCandidate' $futureResult.Outcome 'a same-family newer package version is never a stale closure target'
+
+        foreach($unsafePath in @(
+            'C:\PROGRA~1\WindowsApps\OpenAI.Codex_26.814.5167.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe',
+            'C:\Program Files\WindowsApps\OpenAI.Codex_bad-version_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
+        )){
+            $unsafe = New-CcodSnapshot -ProcessId 26702 -Path $unsafePath -Mode Unrelated -RendererPort 41005 -MainPort 41006 -CommandLine ('"' + $unsafePath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006')
+            $unsafe.IsTopLevel = $true
+            $unsafeResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($unsafe) -Adapters @{ GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'};GetProcess = { param($ProcessId, $StatusEvidence) $unsafe }.GetNewClosure() }
+            Assert-CcodEqual 'NoCandidate' $unsafeResult.Outcome 'only the native WindowsApps full path with a four-part older version is targetable'
+        }
 
         $foreign = New-CcodSnapshot -ProcessId 88 -Path $oldPath -PackageFamilyName 'Other.Family' -Mode Unrelated -RendererPort 41001 -MainPort 41002 -CommandLine ('"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002')
         $foreign.IsTopLevel = $true
         $foreignResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($foreign) -Adapters @{ GetProcess = { param($ProcessId, $StatusEvidence) $foreign } }
         Assert-CcodEqual 'NoCandidate' $foreignResult.Outcome 'an unrelated package family is ignored'
 
-        $otherOld = New-CcodSnapshot -ProcessId 4597 -CreationTimeUtc '2026-08-20T01:02:04.0000000Z' -Path $oldPath -Mode Unrelated -RendererPort 41005 -MainPort 41006 -CommandLine ('"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006')
-        $otherOld.IsTopLevel = $true
-        $ambiguous = Get-CcodStalePackageRootResult -Package $current -Snapshots @($old, $otherOld) -Adapters @{ GetProcess = { param($ProcessId, $StatusEvidence) if ($ProcessId -eq 4596) { $old } else { $otherOld } } }
+        $rawOld = $result.Snapshot
+        $otherOld = $rawOld | Select-Object *
+        $otherOld.Pid = 4597
+        $otherOld.CreationTimeUtc = '2026-08-20T01:02:04.0000000Z'
+        $otherOld.RendererPort = 41005
+        $otherOld.MainPort = 41006
+        $otherOld.CommandLine = '"' + $oldPath + '" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41005 --inspect=127.0.0.1:41006'
+        $ambiguous = Get-CcodStalePackageRootResult -Package $current -Snapshots @($rawOld, $otherOld) -Adapters @{ GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'};GetProcess = { param($ProcessId, $StatusEvidence) if ($ProcessId -eq 4596) { $rawOld } else { $otherOld } } }
         Assert-CcodEqual 'Ambiguous' $ambiguous.Outcome 'multiple old same-family remote roots fail closed'
 
-        $reused = $old | Select-Object *
+        $reused = $rawOld | Select-Object *
         $reused.CreationTimeUtc = '2026-08-20T01:02:04.0000000Z'
         $reuseReads = [pscustomobject]@{ Count = 0 }
-        $reusedResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($old) -Adapters @{
-            GetProcess = { param($ProcessId, $StatusEvidence) $script:unused = $StatusEvidence; $reuseReads.Count++; if ($reuseReads.Count -eq 1) { $old } else { $reused } }.GetNewClosure()
+        $reusedResult = Get-CcodStalePackageRootResult -Package $current -Snapshots @($rawOld) -Adapters @{
+            GetCurrentSessionId={1};GetCurrentUserSid={'S-1-5-21-test'}
+            GetProcess = { param($ProcessId, $StatusEvidence) $script:unused = $StatusEvidence; $reuseReads.Count++; if ($reuseReads.Count -eq 1) { $rawOld } else { $reused } }.GetNewClosure()
         }
         Assert-CcodEqual 'Incomplete' $reusedResult.Outcome 'PID reuse or creation-time drift blocks stale-root closure'
     }
