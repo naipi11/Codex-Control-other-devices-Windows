@@ -11,7 +11,7 @@ $script:CcodSupervisorLogPath=$null
 $script:CcodSupervisorAdapterNames=@(
     'GetIdentity','ResolveLayout','StartClock','GetElapsedMilliseconds','GetUtcNow',
     'EnterLease','ExitLease','OpenReadyEvent','OpenShutdownEvent','IsEventSignaled','SignalEvent','CloseEvent',
-    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','StartUninstall','EnumerateProcessIds','GetProcessSnapshot','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','HandoffRenderer','GetTrayPresentation',
+    'ReadState','ReadJournal','ReadUiPreference','SetUiLanguageMode','GetSystemCultureName','GetUiCatalog','ShowTrayError','StartUninstall','EnumerateProcessIds','GetProcessSnapshot','GetPackageIdentity','GetSupervisorDecision','AddObservedEvent','CompleteControllerRun','HandoffRenderer','GetTrayPresentation',
     'NewQueue','GetQueueCount','TryDequeue','NewTray','SetTrayPresentation','StopTrayTimer','RequestUiExit','CloseTray','NewWatcher','StopWatcher',
     'GetWorkerLeafState','WriteWorkerRequest','StartWorker','PollWorker','ReadWorkerResult','WaitWorker','GetWorkerIdentity','TerminateWorker','DisposeWorker','DeleteWorkerFile',
     'ClearFailedAttempt','SetAutomationEnabled','SetCandidateOptIn','OpenLogs','WriteLog','RunUiContext'
@@ -206,7 +206,14 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.ShowTrayError={param($Tray,$Catalog,$Key)Show-CcodTrayError -Context $Tray -Catalog $Catalog -Key $Key}
     $defaults.StartUninstall={param($InstallRoot,$RuntimeRoot,$PowerShellPath)Start-CcodTrayUninstall -InstallRoot $InstallRoot -RuntimeRoot $RuntimeRoot -PowerShellPath $PowerShellPath}
     $defaults.EnumerateProcessIds={Get-CcodChatGptProcessIds}
-    $defaults.GetProcessSnapshot={param($ProcessId)Get-CcodProcessSnapshot -ProcessId $ProcessId}
+    $defaults.GetProcessSnapshot={param($ProcessId,$StatusEvidence)Get-CcodProcessSnapshot -ProcessId $ProcessId -StatusEvidence $StatusEvidence}
+    $defaults.GetPackageIdentity={
+        if($null -eq (Get-Command Get-CcodPackageIdentity -ErrorAction SilentlyContinue)){
+            $modulePath=Join-Path (Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'modules') 'CompatibilityProbe.psm1'
+            Import-Module -Name $modulePath -Force -ErrorAction Stop
+        }
+        Get-CcodPackageIdentity
+    }
     $defaults.GetSupervisorDecision={param($Context)Get-CcodSupervisorDecision -Context $Context}
     $defaults.AddObservedEvent={param($Observed,$ProcessId,$Created)Add-CcodObservedEvent -ObservedKeys $Observed -ProcessId $ProcessId -CreationTimeUtc $Created}
     $defaults.CompleteControllerRun={param($Result,$TransactionId,$Action,$RuntimeId)Complete-CcodControllerRun -Result $Result -ExpectedTransactionId $TransactionId -ExpectedAction $Action -ExpectedRuntimeId $RuntimeId}
@@ -367,7 +374,7 @@ function New-CcodSupervisorHostState {
         ObservedKeys=[ordered]@{};AttemptKeys=[ordered]@{};RecoveryIgnoreKeys=[ordered]@{};SuppressionKeys=[ordered]@{}
         StaticCache=[ordered]@{};TransportRetries=[ordered]@{};TerminalRecoveries=[ordered]@{}
         PackageFullName=$null;AppAsarSha256=$null;Classification=$null
-        Ordinary=[object[]]@();Special=[object[]]@();SpecialNeedsInspect=$false;SpecialProof=$null
+        Ordinary=[object[]]@();Special=[object[]]@();SpecialNeedsInspect=$false;SpecialProof=$null;StaleReconciliationCandidate=$null
         SessionState='Idle';BlockAutomaticActions=$false;Reason='Idle';ForceReconcile=$true;NextReconcileMilliseconds=[long]0;LastDecision=$null
         RuntimeCleanupCodes=[Collections.Generic.List[string]]::new()
     }
@@ -705,18 +712,65 @@ function New-CcodSupervisorEngineContext {
     }
 }
 
+function Get-CcodSupervisorExactVerifiedRecord {
+    param($Packages,[string]$Key)
+    if($null -eq $Packages -or $Packages -isnot [pscustomobject] -or $Key -isnot [string]){return $null}
+    foreach($property in @($Packages.PSObject.Properties)){if($property.Name -ceq $Key){return $property.Value}}
+    return $null
+}
+
+function Get-CcodSupervisorStaleReconciliationCandidate {
+    param($State,$Snapshot,$LivePackage,$Identity)
+    try{
+        if($null -eq $State -or $null -eq $Snapshot -or $null -eq $LivePackage -or $null -eq $Identity -or
+           -not(Test-CcodSupervisorExactProperties $State.Status @('schemaVersion','session')) -or $State.Status.schemaVersion -isnot [int] -or $State.Status.schemaVersion -ne 1 -or
+           -not(Test-CcodSupervisorExactProperties $State.Status.session @('supervisorPid','supervisorCreationTimeUtc','sessionId','runtimeId','sessionState','codex')) -or
+           $State.Status.session.sessionState -cne 'Active' -or $State.Status.session.sessionId -cne $Identity.SessionId.ToString([Globalization.CultureInfo]::InvariantCulture) -or
+           -not(Test-CcodSupervisorExactProperties $State.Status.session.codex @('pid','creationTimeUtc','packageFullName','packageVersion','appAsarSha256','mainPort','rendererPort','mainProbe','rendererProbe'))){return $null}
+        $codex=$State.Status.session.codex
+        if($codex.pid -isnot [int] -or $codex.pid -lt 1 -or -not(Test-CcodSupervisorCanonicalUtc $codex.creationTimeUtc) -or
+           $codex.packageFullName -isnot [string] -or [string]::IsNullOrWhiteSpace($codex.packageFullName) -or $codex.packageVersion -isnot [string] -or [string]::IsNullOrWhiteSpace($codex.packageVersion) -or
+           $codex.appAsarSha256 -isnot [string] -or $codex.appAsarSha256 -cnotmatch '^[0-9a-f]{64}$' -or $codex.mainPort -isnot [int] -or $codex.rendererPort -isnot [int] -or
+           $codex.mainPort -lt 1 -or $codex.mainPort -gt 65535 -or $codex.rendererPort -lt 1 -or $codex.rendererPort -gt 65535 -or $codex.mainPort -eq $codex.rendererPort -or
+           $codex.mainProbe -cne 'Closed' -or $codex.rendererProbe -cne 'BridgeValid'){return $null}
+        if($LivePackage.Found -isnot [bool] -or -not $LivePackage.Found -or $LivePackage.FullName -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.FullName) -or
+           $LivePackage.FamilyName -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.FamilyName) -or $LivePackage.Version -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.Version) -or
+           $LivePackage.ExecutablePath -isnot [string] -or [string]::IsNullOrWhiteSpace($LivePackage.ExecutablePath) -or
+           ($LivePackage.FullName -ceq $codex.packageFullName -and $LivePackage.Version -ceq $codex.packageVersion)){return $null}
+        $key=('{0}|{1}|{2}' -f $codex.packageFullName,$codex.appAsarSha256,$State.Status.session.runtimeId)
+        if($null -eq $State.VerifiedPackages -or -not(Test-CcodSupervisorExactProperties $State.VerifiedPackages @('schemaVersion','packages')) -or $State.VerifiedPackages.schemaVersion -isnot [int] -or $State.VerifiedPackages.schemaVersion -ne 1){return $null}
+        $record=Get-CcodSupervisorExactVerifiedRecord $State.VerifiedPackages.packages $key
+        if(-not(Test-CcodSupervisorExactProperties $record @('packageFullName','packageVersion','appAsarSha256','runtimeId','staticClassification','dynamicOutcome','probeState','confirmedAtUtc')) -or
+           $record.packageFullName -cne $codex.packageFullName -or $record.packageVersion -cne $codex.packageVersion -or $record.appAsarSha256 -cne $codex.appAsarSha256 -or
+           $record.runtimeId -cne $State.Status.session.runtimeId -or $record.staticClassification -cne 'CandidateCompatible' -or $record.dynamicOutcome -cne 'Succeeded' -or $record.probeState -cne 'Valid' -or
+           -not(Test-CcodSupervisorCanonicalUtc $record.confirmedAtUtc)){return $null}
+        if(-not(Test-CcodSupervisorExactProperties $Snapshot @('Pid','CreationTimeUtc','SessionId','UserSid','Path','PackageFamilyName','CommandLine','ParentPid','IsTopLevel','Mode','RendererPort','MainPort')) -or
+           $Snapshot.Pid -isnot [int] -or $Snapshot.Pid -ne $codex.pid -or $Snapshot.CreationTimeUtc -isnot [string] -or $Snapshot.CreationTimeUtc -cne $codex.creationTimeUtc -or
+           $Snapshot.SessionId -isnot [int] -or $Snapshot.SessionId -ne $Identity.SessionId -or $Snapshot.UserSid -isnot [string] -or $Snapshot.UserSid -cne $Identity.UserSid -or
+           $Snapshot.Path -isnot [string] -or -not $Snapshot.Path.Equals($LivePackage.ExecutablePath,[StringComparison]::OrdinalIgnoreCase) -or $Snapshot.PackageFamilyName -isnot [string] -or $Snapshot.PackageFamilyName -cne $LivePackage.FamilyName -or
+           $Snapshot.IsTopLevel -isnot [bool] -or -not $Snapshot.IsTopLevel -or $Snapshot.Mode -cne 'Unrelated' -or $Snapshot.RendererPort -isnot [int] -or $Snapshot.RendererPort -ne $codex.rendererPort -or $Snapshot.MainPort -isnot [int] -or $Snapshot.MainPort -ne $codex.mainPort){return $null}
+        return $Snapshot
+    }catch{return $null}
+}
+
 function Invoke-CcodSupervisorRefreshObservations {
     param($HostState,[hashtable]$Adapters)
     $ids=Invoke-CcodSupervisorAdapter $Adapters.EnumerateProcessIds @() 1
     if($ids -isnot [array]){throw 'process enumeration is invalid'}
-    $ordinary=[Collections.Generic.List[object]]::new();$special=[Collections.Generic.List[object]]::new()
+    $statusEvidence=if($null -ne $HostState.State -and $null -ne $HostState.State.PSObject.Properties['Status']){$HostState.State.Status}else{$null}
+    $ordinary=[Collections.Generic.List[object]]::new();$special=[Collections.Generic.List[object]]::new();$staleCandidates=[Collections.Generic.List[object]]::new();$livePackage=$null;$livePackageRead=$false
     foreach($pidValue in @($ids|Select-Object -First 256)){
         if($pidValue -isnot [int] -or $pidValue -lt 1){continue}
-        $snapshot=Invoke-CcodSupervisorNullableAdapter $Adapters.GetProcessSnapshot @([int]$pidValue)
+        $snapshot=Invoke-CcodSupervisorNullableAdapter $Adapters.GetProcessSnapshot @([int]$pidValue,$statusEvidence)
         if($null -eq $snapshot){continue}
         if($snapshot.UserSid -cne $HostState.Identity.UserSid -or $snapshot.SessionId -ne $HostState.Identity.SessionId -or -not $snapshot.IsTopLevel){continue}
         if($snapshot.Mode -ceq 'Ordinary'){$ordinary.Add($snapshot)}
         elseif($snapshot.Mode -ceq 'Special'){$special.Add([pscustomobject][ordered]@{Snapshot=$snapshot;IdentityValid=$true;ProbeValid=$false})}
+        elseif($snapshot.Mode -ceq 'Unrelated'){
+            if(-not $livePackageRead){$livePackage=Invoke-CcodSupervisorNullableAdapter $Adapters.GetPackageIdentity @();$livePackageRead=$true}
+            $candidate=Get-CcodSupervisorStaleReconciliationCandidate $HostState.State $snapshot $livePackage $HostState.Identity
+            if($null -ne $candidate){$staleCandidates.Add($candidate)}
+        }
     }
     $proofMatches=$false
     if($special.Count -eq 1 -and $null -ne $HostState.SpecialProof -and
@@ -724,6 +778,7 @@ function Invoke-CcodSupervisorRefreshObservations {
        $HostState.SpecialProof.Pid -eq $special[0].Snapshot.Pid -and $HostState.SpecialProof.CreationTimeUtc -ceq $special[0].Snapshot.CreationTimeUtc){$proofMatches=$true}
     if(-not $proofMatches){$HostState.SpecialProof=$null}
     $HostState.Ordinary=[object[]]@($ordinary);$HostState.Special=[object[]]@($special)
+    $HostState.StaleReconciliationCandidate=if($ordinary.Count -eq 0 -and $special.Count -eq 0 -and $staleCandidates.Count -eq 1){$staleCandidates[0]}else{$null}
     $HostState.SpecialNeedsInspect=$special.Count -gt 0 -and $null -eq $HostState.SpecialProof
 }
 
@@ -750,7 +805,7 @@ function Invoke-CcodSupervisorTick {
     if($null -eq $HostState.State){throw 'state read is invalid'}
     $HostState.Journal=Invoke-CcodSupervisorNullableAdapter $Adapters.ReadJournal @($HostState.Layout.TransitionPath)
     if($null -ne $HostState.Journal){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Recover' $null|Out-Null;return}
-    if($HostState.Reason -ceq 'StalePackageStatus' -and $null -ne $HostState.SpecialProof){
+    if($HostState.Reason -ceq 'StalePackageStatus' -and ($null -ne $HostState.SpecialProof -or $null -ne $HostState.StaleReconciliationCandidate)){
         $elapsed=Invoke-CcodSupervisorAdapter $Adapters.GetElapsedMilliseconds @($HostState.Clock) 1
         if(($elapsed -isnot [int] -and $elapsed -isnot [long]) -or $elapsed -lt 0){throw 'reconciliation clock is invalid'}
         if($HostState.ForceReconcile -or [long]$elapsed -ge $HostState.NextReconcileMilliseconds){
@@ -760,8 +815,12 @@ function Invoke-CcodSupervisorTick {
             while($deadline -le [long]$elapsed){$deadline+=3000}
             $HostState.NextReconcileMilliseconds=$deadline;$HostState.ForceReconcile=$false
         }
+        if($null -ne $HostState.SpecialProof -or $null -ne $HostState.StaleReconciliationCandidate){
+            if($HostState.SpecialNeedsInspect){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Inspect' $null|Out-Null;return}
+            Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters;return
+        }
+        $HostState.SessionState='Waiting';$HostState.BlockAutomaticActions=$false
         if($HostState.SpecialNeedsInspect){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Inspect' $null|Out-Null;return}
-        Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters;return
     }
     if($HostState.SpecialNeedsInspect){Start-CcodSupervisorWorkerSlot $HostState $Adapters 'Controller' 'Inspect' $null|Out-Null;return}
     $queueArgument=[object[]]::new(1);$queueArgument[0]=$HostState.CommandQueue
@@ -776,6 +835,10 @@ function Invoke-CcodSupervisorTick {
         if($deadline -le 0){$deadline=3000}
         while($deadline -le [long]$elapsed){$deadline+=3000}
         $HostState.NextReconcileMilliseconds=$deadline;$HostState.ForceReconcile=$false
+    }
+    if($null -ne $HostState.StaleReconciliationCandidate){
+        $HostState.SessionState='Error';$HostState.BlockAutomaticActions=$true;$HostState.Reason='StalePackageStatus'
+        Set-CcodSupervisorCurrentTrayPresentation $HostState $Adapters;return
     }
     $context=New-CcodSupervisorEngineContext $HostState
     $decision=Invoke-CcodSupervisorAdapter $Adapters.GetSupervisorDecision @($context) 1

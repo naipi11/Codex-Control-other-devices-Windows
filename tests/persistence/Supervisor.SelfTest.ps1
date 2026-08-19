@@ -3,12 +3,16 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $supervisorPath = Join-Path $repositoryRoot 'src\persistence\Supervisor.ps1'
 $localizationPath = Join-Path $repositoryRoot 'src\persistence\modules\UiLocalization.psm1'
+$processControlPath = Join-Path $repositoryRoot 'src\persistence\modules\ProcessControl.psm1'
+$supervisorEnginePath = Join-Path $repositoryRoot 'src\persistence\modules\SupervisorEngine.psm1'
 $resourcesRoot = Join-Path $repositoryRoot 'src\persistence\resources'
 if (-not [IO.File]::Exists($supervisorPath)) {
     throw 'CCOD_TEST_SUPERVISOR_CONTRACT_MISSING'
 }
 
 Import-Module $localizationPath -Force
+Import-Module $processControlPath -Force
+Import-Module $supervisorEnginePath -Force
 $script:TestSystemCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode System -SystemCultureName zh-CN
 $script:TestChineseCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode zh-CN -SystemCultureName zh-CN
 $script:TestEnglishCatalog=Get-CcodUiCatalog -ResourcesRoot $resourcesRoot -LanguageMode en-US -SystemCultureName zh-CN
@@ -611,6 +615,68 @@ Invoke-CcodTest 'bounds stale-package special reconciliation to one live process
     Assert-CcodTrue ($world.Calls.Contains('Start:Controller:Inspect')) 'changed identity re-enters normal current-package validation'
     Assert-CcodEqual $stateBefore ($hostState.State|ConvertTo-Json -Depth 20 -Compress) 'changed identity recovery does not clear persisted state'
     Assert-CcodEqual $attemptsBefore ($hostState.AttemptKeys|ConvertTo-Json -Compress) 'changed identity recovery does not clear key membership'
+}
+
+Invoke-CcodTest 'uses a constrained stale reconciliation candidate without elevating unproven debug processes' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $live=[pscustomobject][ordered]@{Found=$true;FullName='OpenAI.Codex_2.0.0.0_x64__2p2nqsd0c76g0';FamilyName='OpenAI.Codex_2p2nqsd0c76g0';Version='2.0.0.0';ExecutablePath='C:\Codex\ChatGPT.exe'}
+    $definitions=[ordered]@{}
+    $definitions['201']=[pscustomobject][ordered]@{Pid=[int]201;CreationTimeUtc='2030-02-03T03:02:00.0000000Z';CommandLine='"C:\Codex\ChatGPT.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=41001 --inspect=127.0.0.1:41002';Arguments=@('C:\Codex\ChatGPT.exe','--remote-debugging-address=127.0.0.1','--remote-debugging-port=41001','--inspect=127.0.0.1:41002')}
+    $definitions['333']=[pscustomobject][ordered]@{Pid=[int]333;CreationTimeUtc='2030-02-03T03:02:30.0000000Z';CommandLine='"C:\Codex\ChatGPT.exe" --inspect=127.0.0.1:49999';Arguments=@('C:\Codex\ChatGPT.exe','--inspect=127.0.0.1:49999')}
+    $snapshotAdapters=@{
+        GetPackageIdentity={$live}.GetNewClosure()
+        GetCurrentSessionId={[int]1}
+        GetCurrentUserSid={'S-1-5-21-111-222-333-1001'}
+        GetNativeProcess={param($ProcessId)$entry=$definitions[[string][int]$ProcessId];if($null -eq $entry){return $null};[pscustomobject][ordered]@{Pid=[int]$entry.Pid;CreationTimeUtc=[string]$entry.CreationTimeUtc;SessionId=[int]1;UserSid='S-1-5-21-111-222-333-1001';Path=$live.ExecutablePath;PackageFamilyName=$live.FamilyName}}.GetNewClosure()
+        GetCimProcess={param($ProcessId)$entry=$definitions[[string][int]$ProcessId];if($null -eq $entry){return $null};[pscustomobject][ordered]@{ProcessId=[int]$entry.Pid;ParentProcessId=[int]0;CommandLine=[string]$entry.CommandLine}}.GetNewClosure()
+        ParseCommandLine={param($CommandLine)foreach($entry in @($definitions.Values)){if($entry.CommandLine -ceq $CommandLine){return @($entry.Arguments)}};return $null}.GetNewClosure()
+        ProbeSpecial={param($ProcessId,$RendererPort,$MainPort)[pscustomobject][ordered]@{Valid=$true;RendererUrl='app://-/index.html'}}
+    }
+    $codex=[pscustomobject][ordered]@{pid=[int]201;creationTimeUtc='2030-02-03T03:02:00.0000000Z';packageFullName='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0';packageVersion='1.0.0.0';appAsarSha256=('a'*64);mainPort=[int]41002;rendererPort=[int]41001;mainProbe='Closed';rendererProbe='BridgeValid'}
+    $status=[pscustomobject][ordered]@{schemaVersion=[int]1;session=[pscustomobject][ordered]@{supervisorPid=[int]41;supervisorCreationTimeUtc='2030-02-03T03:00:00.0000000Z';sessionId='1';runtimeId='runtime-old';sessionState='Active';codex=$codex}}
+    $key='OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0|'+('a'*64)+'|runtime-old'
+    $record=[pscustomobject][ordered]@{packageFullName=$codex.packageFullName;packageVersion=$codex.packageVersion;appAsarSha256=$codex.appAsarSha256;runtimeId='runtime-old';staticClassification='CandidateCompatible';dynamicOutcome='Succeeded';probeState='Valid';confirmedAtUtc='2030-02-03T03:01:00.0000000Z'}
+    $state=[pscustomobject][ordered]@{AutomationEnabled=$true;AutomaticCandidateTrialsAllowed=$false;Settings=[pscustomobject][ordered]@{candidateCompatibleOptIn=$true};Status=$status;VerifiedPackages=[pscustomobject][ordered]@{schemaVersion=[int]1;packages=[pscustomobject][ordered]@{$key=$record}};Damage=[pscustomobject]@{}}
+    $stateBefore=$state|ConvertTo-Json -Depth 20 -Compress
+    $hostState.AttemptKeys['preserved-attempt']=$true;$hostState.RecoveryIgnoreKeys['preserved-ignore']=$true;$hostState.SuppressionKeys['preserved-suppression']=$true
+    $keysBefore=($hostState.AttemptKeys|ConvertTo-Json -Compress)+($hostState.RecoveryIgnoreKeys|ConvertTo-Json -Compress)+($hostState.SuppressionKeys|ConvertTo-Json -Compress)
+    $seenStatusEvidence=[Collections.Generic.List[object]]::new()
+    $fixture.Fake.Adapters.ReadState={param($StateRoot,$SuppressionKey)$state}.GetNewClosure()
+    $fixture.Fake.Adapters.GetPackageIdentity={$live}.GetNewClosure()
+    $fixture.Fake.Adapters.GetProcessSnapshot={param($ProcessId,$StatusEvidence)$world.Calls.Add("Snapshot:$ProcessId");$seenStatusEvidence.Add($StatusEvidence);Get-CcodProcessSnapshot -ProcessId ([int]$ProcessId) -StatusEvidence $StatusEvidence -Adapters $snapshotAdapters}.GetNewClosure()
+    $fixture.Fake.Adapters.GetSupervisorDecision={param($Context)$world.Calls.Add('Decision');Get-CcodSupervisorDecision -Context $Context}.GetNewClosure()
+    $unproven=Get-CcodProcessSnapshot -ProcessId 201 -StatusEvidence $status -Adapters $snapshotAdapters
+    $arbitrary=Get-CcodProcessSnapshot -ProcessId 333 -StatusEvidence $status -Adapters $snapshotAdapters
+    Assert-CcodEqual 'Unrelated' $unproven.Mode 'stale package proof never elevates an exact debug launch to Special'
+    Assert-CcodEqual 'Unrelated' $arbitrary.Mode 'arbitrary debug arguments are never elevated to Special'
+    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $state $arbitrary $live $hostState.Identity) 'arbitrary debug arguments never become a stale candidate'
+    $unverifiedState=$state|ConvertTo-Json -Depth 20|ConvertFrom-Json
+    $unverifiedState.VerifiedPackages=[pscustomobject][ordered]@{schemaVersion=[int]1;packages=[pscustomobject]@{}}
+    Assert-CcodEqual $null (Get-CcodSupervisorStaleReconciliationCandidate $unverifiedState $unproven $live $hostState.Identity) 'stale candidate requires exact successful prior verification'
+
+    $world.Calls.Clear();$world.ProcessIds=@(201,333);$hostState.ForceReconcile=$true
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodTrue (@($seenStatusEvidence|Where-Object{[object]::ReferenceEquals($_,$status)}).Count -eq 2) 'refresh passes persisted status evidence through the production snapshot call shape'
+    Assert-CcodEqual 0 @($hostState.Special).Count 'unproven debug processes remain outside the Special set'
+    Assert-CcodEqual 'StalePackageStatus' $hostState.Reason 'one constrained stale candidate produces the fixed reason'
+    $candidateProperty=$hostState.PSObject.Properties['StaleReconciliationCandidate']
+    Assert-CcodTrue ($null -ne $candidateProperty -and $null -ne $candidateProperty.Value -and $candidateProperty.Value.Pid -eq 201) 'candidate binds only the exact prior verified process identity'
+    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'candidate diagnosis starts no controller worker'
+
+    $world.Calls.Clear();$seenStatusEvidence.Clear();$hostState.ForceReconcile=$true
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Start:*'}).Count 'same constrained candidate cannot cause unbounded Inspect'
+
+    [void]$definitions.Remove('201')
+    $definitions['202']=[pscustomobject][ordered]@{Pid=[int]202;CreationTimeUtc='2030-02-03T03:03:00.0000000Z';CommandLine='"C:\Codex\ChatGPT.exe"';Arguments=@('C:\Codex\ChatGPT.exe')}
+    $world.Calls.Clear();$world.ProcessIds=@(202,333);$hostState.ForceReconcile=$true
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters
+    Assert-CcodTrue ($null -eq $candidateProperty.Value) 'changed PID and creation time clear the stale candidate'
+    Assert-CcodTrue ($world.Calls.Contains('Start:StaticProbe:StaticProbe')) 'changed current ordinary identity enters existing static validation'
+    Assert-CcodEqual $stateBefore ($state|ConvertTo-Json -Depth 20 -Compress) 'candidate reconciliation does not clear persisted state'
+    $keysAfter=($hostState.AttemptKeys|ConvertTo-Json -Compress)+($hostState.RecoveryIgnoreKeys|ConvertTo-Json -Compress)+($hostState.SuppressionKeys|ConvertTo-Json -Compress)
+    Assert-CcodEqual $keysBefore $keysAfter 'candidate reconciliation does not clear key or authorization membership'
+    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -eq 'Manual:Clear'}).Count 'candidate reconciliation never clears failed package records'
 }
 
 Invoke-CcodTest 'processes at most one command before reducer decisions' {
