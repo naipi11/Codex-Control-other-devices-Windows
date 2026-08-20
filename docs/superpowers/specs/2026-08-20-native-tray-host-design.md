@@ -318,7 +318,7 @@ Upgrade sequence remains serialized by the existing account-transition lease. Th
 
 The release version is 2.4.1. This avoids ambiguity with the unpushed but locally installed 2.4.0 experiment. The rejected local `NotifyIcon.ContextMenu` commit is superseded; its UI code is not included in the generated runtime.
 
-Release workflow order is:
+Candidate workflow order is:
 
 1. checkout, Node 22 setup, and locked net48 reference-pack restore;
 2. install Inno Setup;
@@ -328,8 +328,9 @@ Release workflow order is:
 6. silently install with `/DONOTSTART=1` on the hosted runner;
 7. run `Validate.ps1 -SkipInstalledPackageCheck`, headless TrayHost/IPC smoke tests, and verify EXE/config/provenance hashes against the installed runtime manifest without requiring Codex MSIX, Explorer, or an interactive notification area;
 8. silently uninstall and verify no Host, Supervisor, task, or installer-owned shortcut remains;
-9. upload installer, checksum, and provenance JSON explicitly;
-10. create the GitHub Release only after every earlier gate succeeds.
+9. upload installer, checksum, and provenance JSON as one immutable candidate artifact.
+
+The target machine downloads and installs that exact Actions artifact and records its run ID, source commit, and hashes. Only after the full notification-area/Microsoft Pinyin/Codex/device-key acceptance gate and explicit user confirmation does a separate promotion workflow accept `tag` plus `candidate_run_id`, download the same artifact, verify that provenance commit equals the tag target, verify every hash, and create the Release. Promotion contains no compiler, package build, or Inno step. The acceptance report is committed after Release promotion so it cannot change the tagged candidate commit.
 
 Hosted-runner validation is described only as structural and headless integration. Real notification-area, Microsoft Pinyin, Codex Remote, and device-key validation remains the current-machine gate.
 
