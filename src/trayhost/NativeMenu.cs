@@ -1,0 +1,114 @@
+using System;
+using System.Collections.Generic;
+
+internal sealed class NativeMenu : IDisposable
+{
+    private readonly INativeTrayPlatform _native;
+    private readonly PresentationSnapshot _snapshot;
+    private readonly IntPtr _owner;
+    private IntPtr _menu;
+    private bool _destroyed;
+
+    internal NativeMenu(INativeTrayPlatform native, IntPtr owner, PresentationSnapshot snapshot)
+    {
+        if (native == null) { throw new ArgumentNullException("native"); }
+        _native = native;
+        _owner = owner;
+        if (snapshot == null) { throw new ArgumentNullException("snapshot"); }
+        _snapshot = snapshot;
+    }
+
+    internal uint Show(TrayPoint point)
+    {
+        Build();
+        try
+        {
+            if (!_native.SetForegroundWindow(_owner) || _native.GetForegroundWindow() != _owner) { return 0U; }
+            uint flags = TrayNativeConstants.TpmReturnCmd | TrayNativeConstants.TpmRightButton | TrayNativeConstants.TpmNoNotify;
+            return _native.TrackPopupMenuEx(_menu, flags, point.X, point.Y, _owner, IntPtr.Zero);
+        }
+        finally
+        {
+            _native.PostMessage(_owner, TrayNativeConstants.WmNull, UIntPtr.Zero, IntPtr.Zero);
+            TrayIconData focusData = new TrayIconData();
+            focusData.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(typeof(TrayIconData));
+            focusData.hWnd = _owner;
+            focusData.uID = 1U;
+            _native.SetNotificationFocus(ref focusData);
+            Dispose();
+        }
+    }
+
+    private void Build()
+    {
+        if (_menu != IntPtr.Zero) { return; }
+        _menu = _native.CreatePopupMenu();
+        if (_menu == IntPtr.Zero) { throw new InvalidOperationException("CreatePopupMenu failed"); }
+        try
+        {
+            Append(_menu, TrayNativeConstants.MfString | TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed, 0U, 0);
+            Append(_menu, TrayNativeConstants.MfString | TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed, 0U, 1);
+            Append(_menu, TrayNativeConstants.MfString, 0U, 2);
+            Append(_menu, TrayNativeConstants.MfString | Enabled(3), (uint)TrayCommand.ApplyNow, 3);
+            Append(_menu, TrayNativeConstants.MfString | Enabled(4), (uint)TrayCommand.ManualRetry, 4);
+            Append(_menu, TrayNativeConstants.MfString | Enabled(5) | Checked(5), (uint)TrayCommand.SetAutomation, 5);
+            Append(_menu, TrayNativeConstants.MfString | Enabled(6) | Checked(6), (uint)TrayCommand.SetCandidateOptIn, 6);
+
+            IntPtr language = _native.CreateSubMenu();
+            if (language == IntPtr.Zero) { throw new InvalidOperationException("CreateLanguageMenu failed"); }
+            if (!_native.AppendSubMenu(_menu, language, _snapshot.Strings[7])) { throw new InvalidOperationException("AppendLanguageMenu failed"); }
+            Append(language, TrayNativeConstants.MfString | LanguageChecked(LanguageMode.System), (uint)TrayCommand.SetLanguageSystem, 8);
+            Append(language, TrayNativeConstants.MfString | LanguageChecked(LanguageMode.Chinese), (uint)TrayCommand.SetLanguageChinese, 9);
+            Append(language, TrayNativeConstants.MfString | LanguageChecked(LanguageMode.English), (uint)TrayCommand.SetLanguageEnglish, 10);
+
+            Append(_menu, TrayNativeConstants.MfString | Enabled(11), (uint)TrayCommand.OpenLogs, 11);
+            IntPtr uninstall = _native.CreateSubMenu();
+            if (uninstall == IntPtr.Zero) { throw new InvalidOperationException("CreateUninstallMenu failed"); }
+            if (!_native.AppendSubMenu(_menu, uninstall, _snapshot.Strings[12])) { throw new InvalidOperationException("AppendUninstallMenu failed"); }
+            Append(uninstall, TrayNativeConstants.MfString | TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed, 0U, 13);
+            Append(uninstall, TrayNativeConstants.MfString | (Has(PresentationFlags.UninstallEnabled) ? 0U : TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed), (uint)TrayCommand.ConfirmUninstall, 14);
+            Append(_menu, TrayNativeConstants.MfString | TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed, 0U, 15);
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+    }
+
+    private uint Enabled(int stringIndex)
+    {
+        if (stringIndex == 3) { return Has(PresentationFlags.ApplyNowEnabled) ? 0U : TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed; }
+        if (stringIndex == 4) { return Has(PresentationFlags.ManualRetryEnabled) ? 0U : TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed; }
+        if (stringIndex == 5) { return Has(PresentationFlags.AutomationToggleEnabled) ? 0U : TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed; }
+        if (stringIndex == 6) { return Has(PresentationFlags.CandidateOptInToggleEnabled) ? 0U : TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed; }
+        if (stringIndex == 11) { return Has(PresentationFlags.OpenLogsEnabled) ? 0U : TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed; }
+        return 0U;
+    }
+
+    private uint Checked(int stringIndex)
+    {
+        if (stringIndex == 5) { return Has(PresentationFlags.AutomationChecked) ? TrayNativeConstants.MfChecked : 0U; }
+        if (stringIndex == 6) { return Has(PresentationFlags.CandidateOptInChecked) ? TrayNativeConstants.MfChecked : 0U; }
+        return 0U;
+    }
+
+    private uint LanguageChecked(LanguageMode mode)
+    {
+        return _snapshot.Language == mode ? TrayNativeConstants.MfChecked : 0U;
+    }
+
+    private bool Has(PresentationFlags flag) { return (_snapshot.Flags & flag) == flag; }
+
+    private void Append(IntPtr menu, uint flags, uint command, int stringIndex)
+    {
+        if (!_native.AppendMenu(menu, flags, new UIntPtr(command), _snapshot.Strings[stringIndex])) { throw new InvalidOperationException("AppendMenu failed"); }
+    }
+
+    public void Dispose()
+    {
+        if (_destroyed) { return; }
+        _destroyed = true;
+        if (_menu != IntPtr.Zero) { _native.DestroyMenu(_menu); _menu = IntPtr.Zero; }
+    }
+}
