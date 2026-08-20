@@ -435,7 +435,7 @@ function Get-CcodTrayDefaultAdapters {
             }.GetNewClosure()
             $dispatcher=$Object.Dispatcher
             if($null -eq $dispatcher -or $dispatcher.HasShutdownStarted -or $dispatcher.HasShutdownFinished){throw 'WPF dispatcher is unavailable'}
-            if($dispatcher.CheckAccess()){& $showOrHide}else{[void]$dispatcher.Invoke($showOrHide)}
+            if($dispatcher.CheckAccess()){$showOrHide.Invoke()}else{[void]$dispatcher.Invoke($showOrHide)}
             return
         }
         if($Object -is [Windows.UIElement]){$Object.Visibility=if([bool]$Visible){[Windows.Visibility]::Visible}else{[Windows.Visibility]::Collapsed};return}

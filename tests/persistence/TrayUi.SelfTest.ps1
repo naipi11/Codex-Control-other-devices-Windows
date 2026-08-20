@@ -428,6 +428,18 @@ $results.Add((Invoke-CcodTest 'real STA dispatcher post returns an accepted sche
     }finally{if($null -ne $menu){& $production.DisposeUiObject $menu}}
 }))
 
+$results.Add((Invoke-CcodTest 'real STA same-thread visibility invokes the WPF action instead of treating System.Action as a command' {
+    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
+    $menu=$null
+    try{
+        $menu=& $production.CreateUiObject 'Menu' 'TrayMenu'
+        & $production.SetUiVisible $menu $true
+        Assert-CcodEqual $true $menu.IsVisible 'same-thread visibility opens the real WPF window under Windows PowerShell 5.1'
+        & $production.SetUiVisible $menu $false
+        Assert-CcodEqual $false $menu.IsVisible 'same-thread visibility hides the reusable real WPF window'
+    }finally{if($null -ne $menu){& $production.DisposeUiObject $menu}}
+}))
+
 $results.Add((Invoke-CcodTest 'modeled shell right-click ordering defers WPF and never preempts it with a native menu' {
     $fake=New-CcodTrayFakeAdapters;$context=$null
     try{
@@ -1421,6 +1433,44 @@ $results.Add((Invoke-CcodTest 'keeps production defaults lazy and the Task10C2 A
         Assert-CcodEqual 0 @($commands|Where-Object {$_ -ceq $forbidden}).Count "$forbidden is absent from Task10C2 AST"
     }
     Assert-CcodTrue ((Get-Content -LiteralPath $modulePath -Raw).Contains('Register-WmiEvent -Class $ClassName')) 'production Trace default remains lazy source text only'
+}))
+
+$results.Add((Invoke-CcodTest 'real STA WinForms loop opens the WPF card without entering native fallback' {
+    $fallback=[pscustomobject]@{Count=0}
+    $outcome=[pscustomobject]@{IsPopupOpen=$false;WpfVisible=$false;CallbackFailure=$true;Scheduled=$true}
+    $context=$null;$trigger=$null;$finish=$null
+    try{
+        $context=TrayUi\New-CcodTrayContext -CommandQueue ([Collections.Concurrent.ConcurrentQueue[object]]::new()) -OnTick {} `
+            -Catalog $script:TestChineseCatalog -LanguageMode 'zh-CN' -SystemCultureName 'zh-CN' -Adapters @{
+                ShowNativeMenu={param($Menu)$fallback.Count++}.GetNewClosure()
+            }
+        $trigger=[Windows.Forms.Timer]::new();$trigger.Interval=100
+        $trigger.add_Tick({
+            $trigger.Stop()
+            $attachment=@($context.Callbacks|Where-Object {$_.EventName -ceq 'MouseUp'})[0]
+            $args=[Windows.Forms.MouseEventArgs]::new([Windows.Forms.MouseButtons]::Right,1,0,0,0)
+            $attachment.Handler.Invoke($context.NotifyIcon,$args)
+        }.GetNewClosure())
+        $finish=[Windows.Forms.Timer]::new();$finish.Interval=900
+        $finish.add_Tick({
+            $finish.Stop()
+            $outcome.IsPopupOpen=[bool]$context.IsPopupOpen
+            $outcome.WpfVisible=[bool]$context.Menu.IsVisible
+            $outcome.CallbackFailure=[bool]$context.CallbackFailure
+            $outcome.Scheduled=[bool]$context.PopupShowScheduled
+            $context.ApplicationContext.ExitThread()
+        }.GetNewClosure())
+        $trigger.Start();$finish.Start()
+        [Windows.Forms.Application]::Run($context.ApplicationContext)
+        Assert-CcodEqual $true $outcome.IsPopupOpen 'the production NotifyIcon callback opens the WPF card inside the real WinForms message loop'
+        Assert-CcodEqual $true $outcome.WpfVisible 'the production WPF window is actually visible after the dispatcher turn'
+        Assert-CcodEqual $false $outcome.CallbackFailure 'the production path records no callback failure'
+        Assert-CcodEqual $false $outcome.Scheduled 'the production dispatcher request is consumed exactly once'
+        Assert-CcodEqual 0 $fallback.Count 'the successful production WPF path never enters native fallback'
+    }finally{
+        foreach($timer in @($trigger,$finish)){if($null -ne $timer){try{$timer.Stop()}catch{};try{$timer.Dispose()}catch{}}}
+        if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}
+    }
 }))
 
 $results.Add((Invoke-CcodTest 'real WPF toggles keep verified truth when the command cannot enter the queue' {
