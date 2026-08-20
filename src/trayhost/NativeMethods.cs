@@ -31,6 +31,8 @@ internal static class TrayNativeConstants
     internal const uint NifTip = 0x00000004;
     internal const uint SwpNoActivate = 0x0010;
     internal const int IdiApplication = 32512;
+    internal const uint ImageIcon = 1;
+    internal const uint LrDefaultSize = 0x00000040;
 }
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -71,6 +73,8 @@ internal interface INativeTrayPlatform
     IntPtr AssociateOwnerInputContext(IntPtr owner, IntPtr context);
     IntPtr GetOwnerInputContext(IntPtr owner);
     bool ReleaseInputContext(IntPtr owner, IntPtr context);
+    IntPtr LoadIcon();
+    bool DestroyIcon(IntPtr icon);
     bool AddIcon(ref TrayIconData icon);
     bool SetIconVersion(ref TrayIconData icon);
     bool DeleteIcon(ref TrayIconData icon);
@@ -124,6 +128,15 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     public IntPtr AssociateOwnerInputContext(IntPtr owner, IntPtr context) { return ImmAssociateContext(owner, context); }
     public IntPtr GetOwnerInputContext(IntPtr owner) { return ImmGetContext(owner); }
     public bool ReleaseInputContext(IntPtr owner, IntPtr context) { return ImmReleaseContext(owner, context); }
+    public IntPtr LoadIcon()
+    {
+        IntPtr instance = GetModuleHandleW(null);
+        IntPtr icon = LoadImageW(instance, new IntPtr(TrayNativeConstants.IdiApplication), TrayNativeConstants.ImageIcon, 0, 0, TrayNativeConstants.LrDefaultSize);
+        if (icon == IntPtr.Zero) { icon = LoadIconW(instance, new IntPtr(TrayNativeConstants.IdiApplication)); }
+        if (icon == IntPtr.Zero) { icon = LoadIconW(IntPtr.Zero, new IntPtr(TrayNativeConstants.IdiApplication)); }
+        return icon;
+    }
+    public bool DestroyIcon(IntPtr icon) { return icon == IntPtr.Zero || DestroyIconNative(icon); }
 
     public bool AddIcon(ref TrayIconData icon) { return Shell_NotifyIconW(TrayNativeConstants.NimAdd, ref icon); }
     public bool SetIconVersion(ref TrayIconData icon)
@@ -220,6 +233,9 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     [DllImport("imm32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ImmReleaseContext(IntPtr window, IntPtr context);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool Shell_NotifyIconW(uint message, ref TrayIconData data);
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr CreatePopupMenuNative();
+    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr LoadImageW(IntPtr instance, IntPtr name, uint type, int width, int height, uint flags);
+    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr LoadIconW(IntPtr instance, IntPtr name);
+    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyIconNative(IntPtr icon);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AppendMenuW(IntPtr menu, uint flags, UIntPtr newItem, string text);
     [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetForegroundWindowNative(IntPtr window);
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr GetForegroundWindowNative();

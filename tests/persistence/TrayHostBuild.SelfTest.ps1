@@ -38,18 +38,28 @@ Invoke-CcodTest 'TrayHost build emits one source-auditable artifact and rejects 
     Import-Module $modulePath -Force
     $artifact=Join-Path $env:TEMP ('ccod-trayhost-artifact-'+[Guid]::NewGuid().ToString('N'))
     try{
-        $result=Invoke-CcodTrayHostBuild -RepositoryRoot $repositoryRoot -Version '2.4.1' -OutputDirectory $artifact
+        $result=Invoke-CcodTrayHostBuild -RepositoryRoot $repositoryRoot -Version '2.4.2' -OutputDirectory $artifact
         Assert-CcodTrue (Test-Path -LiteralPath (Join-Path $artifact 'CodexRemote.TrayHost.exe') -PathType Leaf) 'TrayHost executable exists'
         Assert-CcodTrue (Test-Path -LiteralPath (Join-Path $artifact 'CodexRemote.TrayHost.exe.config') -PathType Leaf) 'TrayHost config exists'
         Assert-CcodTrue (Test-Path -LiteralPath (Join-Path $artifact 'trayhost-build-provenance.json') -PathType Leaf) 'TrayHost provenance exists'
         $provenance=Get-Content -LiteralPath (Join-Path $artifact 'trayhost-build-provenance.json') -Raw|ConvertFrom-Json
-        Assert-CcodEqual '2.4.1' ([string]$provenance.version) 'provenance version is exact'
+        Assert-CcodEqual '2.4.2' ([string]$provenance.version) 'provenance version is exact'
+        $icon=Join-Path $repositoryRoot 'assets\codexremote-fix\codexremote-fix.ico'
+        Assert-CcodTrue (Test-Path -LiteralPath $icon -PathType Leaf) 'TrayHost product ICO exists'
+        $iconSha=[Security.Cryptography.SHA256]::Create();try{$iconHash=([BitConverter]::ToString($iconSha.ComputeHash([IO.File]::ReadAllBytes($icon)))).Replace('-','').ToLowerInvariant()}finally{$iconSha.Dispose()}
+        Assert-CcodEqual $iconHash ([string]$provenance.iconSha256) 'provenance records the embedded product ICO hash'
         Assert-CcodTrue (@($provenance.sourceFiles).Count -ge 10) 'provenance includes every TrayHost source'
         Assert-CcodTrue (-not ([string]$provenance|Select-String -Pattern '[A-Za-z]:\\|\\\\' -Quiet)) 'provenance does not leak absolute paths'
         $tampered=Join-Path $artifact 'CodexRemote.TrayHost.exe.config'; Add-Content -LiteralPath $tampered -Value 'x'
-        $threw=$false; try{Test-CcodTrayHostArtifact -RepositoryRoot $repositoryRoot -Version '2.4.1' -ArtifactDirectory $artifact|Out-Null}catch{$threw=$true}
+        $threw=$false; try{Test-CcodTrayHostArtifact -RepositoryRoot $repositoryRoot -Version '2.4.2' -ArtifactDirectory $artifact|Out-Null}catch{$threw=$true}
         Assert-CcodTrue $threw 'tampered artifact is rejected'
     }finally{if(Test-Path -LiteralPath $artifact){Remove-Item -LiteralPath $artifact -Recurse -Force -ErrorAction SilentlyContinue}}
+}
+
+Invoke-CcodTest 'TrayHost build embeds the product ICO instead of relying on a runtime path' {
+    $build=Get-Content -LiteralPath (Join-Path $repositoryRoot 'build\TrayHostBuild.psm1') -Raw
+    Assert-CcodTrue ($build -match 'win32icon') 'TrayHost compiler embeds an ICO'
+    Assert-CcodTrue ($build -match 'codexremote-fix\.ico') 'TrayHost compiler uses the product ICO'
 }
 
 Write-Host 'TrayHost build self-tests passed.'

@@ -103,6 +103,8 @@ internal sealed class TrayWindow : IDisposable
         TrayIconData icon = new TrayIconData();
         icon.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(typeof(TrayIconData));
         icon.hWnd = owner;
+        icon.hIcon = _native.LoadIcon();
+        if (icon.hIcon == IntPtr.Zero) { throw new InvalidOperationException("tray icon resource could not be loaded"); }
         icon.uID = 1U;
         icon.uFlags = TrayNativeConstants.NifMessage | TrayNativeConstants.NifIcon | TrayNativeConstants.NifTip;
         icon.uCallbackMessage = TrayNativeConstants.WmApp + 1U;
@@ -118,6 +120,7 @@ internal sealed class TrayWindow : IDisposable
         _disposed = true;
         try { if (_menuOpen) { _native.EndMenu(); } } catch { }
         try { if (_created) { _native.DeleteIcon(ref _icon); } } catch { }
+        try { if (_icon.hIcon != IntPtr.Zero) { _native.DestroyIcon(_icon.hIcon); _icon.hIcon = IntPtr.Zero; } } catch { }
         try { if (_inputGuard != null) { _inputGuard.RestoreOwnerDefaultContext(_owner); } } catch { }
         try { if (_owner != IntPtr.Zero) { _native.DestroyOwner(_owner); } } catch { }
         _owner = IntPtr.Zero;

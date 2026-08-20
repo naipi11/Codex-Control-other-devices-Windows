@@ -8,6 +8,7 @@ internal sealed class FakeTrayPlatform : INativeTrayPlatform
     internal bool ForegroundProof = true;
     internal IntPtr OwnerInputContext = IntPtr.Zero;
     internal uint TrackResult;
+    internal bool SawNonzeroIcon;
     internal Action DuringTrack;
     internal int TrackCalls;
 
@@ -15,7 +16,9 @@ internal sealed class FakeTrayPlatform : INativeTrayPlatform
     public IntPtr AssociateOwnerInputContext(IntPtr owner, IntPtr context) { Calls.Add(context == IntPtr.Zero ? "Associate:null" : "Associate:restore"); return new IntPtr(20); }
     public IntPtr GetOwnerInputContext(IntPtr owner) { Calls.Add("GetContext"); return OwnerInputContext; }
     public bool ReleaseInputContext(IntPtr owner, IntPtr context) { Calls.Add("ReleaseContext"); return true; }
-    public bool AddIcon(ref TrayIconData icon) { Calls.Add("NIM_ADD"); return true; }
+    public IntPtr LoadIcon() { Calls.Add("LoadIcon"); return new IntPtr(40); }
+    public bool DestroyIcon(IntPtr icon) { Calls.Add("DestroyIcon"); return true; }
+    public bool AddIcon(ref TrayIconData icon) { SawNonzeroIcon = icon.hIcon != IntPtr.Zero; Calls.Add("NIM_ADD"); return true; }
     public bool SetIconVersion(ref TrayIconData icon) { Calls.Add("NIM_SETVERSION"); return true; }
     public bool DeleteIcon(ref TrayIconData icon) { Calls.Add("NIM_DELETE"); return true; }
     public IntPtr CreatePopupMenu() { Calls.Add("CreateMenu"); return new IntPtr(30); }
@@ -60,7 +63,8 @@ internal static class TrayHostNativeSelfTest
         TrayWindow window = NewWindow(platform);
         platform.TrackResult = 0;
         AssertTrue(window.HandleContextMenu(new TrayPoint(10, 20)) == 0, "cancel returns zero");
-        AssertEqual("CreateOwner|Associate:null|GetContext|NIM_ADD|NIM_SETVERSION|GetContext|GetContext|CreateMenu|Append:s0|Append:s1|Append:s2|Append:s3|Append:s4|Append:s5|Append:s6|SubMenu:s7|Append:s8|Append:s9|Append:s10|Append:s11|SubMenu:s12|Append:s13|Append:s14|Append:s15|SetForeground|GetForeground|Track|WM_NULL|NIM_SETFOCUS|DestroyMenu", String.Join("|", platform.Calls.ToArray()), "native menu order is exact");
+        AssertTrue(platform.SawNonzeroIcon, "NIM_ADD receives a valid HICON");
+        AssertEqual("CreateOwner|Associate:null|GetContext|LoadIcon|NIM_ADD|NIM_SETVERSION|GetContext|GetContext|CreateMenu|Append:s0|Append:s1|Append:s2|Append:s3|Append:s4|Append:s5|Append:s6|SubMenu:s7|Append:s8|Append:s9|Append:s10|Append:s11|SubMenu:s12|Append:s13|Append:s14|Append:s15|SetForeground|GetForeground|Track|WM_NULL|NIM_SETFOCUS|DestroyMenu", String.Join("|", platform.Calls.ToArray()), "native menu order is exact");
         window.Dispose();
     }
 

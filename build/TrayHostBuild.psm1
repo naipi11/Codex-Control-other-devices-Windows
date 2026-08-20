@@ -29,8 +29,8 @@ function Invoke-CcodTrayHostBuild {
     )
     if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'CCOD_TRAYHOST_VERSION_INVALID'}
     $repo=[IO.Path]::GetFullPath($RepositoryRoot);$out=[IO.Path]::GetFullPath($OutputDirectory);Test-CcodTrayHostOutputDirectory $out
-    $sourceRoot=Join-Path $repo 'src\trayhost';$manifest=Join-Path $sourceRoot 'CodexRemote.TrayHost.manifest';$config=Join-Path $sourceRoot 'CodexRemote.TrayHost.exe.config'
-    foreach($required in @($manifest,$config)){if(-not(Test-Path -LiteralPath $required -PathType Leaf)){throw 'CCOD_TRAYHOST_SOURCE_MISSING'}}
+    $sourceRoot=Join-Path $repo 'src\trayhost';$manifest=Join-Path $sourceRoot 'CodexRemote.TrayHost.manifest';$config=Join-Path $sourceRoot 'CodexRemote.TrayHost.exe.config';$icon=Join-Path $repo 'assets\codexremote-fix\codexremote-fix.ico'
+    foreach($required in @($manifest,$config,$icon)){if(-not(Test-Path -LiteralPath $required -PathType Leaf)){throw 'CCOD_TRAYHOST_SOURCE_MISSING'}}
     $sources=@(Get-ChildItem -LiteralPath $sourceRoot -Filter '*.cs' -File|Sort-Object Name)
     if($sources.Count -lt 10){throw 'CCOD_TRAYHOST_SOURCE_INCOMPLETE'}
     $sourceRecords=@($sources|ForEach-Object{[ordered]@{name=$_.Name;sha256=(Get-CcodTrayHostHash $_.FullName)}})
@@ -39,7 +39,7 @@ function Invoke-CcodTrayHostBuild {
     $compiler=Get-CcodTrayHostCompiler
     $work=Join-Path ([IO.Path]::GetDirectoryName($out)) ('.ccod-trayhost-build-'+[Guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $work -Force|Out-Null
     try{
-        $exe=Join-Path $work 'CodexRemote.TrayHost.exe';$compilerArgs=@('/nologo','/noconfig','/nostdlib+','/target:winexe','/platform:anycpu','/optimize+','/debug-','/checked+','/warn:4','/warnaserror+',('/out:{0}' -f $exe),('/main:Program'),('/win32manifest:{0}' -f $manifest))
+        $exe=Join-Path $work 'CodexRemote.TrayHost.exe';$compilerArgs=@('/nologo','/noconfig','/nostdlib+','/target:winexe','/platform:anycpu','/optimize+','/debug-','/checked+','/warn:4','/warnaserror+',('/out:{0}' -f $exe),('/main:Program'),('/win32manifest:{0}' -f $manifest),('/win32icon:{0}' -f $icon))
         foreach($leaf in @('mscorlib.dll','System.dll','System.Core.dll','System.Drawing.dll')){$compilerArgs+=('/reference:'+ (Join-Path $reference.ReferenceRoot $leaf))}
         $compilerArgs+=@($sources|ForEach-Object FullName)
         & $compiler @compilerArgs
@@ -48,7 +48,7 @@ function Invoke-CcodTrayHostBuild {
         $stdoutPath=Join-Path $work 'stdout.txt';$stderrPath=Join-Path $work 'stderr.txt'
         $smoke=Start-Process -FilePath $exe -ArgumentList '--headless-smoke' -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
         if($smoke.ExitCode -ne 0 -or (Get-Item -LiteralPath $stdoutPath).Length -ne 0 -or (Get-Item -LiteralPath $stderrPath).Length -ne 0){throw 'CCOD_TRAYHOST_HEADLESS_SMOKE_FAILED'}
-        $provenance=[ordered]@{schemaVersion=1;product='CodexRemote-fix';version=$Version;targetFramework='net48';compiler=[ordered]@{name='csc.exe';sha256=(Get-CcodTrayHostHash $compiler)};referenceRoot='locked-net48';sourceFiles=$sourceRecords;manifestSha256=(Get-CcodTrayHostHash $manifest);configSha256=(Get-CcodTrayHostHash $config);artifactSha256=(Get-CcodTrayHostHash $exe);configArtifactSha256=(Get-CcodTrayHostHash $configOut)}
+        $provenance=[ordered]@{schemaVersion=1;product='CodexRemote-fix';version=$Version;targetFramework='net48';compiler=[ordered]@{name='csc.exe';sha256=(Get-CcodTrayHostHash $compiler)};referenceRoot='locked-net48';sourceFiles=$sourceRecords;iconSha256=(Get-CcodTrayHostHash $icon);manifestSha256=(Get-CcodTrayHostHash $manifest);configSha256=(Get-CcodTrayHostHash $config);artifactSha256=(Get-CcodTrayHostHash $exe);configArtifactSha256=(Get-CcodTrayHostHash $configOut)}
         $provenancePath=Join-Path $work 'trayhost-build-provenance.json';$provenance|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $provenancePath -Encoding UTF8
         if(Test-Path -LiteralPath $out){Remove-Item -LiteralPath $out -Recurse -Force}
         New-Item -ItemType Directory -Path $out -Force|Out-Null
@@ -67,7 +67,8 @@ function Test-CcodTrayHostArtifact {
     foreach($path in @($exe,$config,$provenancePath)){if(-not(Test-Path -LiteralPath $path -PathType Leaf)){throw 'CCOD_TRAYHOST_ARTIFACT_MISSING'}}
     $provenance=Get-Content -LiteralPath $provenancePath -Raw|ConvertFrom-Json
     if([int]$provenance.schemaVersion -ne 1 -or [string]$provenance.version -cne $Version -or [string]$provenance.targetFramework -cne 'net48'){throw 'CCOD_TRAYHOST_PROVENANCE_INVALID'}
-    if([string]$provenance.artifactSha256 -cne (Get-CcodTrayHostHash $exe) -or [string]$provenance.configArtifactSha256 -cne (Get-CcodTrayHostHash $config)){throw 'CCOD_TRAYHOST_ARTIFACT_TAMPERED'}
+    $icon=Join-Path $repo 'assets\codexremote-fix\codexremote-fix.ico'
+    if([string]$provenance.artifactSha256 -cne (Get-CcodTrayHostHash $exe) -or [string]$provenance.configArtifactSha256 -cne (Get-CcodTrayHostHash $config) -or [string]$provenance.iconSha256 -cne (Get-CcodTrayHostHash $icon)){throw 'CCOD_TRAYHOST_ARTIFACT_TAMPERED'}
     $sourceRoot=Join-Path $repo 'src\trayhost';foreach($record in @($provenance.sourceFiles)){ $source=Join-Path $sourceRoot ([string]$record.name);if(-not(Test-Path -LiteralPath $source -PathType Leaf) -or [string]$record.sha256 -cne (Get-CcodTrayHostHash $source)){throw 'CCOD_TRAYHOST_SOURCE_TAMPERED'} }
     return [pscustomobject][ordered]@{Valid=$true;Executable=$exe;Version=$Version;Sha256=(Get-CcodTrayHostHash $exe)}
 }
