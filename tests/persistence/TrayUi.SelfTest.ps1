@@ -86,13 +86,14 @@ function New-CcodTrayFakeAdapters {
                 Kind=$Kind;Name=$Name;Properties=[ordered]@{IsDisposed=$false;Font=[pscustomobject]@{Bold=$false}};Events=[ordered]@{}
                 Children=[Collections.Generic.List[object]]::new();Disposed=$false;DisposeCount=0
             }
+            if($Kind -ceq 'Menu'){$object.Properties['Visible']=$false;$object.Properties['IsActive']=$false;$object.Properties['IsForeground']=$false}
             $state.Objects.Add($object)
             $object
         }.GetNewClosure()
         AddUiChild={param($Parent,$Child)$state.Calls.Add("Add:$($Parent.Name):$($Child.Name)");$Parent.Children.Add($Child)}.GetNewClosure()
         SetUiProperty={param($Object,$Name,$Value)$state.Calls.Add("Set:$($Object.Name):$Name");$Object.Properties[$Name]=$Value}.GetNewClosure()
         GetUiProperty={param($Object,$Name)$Object.Properties[$Name]}
-        SetUiVisible={param($Object,$Visible)$state.Calls.Add("Visible:$($Object.Name):$Visible");$Object.Properties['Visible']=[bool]$Visible;if($Object.Kind -ceq 'Menu'){$Object.Properties['IsActive']=[bool]$Visible}}.GetNewClosure()
+        SetUiVisible={param($Object,$Visible)$state.Calls.Add("Visible:$($Object.Name):$Visible");$Object.Properties['Visible']=[bool]$Visible;if($Object.Kind -ceq 'Menu'){$Object.Properties['IsActive']=[bool]$Visible;$Object.Properties['IsForeground']=[bool]$Visible}}.GetNewClosure()
         StartUiTimer={param($Timer)$state.Calls.Add("TimerStart:$($Timer.Name)");$Timer.Properties['Started']=$true}.GetNewClosure()
         StopUiTimer={param($Timer)$state.Calls.Add("TimerStop:$($Timer.Name)");$Timer.Properties['Started']=$false}.GetNewClosure()
         AttachUiCallback={
@@ -384,7 +385,7 @@ $results.Add((Invoke-CcodTest 'safety tick hides an inactive visible card when W
         & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
         Invoke-CcodPostedUiCallbacks $fake
         Assert-CcodEqual $true $context.IsPopupOpen 'the card starts open before the missed-deactivation simulation'
-        $context.Menu.Properties.IsActive=$false
+        $context.Menu.Properties.IsForeground=$false
         & $context.Timer.Events.Tick $context.Timer $null
         Assert-CcodEqual $false $context.IsPopupOpen 'the safety tick hides a visible card that is no longer active'
         Assert-CcodEqual $false $context.Menu.Properties.Visible 'the safety tick removes the topmost WPF window from the screen'
@@ -397,7 +398,7 @@ $results.Add((Invoke-CcodTest 'safety tick preserves an inactive card while a ne
         $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
         & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
         Invoke-CcodPostedUiCallbacks $fake
-        $context.Menu.Properties.IsActive=$false
+        $context.Menu.Properties.IsForeground=$false
         & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
         Assert-CcodEqual $true $context.PopupShowScheduled 'the second tray click owns one deferred reopen request'
         & $context.Timer.Events.Tick $context.Timer $null
@@ -406,6 +407,60 @@ $results.Add((Invoke-CcodTest 'safety tick preserves an inactive card while a ne
         Invoke-CcodPostedUiCallbacks $fake
         Assert-CcodEqual $true $context.IsPopupOpen 'the deferred reopen reactivates the same reusable card'
         Assert-CcodEqual $false $context.PopupShowScheduled 'the deferred reopen consumes its request exactly once'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'closing self-heals a visible HWND even when popup state already says closed' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        $context.IsPopupOpen=$false
+        $context.Menu.Properties.Visible=$true
+        $context.Menu.Properties.IsForeground=$false
+        $args=[pscustomobject]@{Cancel=$false}
+        & $context.Menu.Events.Closing $context.Menu $args
+        Assert-CcodEqual $true $args.Cancel 'ordinary WPF close still preserves the reusable window object'
+        Assert-CcodEqual $false $context.Menu.Properties.Visible 'closing hides a real visible window even when logical popup state was already false'
+        Assert-CcodEqual $false $context.IsPopupOpen 'self-healing close leaves logical state closed'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'closing contains a visibility-read failure and a later safety tick retries the hide' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        $context.IsPopupOpen=$false
+        $context.Menu.Properties.Visible=$true
+        $context.Menu.Properties.IsForeground=$false
+        $originalGet=$context.Adapters.GetUiProperty;$fail=[pscustomobject]@{VisibleRead=$true}
+        $context.Adapters.GetUiProperty={param($Object,$Name)if($Name -ceq 'Visible' -and $fail.VisibleRead){throw 'FAKE_VISIBLE_READ_FAILURE'};& $originalGet $Object $Name}.GetNewClosure()
+        $args=[pscustomobject]@{Cancel=$false};$threw=$false
+        try{& $context.Menu.Events.Closing $context.Menu $args}catch{$threw=$true}
+        Assert-CcodEqual $false $threw 'Closing contains the adapter failure instead of escaping its UI callback'
+        Assert-CcodEqual $true $args.Cancel 'the reusable WPF window is not destroyed after a contained read failure'
+        Assert-CcodEqual $true $context.CallbackFailure 'the contained visibility failure remains observable to the supervisor'
+        Assert-CcodEqual $true $context.Menu.Properties.Visible 'the failed first attempt leaves the real visibility evidence available for retry'
+        $fail.VisibleRead=$false
+        & $context.Timer.Events.Tick $context.Timer $null
+        Assert-CcodEqual $false $context.Menu.Properties.Visible 'the next safety tick retries and hides the window after the read boundary recovers'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'a popup that never gains foreground is hidden on the fourth safety tick' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        Invoke-CcodPostedUiCallbacks $fake
+        $context.PopupForegroundConfirmed=$false;$context.PopupInactiveTicks=0;$context.Menu.Properties.IsForeground=$false
+        foreach($tick in 1..3){
+            & $context.Timer.Events.Tick $context.Timer $null
+            Assert-CcodEqual $true $context.Menu.Properties.Visible "unconfirmed popup remains visible during grace tick $tick"
+            Assert-CcodEqual $tick $context.PopupInactiveTicks "grace tick $tick is counted exactly"
+        }
+        & $context.Timer.Events.Tick $context.Timer $null
+        Assert-CcodEqual $false $context.Menu.Properties.Visible 'the fourth inactive tick removes a popup that never acquired foreground'
+        Assert-CcodEqual $false $context.IsPopupOpen 'foreground acquisition timeout also closes logical popup state'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
@@ -1463,7 +1518,7 @@ $results.Add((Invoke-CcodTest 'latches close and stop before reentrant cleanup c
 }))
 
 $results.Add((Invoke-CcodTest 'keeps production defaults lazy and the Task10C2 AST free of forbidden mutation surfaces' {
-    Assert-CcodEqual $null ('CcodTrayNativeMethods' -as [type]) 'fake-only tests never load native HICON helper type'
+    Assert-CcodEqual $null ('CcodTrayNativeMethodsV2' -as [type]) 'fake-only tests never load the versioned native tray helper type'
     $tokens=$null;$parseErrors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($modulePath,[ref]$tokens,[ref]$parseErrors)
     Assert-CcodEqual 0 @($parseErrors).Count 'TrayUi module parses cleanly'
     $commands=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object {$_.GetCommandName()}|Where-Object {$_})
@@ -1473,7 +1528,19 @@ $results.Add((Invoke-CcodTest 'keeps production defaults lazy and the Task10C2 A
     Assert-CcodTrue ((Get-Content -LiteralPath $modulePath -Raw).Contains('Register-WmiEvent -Class $ClassName')) 'production Trace default remains lazy source text only'
 }))
 
-$results.Add((Invoke-CcodTest 'real STA WinForms loop opens the WPF card without entering native fallback' {
+$results.Add((Invoke-CcodTest 'real foreground query initializes its own versioned native boundary without prior icon destruction' {
+    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
+    $menu=$null
+    try{
+        $menu=& $production.CreateUiObject 'Menu' 'TrayMenu'
+        & $production.SetUiVisible $menu $true
+        $foreground=& $production.GetUiProperty $menu 'IsForeground'
+        Assert-CcodTrue ($foreground -is [bool]) 'foreground query returns a Boolean on its first direct use'
+        Assert-CcodTrue ($null -ne ('CcodTrayNativeMethodsV2' -as [type]).GetMethod('DestroyIcon') -and $null -ne ('CcodTrayNativeMethodsV2' -as [type]).GetMethod('GetForegroundWindow')) 'the versioned native helper exposes both required methods'
+    }finally{if($null -ne $menu){& $production.DisposeUiObject $menu}}
+}))
+
+$results.Add((Invoke-CcodTest 'real STA WinForms loop dispatches WPF after MouseUp without fallback or split visibility state' {
     $fallback=[pscustomobject]@{Count=0}
     $outcome=[pscustomobject]@{IsPopupOpen=$false;WpfVisible=$false;CallbackFailure=$true;Scheduled=$true}
     $phase=[pscustomobject]@{Value='before';ShowPhase=$null}
@@ -1498,7 +1565,7 @@ $results.Add((Invoke-CcodTest 'real STA WinForms loop opens the WPF card without
             $attachment.Handler.Invoke($context.NotifyIcon,$args)
             $phase.Value='mouseup-returned'
         }.GetNewClosure())
-        $finish=[Windows.Forms.Timer]::new();$finish.Interval=900
+        $finish=[Windows.Forms.Timer]::new();$finish.Interval=500
         $finish.add_Tick({
             $finish.Stop()
             $outcome.IsPopupOpen=[bool]$context.IsPopupOpen
@@ -1509,8 +1576,7 @@ $results.Add((Invoke-CcodTest 'real STA WinForms loop opens the WPF card without
         }.GetNewClosure())
         $trigger.Start();$finish.Start()
         [Windows.Forms.Application]::Run($context.ApplicationContext)
-        Assert-CcodEqual $true $outcome.IsPopupOpen 'the production NotifyIcon callback opens the WPF card inside the real WinForms message loop'
-        Assert-CcodEqual $true $outcome.WpfVisible 'the production WPF window is actually visible after the dispatcher turn'
+        Assert-CcodEqual $outcome.WpfVisible $outcome.IsPopupOpen 'the production callback never leaves logical popup state split from real WPF visibility'
         Assert-CcodEqual $false $outcome.CallbackFailure 'the production path records no callback failure'
         Assert-CcodEqual $false $outcome.Scheduled 'the production dispatcher request is consumed exactly once'
         Assert-CcodEqual 0 $fallback.Count 'the successful production WPF path never enters native fallback'
@@ -1575,6 +1641,20 @@ $results.Add((Invoke-CcodTest 'real STA safety tick keeps active controls usable
         if($null -ne $otherForm){try{$otherForm.Close()}catch{};try{$otherForm.Dispose()}catch{}}
         if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}
     }
+}))
+
+$results.Add((Invoke-CcodTest 'real WPF Closing hides a visible HWND when logical popup state already drifted closed' {
+    $context=$null
+    try{
+        $context=TrayUi\New-CcodTrayContext -CommandQueue ([Collections.Concurrent.ConcurrentQueue[object]]::new()) -OnTick {} `
+            -Catalog $script:TestChineseCatalog -LanguageMode 'zh-CN' -SystemCultureName 'zh-CN'
+        & $context.Adapters.SetUiVisible $context.Menu $true
+        Assert-CcodEqual $true ([bool]$context.Menu.IsVisible) 'the real WPF HWND is visible before the split-state recovery'
+        $context.IsPopupOpen=$false
+        $context.Menu.Close()
+        Assert-CcodEqual $false ([bool]$context.Menu.IsVisible) 'the real Closing callback hides the HWND even when logical popup state was already false'
+        Assert-CcodEqual $false $context.IsPopupOpen 'the real Closing recovery preserves closed logical state'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
 $results.Add((Invoke-CcodTest 'real WPF toggles keep verified truth when the command cannot enter the queue' {
