@@ -92,7 +92,7 @@ function New-CcodTrayFakeAdapters {
         AddUiChild={param($Parent,$Child)$state.Calls.Add("Add:$($Parent.Name):$($Child.Name)");$Parent.Children.Add($Child)}.GetNewClosure()
         SetUiProperty={param($Object,$Name,$Value)$state.Calls.Add("Set:$($Object.Name):$Name");$Object.Properties[$Name]=$Value}.GetNewClosure()
         GetUiProperty={param($Object,$Name)$Object.Properties[$Name]}
-        SetUiVisible={param($Object,$Visible)$state.Calls.Add("Visible:$($Object.Name):$Visible");$Object.Properties['Visible']=[bool]$Visible}.GetNewClosure()
+        SetUiVisible={param($Object,$Visible)$state.Calls.Add("Visible:$($Object.Name):$Visible");$Object.Properties['Visible']=[bool]$Visible;if($Object.Kind -ceq 'Menu'){$Object.Properties['IsActive']=[bool]$Visible}}.GetNewClosure()
         StartUiTimer={param($Timer)$state.Calls.Add("TimerStart:$($Timer.Name)");$Timer.Properties['Started']=$true}.GetNewClosure()
         StopUiTimer={param($Timer)$state.Calls.Add("TimerStop:$($Timer.Name)");$Timer.Properties['Started']=$false}.GetNewClosure()
         AttachUiCallback={
@@ -377,6 +377,38 @@ $results.Add((Invoke-CcodTest 'hides without closing and flushes only the newest
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
+$results.Add((Invoke-CcodTest 'safety tick hides an inactive visible card when Windows omits Deactivated' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        Invoke-CcodPostedUiCallbacks $fake
+        Assert-CcodEqual $true $context.IsPopupOpen 'the card starts open before the missed-deactivation simulation'
+        $context.Menu.Properties.IsActive=$false
+        & $context.Timer.Events.Tick $context.Timer $null
+        Assert-CcodEqual $false $context.IsPopupOpen 'the safety tick hides a visible card that is no longer active'
+        Assert-CcodEqual $false $context.Menu.Properties.Visible 'the safety tick removes the topmost WPF window from the screen'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'safety tick preserves an inactive card while a newer tray reopen is pending' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        Invoke-CcodPostedUiCallbacks $fake
+        $context.Menu.Properties.IsActive=$false
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        Assert-CcodEqual $true $context.PopupShowScheduled 'the second tray click owns one deferred reopen request'
+        & $context.Timer.Events.Tick $context.Timer $null
+        Assert-CcodEqual $true $context.IsPopupOpen 'the safety tick does not hide the current card while its reopen is pending'
+        Assert-CcodEqual $true $context.PopupShowScheduled 'the safety tick does not cancel the newer tray request'
+        Invoke-CcodPostedUiCallbacks $fake
+        Assert-CcodEqual $true $context.IsPopupOpen 'the deferred reopen reactivates the same reusable card'
+        Assert-CcodEqual $false $context.PopupShowScheduled 'the deferred reopen consumes its request exactly once'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
 $results.Add((Invoke-CcodTest 'production adapters create the WPF popup-card boundary types' {
     $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
     $objects=[Collections.Generic.List[object]]::new()
@@ -420,12 +452,18 @@ $results.Add((Invoke-CcodTest 'real STA NotifyIcon delegate boundary forwards Mo
 
 $results.Add((Invoke-CcodTest 'real STA dispatcher post returns an accepted scheduling acknowledgement' {
     $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
-    $menu=$null
+    $menu=$null;$postedPriorities=[Collections.Generic.List[string]]::new();$postedHandler=$null
     try{
         $menu=& $production.CreateUiObject 'Menu' 'TrayMenu'
+        $postedHandler=[Windows.Threading.DispatcherHookEventHandler]{param($sender,$eventArgs)$postedPriorities.Add([string]$eventArgs.Operation.Priority)}.GetNewClosure()
+        $menu.Dispatcher.Hooks.add_OperationPosted($postedHandler)
         $accepted=& $production.PostUiCallback $menu ({}.GetNewClosure()) ({}.GetNewClosure())
         Assert-CcodEqual $true $accepted 'the real WPF DispatcherOperation acknowledges an accepted queued callback'
-    }finally{if($null -ne $menu){& $production.DisposeUiObject $menu}}
+        Assert-CcodTrue ($postedPriorities -ccontains 'Input') 'tray popup display is queued at input priority instead of starvation-prone ContextIdle'
+    }finally{
+        if($null -ne $menu -and $null -ne $postedHandler){$menu.Dispatcher.Hooks.remove_OperationPosted($postedHandler)}
+        if($null -ne $menu){& $production.DisposeUiObject $menu}
+    }
 }))
 
 $results.Add((Invoke-CcodTest 'real STA same-thread visibility invokes the WPF action instead of treating System.Action as a command' {
@@ -1438,18 +1476,27 @@ $results.Add((Invoke-CcodTest 'keeps production defaults lazy and the Task10C2 A
 $results.Add((Invoke-CcodTest 'real STA WinForms loop opens the WPF card without entering native fallback' {
     $fallback=[pscustomobject]@{Count=0}
     $outcome=[pscustomobject]@{IsPopupOpen=$false;WpfVisible=$false;CallbackFailure=$true;Scheduled=$true}
+    $phase=[pscustomobject]@{Value='before';ShowPhase=$null}
     $context=$null;$trigger=$null;$finish=$null
     try{
         $context=TrayUi\New-CcodTrayContext -CommandQueue ([Collections.Concurrent.ConcurrentQueue[object]]::new()) -OnTick {} `
             -Catalog $script:TestChineseCatalog -LanguageMode 'zh-CN' -SystemCultureName 'zh-CN' -Adapters @{
                 ShowNativeMenu={param($Menu)$fallback.Count++}.GetNewClosure()
             }
+        $originalSetVisible=$context.Adapters.SetUiVisible
+        $context.Adapters.SetUiVisible={
+            param($Object,$Visible)
+            if($Object -is [Windows.Window] -and [bool]$Visible){$phase.ShowPhase=$phase.Value}
+            & $originalSetVisible $Object $Visible
+        }.GetNewClosure()
         $trigger=[Windows.Forms.Timer]::new();$trigger.Interval=100
         $trigger.add_Tick({
             $trigger.Stop()
             $attachment=@($context.Callbacks|Where-Object {$_.EventName -ceq 'MouseUp'})[0]
             $args=[Windows.Forms.MouseEventArgs]::new([Windows.Forms.MouseButtons]::Right,1,0,0,0)
+            $phase.Value='inside-mouseup'
             $attachment.Handler.Invoke($context.NotifyIcon,$args)
+            $phase.Value='mouseup-returned'
         }.GetNewClosure())
         $finish=[Windows.Forms.Timer]::new();$finish.Interval=900
         $finish.add_Tick({
@@ -1467,8 +1514,65 @@ $results.Add((Invoke-CcodTest 'real STA WinForms loop opens the WPF card without
         Assert-CcodEqual $false $outcome.CallbackFailure 'the production path records no callback failure'
         Assert-CcodEqual $false $outcome.Scheduled 'the production dispatcher request is consumed exactly once'
         Assert-CcodEqual 0 $fallback.Count 'the successful production WPF path never enters native fallback'
+        Assert-CcodEqual 'mouseup-returned' $phase.ShowPhase 'the Input-priority WPF callback runs only after the NotifyIcon MouseUp handler returns'
     }finally{
         foreach($timer in @($trigger,$finish)){if($null -ne $timer){try{$timer.Stop()}catch{};try{$timer.Dispose()}catch{}}}
+        if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}
+    }
+}))
+
+$results.Add((Invoke-CcodTest 'real STA safety tick keeps active controls usable and hides after a missed Deactivated event' {
+    $context=$null;$trigger=$null;$checkActive=$null;$switchWindow=$null;$finish=$null;$otherForm=$null;$deactivatedAttachment=$null
+    $outcome=[pscustomobject]@{OpenAfterTicks=$false;ActiveAfterTicks=$false;ActiveAfterLanguage=$false;OtherFormActive=$false;OpenAtFinish=$true;VisibleAtFinish=$true;CallbackFailure=$true}
+    try{
+        $context=TrayUi\New-CcodTrayContext -CommandQueue ([Collections.Concurrent.ConcurrentQueue[object]]::new()) -OnTick {} `
+            -Catalog $script:TestChineseCatalog -LanguageMode 'zh-CN' -SystemCultureName 'zh-CN'
+        $deactivatedAttachment=@($context.Callbacks|Where-Object {$_.EventName -ceq 'Deactivated'})[0]
+        & $context.Adapters.DetachUiCallback $deactivatedAttachment
+        [void]$context.Callbacks.Remove($deactivatedAttachment)
+        $otherForm=[Windows.Forms.Form]::new();$otherForm.ShowInTaskbar=$false;$otherForm.Width=80;$otherForm.Height=60;$otherForm.StartPosition='Manual';$otherForm.Location=[Drawing.Point]::new(80,80)
+
+        $trigger=[Windows.Forms.Timer]::new();$trigger.Interval=100
+        $trigger.add_Tick({
+            $trigger.Stop()
+            $attachment=@($context.Callbacks|Where-Object {$_.EventName -ceq 'MouseUp'})[0]
+            $args=[Windows.Forms.MouseEventArgs]::new([Windows.Forms.MouseButtons]::Right,1,0,0,0)
+            $attachment.Handler.Invoke($context.NotifyIcon,$args)
+        }.GetNewClosure())
+        $checkActive=[Windows.Forms.Timer]::new();$checkActive.Interval=650
+        $checkActive.add_Tick({
+            $checkActive.Stop()
+            $outcome.OpenAfterTicks=[bool]$context.IsPopupOpen
+            $outcome.ActiveAfterTicks=[bool]$context.Menu.IsActive
+            $context.Items.Language.IsExpanded=$true
+            $outcome.ActiveAfterLanguage=[bool]$context.Menu.IsActive
+        }.GetNewClosure())
+        $switchWindow=[Windows.Forms.Timer]::new();$switchWindow.Interval=800
+        $switchWindow.add_Tick({
+            $switchWindow.Stop()
+            $otherForm.Show();[void]$otherForm.Activate();[Windows.Forms.Application]::DoEvents()
+            $outcome.OtherFormActive=[bool]$otherForm.Focused
+        }.GetNewClosure())
+        $finish=[Windows.Forms.Timer]::new();$finish.Interval=1400
+        $finish.add_Tick({
+            $finish.Stop()
+            $outcome.OpenAtFinish=[bool]$context.IsPopupOpen
+            $outcome.VisibleAtFinish=[bool]$context.Menu.IsVisible
+            $outcome.CallbackFailure=[bool]$context.CallbackFailure
+            $otherForm.Close();$context.ApplicationContext.ExitThread()
+        }.GetNewClosure())
+        foreach($timer in @($trigger,$checkActive,$switchWindow,$finish)){$timer.Start()}
+        [Windows.Forms.Application]::Run($context.ApplicationContext)
+        Assert-CcodEqual $true $outcome.OpenAfterTicks 'an active real WPF card remains open across multiple 250ms safety ticks'
+        Assert-CcodEqual $true $outcome.ActiveAfterTicks 'the real WPF card owns activation after display'
+        Assert-CcodEqual $true $outcome.ActiveAfterLanguage 'expanding the language control does not look like external deactivation'
+        Assert-CcodEqual $true $outcome.OtherFormActive 'the test transfers activation to a second real window'
+        Assert-CcodEqual $false $outcome.OpenAtFinish 'the safety tick hides after real activation leaves and Deactivated is deliberately absent'
+        Assert-CcodEqual $false $outcome.VisibleAtFinish 'the inactive topmost WPF card is removed from the screen'
+        Assert-CcodEqual $false $outcome.CallbackFailure 'the safety close is a normal lifecycle path'
+    }finally{
+        foreach($timer in @($trigger,$checkActive,$switchWindow,$finish)){if($null -ne $timer){try{$timer.Stop()}catch{};try{$timer.Dispose()}catch{}}}
+        if($null -ne $otherForm){try{$otherForm.Close()}catch{};try{$otherForm.Dispose()}catch{}}
         if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}
     }
 }))

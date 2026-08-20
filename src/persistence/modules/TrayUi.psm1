@@ -449,7 +449,7 @@ function Get-CcodTrayDefaultAdapters {
         if($null -eq $dispatcher -or $dispatcher.HasShutdownStarted -or $dispatcher.HasShutdownFinished){throw 'WPF dispatcher is unavailable'}
         $callbackRef=$Callback
         $action=[Action] {& $callbackRef}.GetNewClosure()
-        $operation=$dispatcher.BeginInvoke($action,[Windows.Threading.DispatcherPriority]::ContextIdle)
+        $operation=$dispatcher.BeginInvoke($action,[Windows.Threading.DispatcherPriority]::Input)
         if($null -eq $operation){return $false}
         $onAbortedRef=$OnAborted
         $aborted=[EventHandler]{param($sender,$eventArgs)& $onAbortedRef}.GetNewClosure()
@@ -1220,7 +1220,7 @@ function New-CcodTrayContext {
         $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.Menu,'Closing',$closing) $adapter.DetachUiCallback $validClosingAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.Callbacks.Add($attachment)
 
-        $contextRef=$context;$invokeAdapterRef=${function:Invoke-CcodTrayAdapter}
+        $contextRef=$context;$invokeAdapterRef=${function:Invoke-CcodTrayAdapter};$hidePopupRef=${function:Hide-CcodTrayPopup}
         $tick={
             param($sender,$eventArgs)
             [Threading.Monitor]::Enter($contextRef.QueueGate)
@@ -1228,6 +1228,11 @@ function New-CcodTrayContext {
                 if($contextRef.State -cne 'Open'){return}
                 $current=& $invokeAdapterRef $contextRef.Adapters.GetManagedThreadId @() 1 'CCOD_TRAY_THREAD_INVALID' 'Tray'
                 if($current -isnot [int] -or $current -ne $contextRef.OwnerManagedThreadId){return}
+                if($contextRef.IsPopupOpen -and -not $contextRef.PopupShowScheduled){
+                    $active=& $invokeAdapterRef $contextRef.Adapters.GetUiProperty @($contextRef.Menu,'IsActive') 1 'CCOD_TRAY_PRESENTATION_FAILED' 'Tray'
+                    if($active -isnot [bool]){throw 'popup active state is invalid'}
+                    if(-not $active){& $hidePopupRef $contextRef}
+                }
                 & $invokeAdapterRef $contextRef.OnTick @() 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
             }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}
             finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
