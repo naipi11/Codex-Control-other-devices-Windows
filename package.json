@@ -1,6 +1,6 @@
 {
   "name": "codex-control-other-devices-windows",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "private": true,
   "description": "CodexRemote-fix persistent current-user tray supervisor for Windows",
   "license": "MIT",

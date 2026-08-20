@@ -18,8 +18,8 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载 `CodexRemote-fix-2.2.1-setup.exe` 和 `CodexRemote-fix-2.2.1-setup.exe.sha256.txt`，并核对 SHA-256。
-2. 运行 `CodexRemote-fix-2.2.1-setup.exe`，无需管理员权限。
+1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载 `CodexRemote-fix-2.2.2-setup.exe` 和 `CodexRemote-fix-2.2.2-setup.exe.sha256.txt`，并核对 SHA-256。
+2. 运行 `CodexRemote-fix-2.2.2-setup.exe`，无需管理员权限。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
 ![设置 → 连接 → 控制其他设备（中文）](docs/assets/control-other-devices-active-zh-CN.png)
@@ -52,8 +52,8 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 每个带 tag 的发布都会附带 Windows 安装包及其 SHA-256 校验文件。
 `.github/workflows/release.yml` 会在 tag 上自动构建安装包，因此后续每次更新都会
-为 2.2.1 发布提供可直接运行的 `CodexRemote-fix-2.2.1-setup.exe`
-及 `CodexRemote-fix-2.2.1-setup.exe.sha256.txt`。
+为 2.2.2 发布提供可直接运行的 `CodexRemote-fix-2.2.2-setup.exe`
+及 `CodexRemote-fix-2.2.2-setup.exe.sha256.txt`。
 
 Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
 查看是否有更新安装包；也可以从开始菜单运行 **CodexRemote-fix compatibility check（兼容性检查）**
