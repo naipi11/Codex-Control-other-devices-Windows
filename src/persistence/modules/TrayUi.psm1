@@ -298,7 +298,7 @@ public static class CcodTrayNativeMenuV1
     private static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 }
 '@
-        [void](Add-Type -TypeDefinition $source -PassThru -ErrorAction Stop)
+        $null=Add-Type -TypeDefinition $source -PassThru -ErrorAction Stop 3>$null 4>$null 5>$null 6>$null
         $helper='CcodTrayNativeMenuV1' -as [type]
         $owner='CcodTrayNativeMenuOwnerV1' -as [type]
         $item='CcodTrayNativeMenuItemV1' -as [type]

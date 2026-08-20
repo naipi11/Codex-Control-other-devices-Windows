@@ -256,6 +256,34 @@ $results.Add((Invoke-CcodTest 'exports exactly the six frozen TrayUi functions' 
     Assert-CcodEqual $expected $actual 'public export surface remains exact'
 }))
 
+$results.Add((Invoke-CcodTest 'cold native owner initialization emits only the owned HWND under diagnostic stream isolation' {
+    $escapedModulePath=$modulePath.Replace("'","''")
+    $probe=@"
+`$ErrorActionPreference='Stop'
+Import-Module '$escapedModulePath' -Force
+& (Get-Module TrayUi) {
+    `$adapters=Get-CcodTrayDefaultAdapters
+    `$capture=Invoke-CcodTrayAdapterCapture `$adapters.CreateNativeMenuOwner @()
+    try {
+        [pscustomobject]@{
+            Threw=[bool]`$capture.Threw
+            Count=[int]`$capture.Items.Count
+            Types=@(`$capture.Items|ForEach-Object { `$_.GetType().FullName })
+        } | ConvertTo-Json -Compress
+    } finally {
+        foreach(`$item in `$capture.Items){if(`$item -is [IDisposable]){`$item.Dispose()}}
+    }
+}
+"@
+    $output=@(& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -STA -Command $probe 2>&1)
+    Assert-CcodEqual 0 $LASTEXITCODE 'cold native owner probe exits cleanly'
+    Assert-CcodEqual 1 $output.Count 'cold native owner probe emits one JSON receipt'
+    $receipt=[string]$output[0]|ConvertFrom-Json
+    Assert-CcodEqual $false ([bool]$receipt.Threw) 'cold native owner adapter does not throw'
+    Assert-CcodEqual 1 ([int]$receipt.Count) 'cold native owner adapter emits only one owned object'
+    Assert-CcodEqual 'CcodTrayNativeMenuOwnerV1' (@($receipt.Types)-join ',') 'cold native owner adapter emits no Add-Type diagnostics'
+}))
+
 $results.Add((Invoke-CcodTest 'production native menu helper exposes owner show cancel and disposal operations' {
     & (Get-Module TrayUi) {Initialize-CcodTrayNativeMenuV1}
     $helper='CcodTrayNativeMenuV1' -as [type]
