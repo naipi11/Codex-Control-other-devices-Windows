@@ -588,6 +588,31 @@ Invoke-CcodTest 'default shutdown ends an active native menu before exit and sti
     Assert-CcodEqual 'Exit:UI' (@($calls)-join '|') 'closed menu does not receive an unnecessary EndMenu call'
 }
 
+Invoke-CcodTest 'default active-menu shutdown contains nonterminating EndMenu diagnostics without polluting caller errors' {
+    $defaults=Get-CcodSupervisorDefaultAdapters
+    $calls=[Collections.Generic.List[string]]::new()
+    $applicationContext=[pscustomobject]@{}
+    $applicationContext|Add-Member -MemberType ScriptMethod -Name ExitThread -Value {$calls.Add('Exit:UI')}
+    $tray=[pscustomobject]@{
+        MenuOpen=$true
+        Adapters=@{EndNativeMenu={$calls.Add('End:Native');Write-Error 'PRIVATE_NATIVE_END_NONTERMINATING'}.GetNewClosure()}
+        ApplicationContext=$applicationContext
+    }
+    $startingErrors=[object[]]@($global:Error)
+    try{
+        $output=@(& $defaults.RequestUiExit $tray *>&1)
+        Assert-CcodEqual 0 $output.Count 'nonterminating EndMenu diagnostics do not escape the shutdown adapter'
+        Assert-CcodEqual 'End:Native|Exit:UI' (@($calls)-join '|') 'diagnostic EndMenu still precedes UI exit'
+        Assert-CcodEqual $startingErrors.Count $global:Error.Count 'shutdown restores the caller error history length'
+        for($index=0;$index -lt $startingErrors.Count;$index++){
+            Assert-CcodTrue ([object]::ReferenceEquals($startingErrors[$index],$global:Error[$index])) 'shutdown restores the exact caller error history'
+        }
+    }finally{
+        $global:Error.Clear()
+        foreach($startingError in $startingErrors){[void]$global:Error.Add($startingError)}
+    }
+}
+
 Invoke-CcodTest 'observes and renders at 0 and 1000ms but not at intervening 250ms safety ticks' {
     $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
     foreach($elapsed in @([long]0,[long]250,[long]500,[long]750,[long]999,[long]1000)){$world.Elapsed.Enqueue($elapsed)}
