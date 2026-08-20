@@ -39,13 +39,7 @@ function New-CcodTrayFakeAdapters {
         TitleBitmaps=[Collections.Generic.List[object]]::new()
         BoldFonts=[Collections.Generic.List[object]]::new()
         Dialogs=[Collections.Generic.List[object]]::new()
-        NativeOwners=[Collections.Generic.List[object]]::new()
-        NativeMenuSpecs=[Collections.Generic.List[object]]::new()
-        NativeMenuResults=[Collections.Generic.Queue[int]]::new()
-        NativeMenuShowCount=0
-        NativeMenuEndCount=0
-        NativeOwnerDisposeCount=0
-        OnShowNativeMenu=$null
+        MenuEndCount=0
         HiconSeed=1000
         ThreadId=37
         Apartment='STA'
@@ -90,6 +84,7 @@ function New-CcodTrayFakeAdapters {
             [pscustomobject][ordered]@{Target=$Object;EventName=$EventName;Handler=$Callback}
         }.GetNewClosure()
         DetachUiCallback={param($Attachment)$state.Calls.Add("Detach:$($Attachment.Target.Name):$($Attachment.EventName)");$Attachment.Target.Events.Remove($Attachment.EventName)}.GetNewClosure()
+        AddUiChild={param($Parent,$Child)$state.Calls.Add("Add:$($Parent.Name):$($Child.Name)");$Parent.Children.Add($Child)}.GetNewClosure()
         DisposeUiObject={
             param($Object)
             $state.Calls.Add("DisposeUi:$($Object.Name)");$Object.Disposed=$true;$Object.Properties['IsDisposed']=$true;$Object.DisposeCount++
@@ -110,19 +105,7 @@ function New-CcodTrayFakeAdapters {
         }.GetNewClosure()
         ShowErrorDialog={param($Title,$Message)$state.Dialogs.Add([pscustomobject][ordered]@{Title=$Title;Message=$Message})}.GetNewClosure()
         ConfirmUninstall={param($Title,$Message)$true}
-        CreateNativeMenuOwner={
-            $owner=[pscustomobject]@{Kind='NativeMenuOwner';Name='TrayNativeMenuOwner';Disposed=$false;DisposeCount=0}
-            $state.Calls.Add('NativeOwner:Create');$state.NativeOwners.Add($owner);$owner
-        }.GetNewClosure()
-        ShowNativeMenu={
-            param($Owner,$Items)
-            $state.NativeMenuShowCount++;$state.Calls.Add('NativeMenu:Show');$state.NativeMenuSpecs.Add($Items)
-            if($state.OnShowNativeMenu -is [scriptblock]){& $state.OnShowNativeMenu}
-            if($state.NativeMenuResults.Count -gt 0){return [int]$state.NativeMenuResults.Dequeue()}
-            [int]0
-        }.GetNewClosure()
-        EndNativeMenu={$state.NativeMenuEndCount++;$state.Calls.Add('NativeMenu:End')}.GetNewClosure()
-        DisposeNativeMenuOwner={param($Owner)$state.NativeOwnerDisposeCount++;$state.Calls.Add('NativeOwner:Dispose');$Owner.Disposed=$true;$Owner.DisposeCount++}.GetNewClosure()
+        EndMenu={$state.MenuEndCount++;$state.Calls.Add('Menu:End')}.GetNewClosure()
         DestroyIcon={param($Hicon)$state.Calls.Add("DestroyIcon:$([long]$Hicon)")}.GetNewClosure()
         DisposeIconResource={param($Resource)if($Resource.PSObject.Properties['Kind']){$state.Calls.Add("DisposeResource:$($Resource.Kind):$($Resource.Name)")}else{$state.Calls.Add("DisposeIcon:$($Resource.Color):$($Resource.Size)")};$Resource.Disposed=$true;$Resource.DisposeCount++}.GetNewClosure()
         NewSourceIdentifier={$state.SourceSeed++;'ccod-process-'+('{0:x32}' -f $state.SourceSeed)}.GetNewClosure()
@@ -256,487 +239,101 @@ $results.Add((Invoke-CcodTest 'exports exactly the six frozen TrayUi functions' 
     Assert-CcodEqual $expected $actual 'public export surface remains exact'
 }))
 
-$results.Add((Invoke-CcodTest 'cold native owner initialization emits only the owned HWND under diagnostic stream isolation' {
+$results.Add((Invoke-CcodTest 'cold Windows PowerShell STA binds one persistent ContextMenu and supports two Popup Collapse lifecycles without MouseUp dispatch' {
     $escapedModulePath=$modulePath.Replace("'","''")
+    $escapedLocalizationPath=$localizationPath.Replace("'","''")
+    $escapedResourcesRoot=$resourcesRoot.Replace("'","''")
     $probe=@"
 `$ErrorActionPreference='Stop'
+Import-Module '$escapedLocalizationPath' -Force
 Import-Module '$escapedModulePath' -Force
-& (Get-Module TrayUi) {
-    `$adapters=Get-CcodTrayDefaultAdapters
-    `$capture=Invoke-CcodTrayAdapterCapture `$adapters.CreateNativeMenuOwner @()
-    try {
-        [pscustomobject]@{
-            Threw=[bool]`$capture.Threw
-            Count=[int]`$capture.Items.Count
-            Types=@(`$capture.Items|ForEach-Object { `$_.GetType().FullName })
-        } | ConvertTo-Json -Compress
-    } finally {
-        foreach(`$item in `$capture.Items){if(`$item -is [IDisposable]){`$item.Dispose()}}
+`$catalog=Get-CcodUiCatalog -ResourcesRoot '$escapedResourcesRoot' -LanguageMode en-US -SystemCultureName en-US
+`$presentation=[pscustomobject][ordered]@{
+    Color='Green';StateKey='Active';SessionReadyVisible=`$true;ApplyNowVisible=`$false;ApplyNowEnabled=`$false;ManualRetryVisible=`$false;ManualRetryEnabled=`$false
+    AutomationToggleEnabled=`$true;AutomationChecked=`$true;CandidateOptInToggleEnabled=`$true;CandidateOptInChecked=`$false;OpenLogsEnabled=`$true;UninstallEnabled=`$true;Busy=`$false
+}
+`$context=`$null
+try {
+    `$context=New-CcodTrayContext -CommandQueue ([Collections.Generic.Queue[object]]::new()) -OnTick {} -Catalog `$catalog -LanguageMode en-US -SystemCultureName en-US
+    Set-CcodTrayPresentation -Context `$context -Presentation `$presentation -Catalog `$catalog -LanguageMode en-US -SystemCultureName en-US
+    `$menu=`$context.Menu
+    if (`$null -eq `$menu -or `$menu.GetType().FullName -ne 'System.Windows.Forms.ContextMenu') { throw 'ContextMenu was not retained' }
+    if (`$context.NotifyIcon.ContextMenu -ne `$menu) { throw 'NotifyIcon is not bound to ContextMenu' }
+    if (@(`$context.Callbacks | Where-Object { `$_.EventName -eq 'MouseUp' }).Count -ne 0) { throw 'MouseUp callback is not allowed' }
+    `$counts=[pscustomobject]@{Popup=0;Collapse=0}
+    `$popupHandler=[EventHandler]{ param(`$sender,`$eventArgs) `$counts.Popup=`$counts.Popup+1 }.GetNewClosure()
+    `$collapseHandler=[EventHandler]{ param(`$sender,`$eventArgs) `$counts.Collapse=`$counts.Collapse+1 }.GetNewClosure()
+    `$menu.add_Popup(`$popupHandler);`$menu.add_Collapse(`$collapseHandler)
+    `$flags=[Reflection.BindingFlags]'Instance,NonPublic'
+    `$onPopup=`$menu.GetType().GetMethod('OnPopup',`$flags)
+    `$onCollapse=`$menu.GetType().GetMethod('OnCollapse',`$flags)
+    if (`$null -eq `$onPopup -or `$null -eq `$onCollapse) { throw 'ContextMenu lifecycle methods unavailable' }
+    foreach(`$n in 1..2){
+        [void]`$onPopup.Invoke(`$menu,@([EventArgs]::Empty))
+        if (-not `$context.MenuOpen) { throw 'Popup did not open the context state' }
+        [void]`$onCollapse.Invoke(`$menu,@([EventArgs]::Empty))
+        if (`$context.MenuOpen) { throw 'Collapse did not close the context state' }
     }
+    [pscustomobject]@{Type=`$menu.GetType().FullName;Popup=`$counts.Popup;Collapse=`$counts.Collapse;Callbacks=@(`$context.Callbacks|ForEach-Object {`$_.EventName})}|ConvertTo-Json -Compress
+} finally {
+    if (`$null -ne `$context) { Close-CcodTrayContext -Context `$context | Out-Null }
 }
 "@
     $output=@(& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -STA -Command $probe 2>&1)
-    Assert-CcodEqual 0 $LASTEXITCODE 'cold native owner probe exits cleanly'
-    Assert-CcodEqual 1 $output.Count 'cold native owner probe emits one JSON receipt'
+    Assert-CcodEqual 0 $LASTEXITCODE 'cold ContextMenu STA probe exits cleanly'
+    Assert-CcodEqual 1 $output.Count 'cold ContextMenu STA probe emits one JSON receipt'
     $receipt=[string]$output[0]|ConvertFrom-Json
-    Assert-CcodEqual $false ([bool]$receipt.Threw) 'cold native owner adapter does not throw'
-    Assert-CcodEqual 1 ([int]$receipt.Count) 'cold native owner adapter emits only one owned object'
-    Assert-CcodEqual 'CcodTrayNativeMenuOwnerV1' (@($receipt.Types)-join ',') 'cold native owner adapter emits no Add-Type diagnostics'
+    Assert-CcodEqual 'System.Windows.Forms.ContextMenu' $receipt.Type 'NotifyIcon uses the legacy native ContextMenu owner'
+    Assert-CcodEqual 2 ([int]$receipt.Popup) 'two Popup events are delivered'
+    Assert-CcodEqual 2 ([int]$receipt.Collapse) 'two Collapse events are delivered'
+    Assert-CcodTrue (@($receipt.Callbacks) -notcontains 'MouseUp') 'framework automatic menu path has no MouseUp callback'
 }))
 
-$results.Add((Invoke-CcodTest 'production native menu helper exposes owner show cancel and disposal operations' {
-    & (Get-Module TrayUi) {Initialize-CcodTrayNativeMenuV1}
-    $helper='CcodTrayNativeMenuV1' -as [type]
-    $ownerType='CcodTrayNativeMenuOwnerV1' -as [type]
-    Assert-CcodTrue ($null -ne $helper) 'versioned native menu helper type is loaded'
-    Assert-CcodTrue ($null -ne $ownerType) 'versioned hidden-owner type is loaded'
-    foreach($method in @('Show','EndMenu')){Assert-CcodTrue ($null -ne $helper.GetMethod($method)) "native helper exposes $method"}
-    Assert-CcodTrue ($null -ne $ownerType.GetMethod('Dispose')) 'native owner exposes deterministic disposal'
-}))
-
-$results.Add((Invoke-CcodTest 'native helper only tracks after a visible offscreen tool owner is foreground and always hides it afterward' {
-    $text=Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
-    $owner=[regex]::Match($text,'(?ms)public sealed class CcodTrayNativeMenuOwnerV1.*?^}\s*\r?\n\r?\npublic static class')
-    $helper=[regex]::Match($text,'(?ms)public static class CcodTrayNativeMenuV1.*?^\s*}\s*''@')
-    Assert-CcodTrue $owner.Success 'native owner source is present'
-    Assert-CcodTrue $helper.Success 'native helper source is present'
-    $toolWindow=$owner.Value.IndexOf('WS_EX_TOOLWINDOW')
-    $offscreen=$owner.Value.IndexOf('-32000, -32000, 1, 1')
-    $show=$owner.Value.IndexOf('ShowWindow(Handle, SW_SHOWNOACTIVATE)')
-    $hide=$owner.Value.IndexOf('ShowWindow(handle, SW_HIDE)')
-    Assert-CcodTrue ($toolWindow -ge 0 -and $offscreen -gt $toolWindow -and $show -gt $offscreen -and $hide -gt $show) 'owner is an offscreen tool window and has explicit show/hide operations'
-    $showForMenu=$helper.Value.IndexOf('owner.ShowForMenu()')
-    $foreground=$helper.Value.IndexOf('if (!SetForegroundWindow(owner.Handle))')
-    $foregroundProof=$helper.Value.IndexOf('if (GetForegroundWindow() != owner.Handle)')
-    $track=$helper.Value.IndexOf('TrackPopupMenuEx(')
-    $post=$helper.Value.IndexOf('PostMessageW(owner.Handle, WM_NULL')
-    $hideFinally=$helper.Value.IndexOf('owner.HideAfterMenu()')
-    Assert-CcodTrue ($showForMenu -ge 0 -and $foreground -gt $showForMenu -and $foregroundProof -gt $foreground -and $track -gt $foregroundProof -and $post -gt $track) 'failed foreground ownership cannot reach TrackPopupMenuEx and WM_NULL follows tracking'
-    Assert-CcodTrue ($hideFinally -gt $post -and $helper.Value.IndexOf('finally') -lt $hideFinally) 'the owner is hidden from a finally path after menu processing'
-}))
-
-$results.Add((Invoke-CcodTest 'native menu spec preserves exact grouping command ids disabled rows checks and language radios' {
-    $presentation=New-CcodValidPresentation
-    $spec=& (Get-Module TrayUi) {
-        param($Presentation,$Catalog)
-        $localized=Resolve-CcodTrayLocalizedStrings -Catalog $Catalog -LanguageMode en-US -SystemCultureName en-US
-        $render=New-CcodTrayRenderState -Presentation $Presentation -Localized $localized -LanguageMode en-US -SystemCultureName en-US
-        New-CcodTrayNativeMenuSpec -Render $render
-    } $presentation $script:TestEnglishCatalog
-    Assert-CcodEqual 11 $spec.Count 'active native menu has exact top-level item count'
-    $top=@($spec|ForEach-Object {if($_.Separator){'-'}else{"$($_.CommandId):$($_.Enabled):$($_.Checked):$($_.Radio):$($_.Text)"}})
-    $expected=@(
-        '0:False:False:False:Codex Device Connection',
-        ('0:False:False:False:'+[char]0x201c+'Control other devices'+[char]0x201d+' is active for this session'),
-        '-',
-        '0:False:False:False:Current session is ready',
-        '-',
-        '1003:True:True:False:Repair new sessions automatically',
-        '1004:True:False:False:Allow compatible update trials',
-        ('0:True:False:False:Language / '+[char]0x8bed+[char]0x8a00),
-        '1008:True:False:False:Open logs',
-        '-',
-        ('1009:True:False:False:Uninstall supervisor'+[char]0x2026)
-    )
-    Assert-CcodEqual ($expected-join '|') ($top-join '|') 'top-level system menu order and state are exact'
-    $language=@($spec[7].Children|ForEach-Object {"$($_.CommandId):$($_.Enabled):$($_.Checked):$($_.Radio):$($_.Text)"})
-    Assert-CcodEqual (('1005:True:False:True:Follow system (English)|1006:True:False:True:'+[char]0x4e2d+[char]0x6587+'|1007:True:True:True:English')) ($language-join '|') 'language submenu ids order and radio truth are exact'
-    foreach($item in $spec){Assert-CcodEqual 'CommandId,Text,Enabled,Checked,Radio,Separator,Children' (@($item.PSObject.Properties.Name)-join ',') 'native menu item shape is exact'}
-}))
-
-$results.Add((Invoke-CcodTest 'converts the complete PowerShell menu spec to the versioned C# item graph without changing ids or submenu state' {
-    $presentation=New-CcodValidPresentation
-    $result=& (Get-Module TrayUi) {
-        param($Presentation,$Catalog)
-        Initialize-CcodTrayNativeMenuV1
-        $localized=Resolve-CcodTrayLocalizedStrings -Catalog $Catalog -LanguageMode en-US -SystemCultureName en-US
-        $render=New-CcodTrayRenderState -Presentation $Presentation -Localized $localized -LanguageMode en-US -SystemCultureName en-US
-        $spec=New-CcodTrayNativeMenuSpec -Render $render
-        ConvertTo-CcodTrayNativeMenuItems $spec
-    } $presentation $script:TestEnglishCatalog
-    Assert-CcodEqual 'CcodTrayNativeMenuItemV1[]' $result.GetType().FullName 'conversion returns the versioned native item array'
-    Assert-CcodEqual 11 $result.Length 'conversion retains every top-level item'
-    Assert-CcodEqual '0,0,0,0,0,1003,1004,0,1008,0,1009' (($result|ForEach-Object {$_.CommandId})-join ',') 'conversion keeps exact top-level command ids'
-    Assert-CcodEqual 'True,True,True' (($result[7].Children|ForEach-Object {[string]$_.Radio})-join ',') 'conversion retains language radio markers'
-    Assert-CcodEqual 'False,False,True' (($result[7].Children|ForEach-Object {[string]$_.Checked})-join ',') 'conversion retains the active language state'
-    Assert-CcodEqual $true $result[9].Separator 'conversion preserves separators'
-}))
-
-$results.Add((Invoke-CcodTest 'native item conversion rejects an unwhitelisted enabled command before the C# boundary' {
-    $invalid=[pscustomobject][ordered]@{
-        CommandId=[int]1010;Text='Unexpected command';Enabled=$true;Checked=$false;Radio=$false;Separator=$false;Children=[object[]]@()
-    }
-    Assert-CcodThrows {
-        & (Get-Module TrayUi) {param($Items)ConvertTo-CcodTrayNativeMenuItems -Items $Items} @($invalid)
-    } 'native menu command id is invalid'
-}))
-
-$results.Add((Invoke-CcodTest 'production adapters own a hidden HWND and expose blocking menu show cancel and MouseUp boundaries' {
-    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
-    foreach($name in @('CreateNativeMenuOwner','ShowNativeMenu','EndNativeMenu','DisposeNativeMenuOwner')){
-        Assert-CcodTrue $production.ContainsKey($name) "production adapter exposes $name"
-    }
-    $owner=$null;$notify=$null;$attachment=$null
-    try{
-        $owner=& $production.CreateNativeMenuOwner
-        Assert-CcodEqual 'CcodTrayNativeMenuOwnerV1' $owner.GetType().FullName 'owner crosses the versioned native HWND boundary'
-        Assert-CcodTrue ($owner.WindowHandle -is [IntPtr] -and $owner.WindowHandle -ne [IntPtr]::Zero) 'owner has a live hidden HWND'
-        $notify=& $production.CreateUiObject 'NotifyIcon' 'TrayNotifyIcon'
-        $attachment=& $production.AttachUiCallback $notify 'MouseUp' {param($sender,$eventArgs)}
-        Assert-CcodEqual 'MouseUp' $attachment.EventName 'NotifyIcon right-click boundary uses MouseUp'
-    }finally{
-        if($null -ne $attachment){& $production.DetachUiCallback $attachment}
-        if($null -ne $notify){& $production.DisposeUiObject $notify}
-        if($null -ne $owner){& $production.DisposeNativeMenuOwner $owner}
-    }
-}))
-
-$results.Add((Invoke-CcodTest 'NotifyIcon left MouseUp is inert while right MouseUp shows one native menu and cancel queues nothing' {
-    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null;$openStates=[Collections.Generic.List[bool]]::new()
+$results.Add((Invoke-CcodTest 'prebuilds one bilingual ContextMenu graph, defers an open-menu presentation, and queues only the clicked command' {
+    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
     try{
         $context=New-CcodTrayContext -CommandQueue $queue -OnTick {} -Adapters $fake.Adapters
-        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
-        Assert-CcodTrue (-not $context.NotifyIcon.Properties.Contains('ContextMenuStrip')) 'NotifyIcon never receives a ContextMenuStrip'
-        Assert-CcodEqual 'MouseUp' (@($context.NotifyIcon.Events.Keys)-join ',') 'NotifyIcon registers only MouseUp'
-        $fake.State.OnShowNativeMenu={$openStates.Add([bool]$context.MenuOpen)}.GetNewClosure()
-        Assert-CcodEqual 0 @(& $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Left'})).Count 'left MouseUp emits no output'
-        Assert-CcodEqual 0 $fake.State.NativeMenuShowCount 'left MouseUp never displays a menu'
-        Assert-CcodEqual 0 $queue.Count 'left MouseUp queues no command'
-        $fake.State.NativeMenuResults.Enqueue(0)
-        Assert-CcodEqual 0 @(& $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})).Count 'right MouseUp emits no output'
-        Assert-CcodEqual 1 $fake.State.NativeMenuShowCount 'right MouseUp displays exactly one native menu'
-        Assert-CcodEqual 'True' (($openStates|ForEach-Object {[string]$_})-join ',') 'MenuOpen is true only while the native menu blocks'
-        Assert-CcodEqual $false $context.MenuOpen 'native cancellation clears MenuOpen'
-        Assert-CcodEqual 0 $queue.Count 'native command id zero queues nothing'
-    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+        Assert-CcodEqual 'ContextMenu' $context.Menu.Kind 'one persistent legacy ContextMenu is constructed'
+        Assert-CcodTrue ([object]::ReferenceEquals($context.Menu,$context.NotifyIcon.Properties.ContextMenu)) 'NotifyIcon is bound before it is visible'
+        Assert-CcodEqual 'Title,Status,SessionReady,ApplyNow,ManualRetry,Automation,CandidateOptIn,Language,OpenLogs,Uninstall' (@($context.Items.Keys)-join ',') 'complete top-level menu graph is prebuilt in system order'
+        Assert-CcodEqual 'System,Chinese,English' (@($context.LanguageItems.Keys)-join ',') 'complete language submenu is prebuilt'
+        Assert-CcodEqual 'Popup,Collapse' (@($context.Callbacks|Where-Object {$_.EventName -in @('Popup','Collapse')}|ForEach-Object {$_.EventName}) -join ',') 'only ContextMenu lifecycle callbacks are attached to the menu'
+        Assert-CcodTrue (@($context.Callbacks|Where-Object {$_.EventName -eq 'MouseUp'}).Count -eq 0) 'automatic tray menu path never attaches MouseUp'
+
+        $active=New-CcodValidPresentation
+        Set-CcodTrayPresentation -Context $context -Presentation $active
+        Assert-CcodEqual 'Codex Device Connection' $context.Items.Title.Properties.Text 'English title is rendered in the persistent menu'
+        Assert-CcodEqual ([char]0x201c+'Control other devices'+[char]0x201d+' is active for this session') $context.Items.Status.Properties.Text 'English status is rendered in the persistent menu'
+        & $context.Menu.Events.Popup $context.Menu $null
+        Assert-CcodEqual $true $context.MenuOpen 'Popup begins the menu-open window'
+        Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN
+        Assert-CcodEqual 'Codex Device Connection' $context.Items.Title.Properties.Text 'open menu keeps its current presentation until Collapse'
+        Assert-CcodTrue ($null -ne $context.PendingRender) 'open menu coalesces the next render'
+        & $context.Menu.Events.Collapse $context.Menu $null
+        $zhTitle='Codex '+[string]::Concat([char[]]@(0x8bbe,0x5907,0x8fde,0x63a5))
+        Assert-CcodEqual $false $context.MenuOpen 'Collapse clears menu-open state'
+        Assert-CcodEqual $zhTitle $context.Items.Title.Properties.Text 'Collapse flushes the newest bilingual render in place'
+        Assert-CcodEqual $null $context.PendingRender 'Collapse clears the rendered pending snapshot'
+
+        & $context.Items.OpenLogs.Events.Click $context.Items.OpenLogs $null
+        Assert-CcodEqual 1 $queue.Count 'enabled menu item click queues one command'
+        Assert-CcodEqual 'OpenLogs' $queue.Dequeue().Kind 'click queues its exact command without a MouseUp dispatcher'
+    }finally{if($null -ne $context){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
-$results.Add((Invoke-CcodTest 'right-click passes the entire native menu snapshot as the second adapter argument without argument flattening' {
+$results.Add((Invoke-CcodTest 'shutdown ends an open ContextMenu then unbinds it before disposing retained tray resources' {
     $fake=New-CcodTrayFakeAdapters;$context=$null
     try{
         $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
-        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
-        $fake.State.NativeMenuResults.Enqueue(0)
-        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
-        $items=$fake.State.NativeMenuSpecs[0]
-        Assert-CcodEqual 11 @($items).Count 'ShowNativeMenu receives every top-level item as one Items argument'
-        Assert-CcodEqual 3 @($items[7].Children).Count 'ShowNativeMenu receives the complete language submenu'
-        Assert-CcodEqual '1005,1006,1007' (($items[7].Children|ForEach-Object {$_.CommandId})-join ',') 'nested command ids survive the adapter boundary'
-    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
-}))
-
-$results.Add((Invoke-CcodTest 'native command ids 1001 through 1009 map exactly to queue-only commands without optimistic truth changes' {
-    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
-    try{
-        $context=New-CcodTrayContext -CommandQueue $queue -OnTick {} -Adapters $fake.Adapters
-        $presentation=New-CcodValidPresentation
-        $presentation.SessionReadyVisible=$false;$presentation.ApplyNowVisible=$true;$presentation.ApplyNowEnabled=$true
-        $presentation.ManualRetryVisible=$true;$presentation.ManualRetryEnabled=$true
-        Set-CcodTrayPresentation -Context $context -Presentation $presentation
-        foreach($id in 1001..1009){$fake.State.NativeMenuResults.Enqueue([int]$id)}
-        foreach($id in 1001..1009){& $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})}
-        Assert-CcodEqual 9 $fake.State.NativeMenuShowCount 'each right MouseUp invokes one native menu'
-        Assert-CcodEqual 9 $queue.Count 'each known enabled native id queues exactly once'
-        $expected=@(
-            @('ApplyNow',$null),@('ManualRetry',$null),@('SetAutomationEnabled',$false),@('SetCandidateCompatibleOptIn',$true),
-            @('SetUiLanguage','System'),@('SetUiLanguage','zh-CN'),@('SetUiLanguage','en-US'),@('OpenLogs',$null),@('Uninstall',$null)
-        )
-        foreach($entry in $expected){
-            $command=$queue.Dequeue()
-            Assert-CcodEqual 'Kind,Value,EnqueuedAtUtc' (@($command.PSObject.Properties.Name)-join ',') 'native command queue shape is exact'
-            Assert-CcodEqual $entry[0] $command.Kind 'native command kind maps by exact id'
-            Assert-CcodEqual $entry[1] $command.Value 'native command value maps by exact id'
-            Assert-CcodEqual '2030-02-03T04:05:06.0000000Z' $command.EnqueuedAtUtc 'native command timestamp is canonical UTC'
-        }
-        Assert-CcodEqual $true $context.CommandValues.AutomationChecked 'automation truth remains the last validated value'
-        Assert-CcodEqual $false $context.CommandValues.CandidateOptInChecked 'candidate truth remains the last validated value'
-        Assert-CcodEqual 'en-US' $context.CommandValues.LanguageMode 'language truth remains the last validated value'
-    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
-}))
-
-$results.Add((Invoke-CcodTest 'native command selection ignores disabled and unknown ids from the adapter boundary' {
-    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
-    try{
-        $context=New-CcodTrayContext -CommandQueue $queue -OnTick {} -Adapters $fake.Adapters
-        $presentation=New-CcodValidPresentation;$presentation.ApplyNowVisible=$true;$presentation.ApplyNowEnabled=$false
-        Set-CcodTrayPresentation -Context $context -Presentation $presentation
-        foreach($id in @(1001,9999,1008)){$fake.State.NativeMenuResults.Enqueue([int]$id);& $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})}
-        Assert-CcodEqual 1 $queue.Count 'only the enabled id from the shown snapshot enters the queue'
-        Assert-CcodEqual 'OpenLogs' $queue.Dequeue().Kind 'enabled id retains its exact mapping'
-        Assert-CcodEqual $false $context.CallbackFailure 'disabled and unknown adapter results are contained as no-ops'
-    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
-}))
-
-$results.Add((Invoke-CcodTest 'blocking native menu keeps lightweight ticks and flushes only the latest pending render after return' {
-    $fake=New-CcodTrayFakeAdapters;$context=$null;$modes=[Collections.Generic.List[bool]]::new();$during=[pscustomobject]@{Icon=$null;Pending=$null}
-    try{
-        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick ({param($menuOpenOnly)$modes.Add([bool]$menuOpenOnly)}.GetNewClosure()) -Adapters $fake.Adapters
-        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
-        $fake.State.OnShowNativeMenu={
-            & $context.Timer.Events.Tick $context.Timer $null
-            $pending=New-CcodValidPresentation;$pending.Color='Red';$pending.StateKey='Error'
-            Set-CcodTrayPresentation -Context $context -Presentation $pending
-            $during.Icon=$context.NotifyIcon.Properties.Icon.Color;$during.Pending=$context.PendingRender.Presentation.StateKey
-        }.GetNewClosure()
-        $fake.State.NativeMenuResults.Enqueue(0)
-        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
-        Assert-CcodEqual 'True' (($modes|ForEach-Object {[string]$_})-join ',') 'nested timer requests only the lightweight supervisor tick'
-        Assert-CcodEqual 'Green' $during.Icon 'open native menu receives no icon mutation'
-        Assert-CcodEqual 'Error' $during.Pending 'latest render is pending while the menu blocks'
-        Assert-CcodEqual $false $context.MenuOpen 'native menu return clears MenuOpen'
-        Assert-CcodEqual $null $context.PendingRender 'native menu return consumes the pending render'
-        Assert-CcodEqual 'Red' $context.NotifyIcon.Properties.Icon.Color 'latest pending render applies after native menu return'
-        & $context.Timer.Events.Tick $context.Timer $null
-        Assert-CcodEqual 'True,False' (($modes|ForEach-Object {[string]$_})-join ',') 'next timer returns to normal supervisor work'
-    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
-}))
-
-$results.Add((Invoke-CcodTest 'close during native tracking calls EndMenu and disposes the owner exactly once without queuing the returned id' {
-    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
-    $context=New-CcodTrayContext -CommandQueue $queue -OnTick {} -Adapters $fake.Adapters
-    Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
-    $fake.State.OnShowNativeMenu={Close-CcodTrayContext -Context $context|Out-Null}.GetNewClosure()
-    $fake.State.NativeMenuResults.Enqueue(1008)
-    & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
-    Assert-CcodEqual 'Closed' $context.State 'reentrant shutdown reaches the terminal state'
-    Assert-CcodEqual $false $context.MenuOpen 'reentrant shutdown clears MenuOpen'
-    Assert-CcodEqual 1 $fake.State.NativeMenuEndCount 'shutdown cancels the active native menu exactly once'
-    Assert-CcodEqual 1 $fake.State.NativeOwnerDisposeCount 'shutdown disposes the hidden owner exactly once'
-    Assert-CcodEqual 0 $queue.Count 'a command id returned after shutdown is ignored'
-    Close-CcodTrayContext -Context $context|Out-Null
-    Assert-CcodEqual 1 $fake.State.NativeMenuEndCount 'idempotent close does not cancel twice'
-    Assert-CcodEqual 1 $fake.State.NativeOwnerDisposeCount 'idempotent close does not dispose the owner twice'
-}))
-
-$results.Add((Invoke-CcodTest 'native timer releases QueueGate before invoking the supervisor callback' {
-    $text=Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
-    $match=[regex]::Match($text,'(?ms)\$tick=\{.*?\$validTickAttachment=')
-    Assert-CcodTrue $match.Success 'production timer callback source is present'
-    $tickSource=$match.Value
-    $exitIndex=$tickSource.IndexOf('Monitor]::Exit($contextRef.QueueGate)')
-    $onTickIndex=$tickSource.IndexOf('$invokeAdapterRef $onTick')
-    Assert-CcodTrue ($exitIndex -ge 0 -and $onTickIndex -gt $exitIndex) 'heavy supervisor work is invoked only after the tray gate is released'
-}))
-
-$results.Add((Invoke-CcodTest 'confirms localized uninstall with native warning defaults and queues only the accepted click with no callback output' {
-    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
-    $confirm=[pscustomobject]@{Results=[Collections.Generic.Queue[bool]]::new();Calls=[Collections.Generic.List[object]]::new()}
-    $confirm.Results.Enqueue($false);$confirm.Results.Enqueue($true)
-    $fake.Adapters.ConfirmUninstall={
-        param($Title,$Message)
-        $confirm.Calls.Add([pscustomobject][ordered]@{Title=$Title;Message=$Message})
-        [bool]$confirm.Results.Dequeue()
-    }.GetNewClosure()
-    try{
-        $context=TrayUi\New-CcodTrayContext -CommandQueue $queue -OnTick {} -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US -Adapters $fake.Adapters
-        TrayUi\Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation) -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
-        $fake.State.NativeMenuResults.Enqueue(1009)
-        Assert-CcodEqual 0 @(& $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})).Count 'cancel callback emits no output'
-        Assert-CcodEqual 0 $queue.Count 'cancel queues nothing'
-        $fake.State.NativeMenuResults.Enqueue(1009)
-        Assert-CcodEqual 0 @(& $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})).Count 'confirmed callback emits no output'
-        Assert-CcodEqual 1 $queue.Count 'confirmation queues exactly once'
-        Assert-CcodEqual 2 $confirm.Calls.Count 'both clicks ask for confirmation once'
-        foreach($call in $confirm.Calls){
-            Assert-CcodEqual 'Uninstall Codex connection supervisor?' $call.Title 'localized confirmation title is exact'
-            Assert-CcodEqual 'This stops the supervisor. A managed Codex session will restart normally. Device keys are kept by default.' $call.Message 'localized confirmation message is exact'
-        }
-        $command=$queue.Dequeue()
-        Assert-CcodEqual 'Kind,Value,EnqueuedAtUtc' (($command.PSObject.Properties.Name)-join ',') 'confirmed command shape is exact and ordered'
-        Assert-CcodEqual 'Uninstall' $command.Kind 'confirmed command kind'
-        Assert-CcodEqual $null $command.Value 'confirmed command has no value'
-        Assert-CcodEqual '2030-02-03T04:05:06.0000000Z' $command.EnqueuedAtUtc 'confirmed command timestamp is canonical UTC'
-
-        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-        $native=[pscustomobject]@{Calls=[Collections.Generic.List[object]]::new()}
-        $show={
-            param($Message,$Title,$Buttons,$Icon,$DefaultButton)
-            $native.Calls.Add([pscustomobject][ordered]@{Message=$Message;Title=$Title;Buttons=$Buttons;Icon=$Icon;DefaultButton=$DefaultButton})
-            [Windows.Forms.DialogResult]::Yes
-        }.GetNewClosure()
-        $accepted=& (Get-Module TrayUi) {param($Show)Invoke-CcodTrayUninstallConfirmation -Title 'title' -Message 'message' -ShowDialog $Show} $show
-        Assert-CcodEqual $true $accepted 'native Yes result confirms'
-        Assert-CcodEqual 1 $native.Calls.Count 'native dialog is invoked once'
-        Assert-CcodEqual 'message,title,YesNo,Warning,Button2' "$($native.Calls[0].Message),$($native.Calls[0].Title),$($native.Calls[0].Buttons),$($native.Calls[0].Icon),$($native.Calls[0].DefaultButton)" 'native dialog is YesNo Warning default No'
-    }finally{if($null -ne $context){Close-CcodTrayContext -Context $context|Out-Null}}
-}))
-
-$results.Add((Invoke-CcodTest 'shows a bilingual native snapshot from the current render without retaining ContextMenuStrip controls' {
-    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
-    try{
-        $context=TrayUi\New-CcodTrayContext -CommandQueue $queue -OnTick {} -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN -Adapters $fake.Adapters
-        $active=New-CcodValidPresentation
-        Assert-CcodEqual 0 @(TrayUi\Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN).Count 'localized semantic render emits no output'
-        Assert-CcodTrue ($null -eq $context.PSObject.Properties['Menu'] -and $null -eq $context.PSObject.Properties['Rows'] -and $null -eq $context.PSObject.Properties['Items']) 'context retains no permanent ContextMenuStrip graph'
-        $fake.State.NativeMenuResults.Enqueue(0)
-        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
-        $snapshot=$fake.State.NativeMenuSpecs[0]
-        $zhTitle='Codex '+[string]::Concat([char[]]@(0x8bbe,0x5907,0x8fde,0x63a5))
-        $zhStatus=[string]::Concat([char[]]@(0x5f53,0x524d,0x4f1a,0x8bdd,0x5df2,0x542f,0x7528,0x201c,0x8fde,0x63a5,0x5176,0x4ed6,0x8bbe,0x5907,0x201d))
-        Assert-CcodEqual $zhTitle $snapshot[0].Text 'title resolves from the Chinese catalog at show time'
-        Assert-CcodEqual $zhStatus $snapshot[1].Text 'status resolves from the semantic state at show time'
-        Assert-CcodEqual ([string]::Concat([char[]]@(0x8bed,0x8a00))+' / Language') $snapshot[7].Text 'language root stays bilingual'
-        Assert-CcodEqual 'True,False,False' (($snapshot[7].Children|ForEach-Object {[string]$_.Checked})-join ',') 'System alone is radio-checked'
-        Assert-CcodEqual $false $snapshot[3].Enabled 'active session row remains display-only through disabled state'
-        Assert-CcodEqual $false $snapshot[3].Checked 'active session row is not a toggle'
-    }finally{if($null -ne $context){Close-CcodTrayContext -Context $context|Out-Null}}
-}))
-
-$results.Add((Invoke-CcodTest 'live language switching updates the next native menu snapshot without rebuilding the tray owner or icons' {
-    $fake=New-CcodTrayFakeAdapters;$context=$null
-    try{
-        $context=TrayUi\New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN -Adapters $fake.Adapters
-        $active=New-CcodValidPresentation
-        TrayUi\Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestSystemCatalog -LanguageMode System -SystemCultureName zh-CN
-        $notify=$context.NotifyIcon;$owner=$context.NativeMenuOwner;$icons=$context.Icons;$createCount=@($fake.State.Calls|Where-Object {$_ -like 'Create:*'}).Count
-        $resourceCount=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Clone:*'}).Count
-        Assert-CcodEqual 0 @(TrayUi\Set-CcodTrayPresentation -Context $context -Presentation $active -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName zh-CN).Count 'live language switch emits no output'
-        Assert-CcodEqual 'Codex device connection: working' $context.NotifyIcon.Properties.Text 'tooltip switches immediately'
-        $fake.State.NativeMenuResults.Enqueue(0)
-        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
-        $snapshot=$fake.State.NativeMenuSpecs[0]
-        Assert-CcodEqual 'Codex Device Connection' $snapshot[0].Text 'next snapshot uses English title'
-        Assert-CcodEqual ([char]0x201c+'Control other devices'+[char]0x201d+' is active for this session') $snapshot[1].Text 'next snapshot uses English status'
-        Assert-CcodEqual 'False,False,True' (($snapshot[7].Children|ForEach-Object {[string]$_.Checked})-join ',') 'en-US alone is checked after switch'
-        Assert-CcodTrue ([object]::ReferenceEquals($notify,$context.NotifyIcon) -and [object]::ReferenceEquals($owner,$context.NativeMenuOwner) -and [object]::ReferenceEquals($icons,$context.Icons)) 'live switch preserves every retained tray identity'
-        Assert-CcodEqual $createCount @($fake.State.Calls|Where-Object {$_ -like 'Create:*'}).Count 'live switch creates no UI object'
-        Assert-CcodEqual $resourceCount @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Clone:*'}).Count 'live switch allocates no owned icon resource'
-    }finally{if($null -ne $context){Close-CcodTrayContext -Context $context|Out-Null}}
-}))
-
-$results.Add((Invoke-CcodTest 'shows only allow-listed localized native tray errors on the owner thread with no output' {
-    $fake=New-CcodTrayFakeAdapters;$context=TrayUi\New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Catalog $script:TestChineseCatalog -LanguageMode zh-CN -SystemCultureName en-US -Adapters $fake.Adapters
-    try{
-        Assert-CcodEqual 0 @(Show-CcodTrayError -Context $context -Catalog $script:TestChineseCatalog -Key Error.LanguageChange).Count 'error dialog emits no output'
-        Assert-CcodEqual 1 $fake.State.Dialogs.Count 'one dialog is shown'
-        Assert-CcodEqual ('Codex '+[string]::Concat([char[]]@(0x8bbe,0x5907,0x8fde,0x63a5))) $fake.State.Dialogs[0].Title 'dialog title is localized'
-        Assert-CcodEqual ([string]::Concat([char[]]@(0x65e0,0x6cd5,0x5207,0x6362,0x8bed,0x8a00,0xff1b,0x5df2,0x4fdd,0x7559,0x539f,0x8bed,0x8a00,0x3002))) $fake.State.Dialogs[0].Message 'dialog message is localized and non-sensitive'
-        Assert-CcodThrows {Show-CcodTrayError -Context $context -Catalog $script:TestChineseCatalog -Key Tray.Title} 'CCOD_TRAY_INPUT_INVALID'
-        $fake.State.ThreadId=38
-        Assert-CcodThrows {Show-CcodTrayError -Context $context -Catalog $script:TestChineseCatalog -Key Error.UninstallStart} 'CCOD_TRAY_THREAD_INVALID'
-    }finally{$fake.State.ThreadId=37;Close-CcodTrayContext -Context $context|Out-Null}
-}))
-
-$results.Add((Invoke-CcodTest 'exposes and draws the production bridge icon contract at both cached sizes' {
-    $production=& (Get-Module TrayUi) {Get-CcodTrayDefaultAdapters}
-    Assert-CcodTrue ($production.ContainsKey('DrawBridgeIcon')) 'production adapter exposes DrawBridgeIcon'
-    Assert-CcodTrue (-not $production.ContainsKey('DrawIconCircle')) 'retired DrawIconCircle adapter is absent'
-    foreach($color in @('Gray','Green','Yellow','Red')){
-        foreach($size in @(16,32)){
-            $bitmap=& $production.CreateBitmap $color $size
-            try{
-                & $production.DrawBridgeIcon $bitmap $color $size
-                Assert-CcodEqual $size $bitmap.Width "$color $size width"
-                Assert-CcodEqual $size $bitmap.Height "$color $size height"
-                Assert-CcodTrue (Test-CcodOpaquePixels -Bitmap $bitmap -Region 'base') "$color $size has dark rounded base"
-                Assert-CcodTrue (Test-CcodLightPixels -Bitmap $bitmap -Region 'links') "$color $size has visible bridge links"
-                Assert-CcodTrue (Test-CcodStatusPixels -Bitmap $bitmap -Region 'dot' -Color $color) "$color $size has correct outlined status dot"
-                Assert-CcodTrue (Test-CcodTransparentCorners -Bitmap $bitmap) "$color $size corners are transparent"
-            }finally{& $production.DisposeIconResource $bitmap}
-        }
-    }
-}))
-
-$results.Add((Invoke-CcodTest 'constructs the minimal native tray graph and closes the hidden owner and every retained resource exactly once' {
-    $fake=New-CcodTrayFakeAdapters
-    $queue=New-CcodTrayTestQueue
-    $ticks=[pscustomobject]@{Count=0}
-    $onTick={$ticks.Count=$ticks.Count+1}.GetNewClosure()
-    $context=New-CcodTrayContext -CommandQueue $queue -OnTick $onTick -Adapters $fake.Adapters
-    Assert-CcodEqual 'Open' $context.State 'context opens only after complete construction'
-    Assert-CcodEqual 37 $context.OwnerManagedThreadId 'owner managed thread is recorded'
-    Assert-CcodEqual 1 @($fake.State.Objects|Where-Object Kind -eq 'ApplicationContext').Count 'one application context'
-    Assert-CcodEqual 1 @($fake.State.Objects|Where-Object Kind -eq 'Timer').Count 'one timer'
-    Assert-CcodEqual 1 @($fake.State.Objects|Where-Object Kind -eq 'NotifyIcon').Count 'one notify icon'
-    Assert-CcodEqual 1 $fake.State.NativeOwners.Count 'one hidden native menu owner'
-    Assert-CcodEqual 'NativeMenuOwner' $context.NativeMenuOwner.Kind 'native owner crosses the explicit adapter boundary'
-    Assert-CcodEqual 0 @($fake.State.Objects|Where-Object {$_.Kind -in @('Menu','Row','MenuItem','Separator')}).Count 'no permanent ContextMenuStrip controls are allocated'
-    Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*'}).Count 'eight cached bitmap sizes and colors'
-    Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Draw:*'}).Count 'eight cached bitmaps are drawn once'
-    Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'Clone:*'}).Count 'eight cached icon clones are created'
-    Assert-CcodEqual 8 @($fake.State.Calls|Where-Object {$_ -like 'DestroyIcon:*'}).Count 'every temporary HICON is destroyed immediately'
-    Assert-CcodEqual 0 $fake.State.TitleBitmaps.Count 'native menu needs no retained title bitmap'
-    Assert-CcodEqual 0 $fake.State.BoldFonts.Count 'native menu needs no retained title font'
-    Assert-CcodEqual 'Gray:16,Gray:32,Green:16,Green:32,Yellow:16,Yellow:32,Red:16,Red:32' (@($context.Icons.Keys)-join ',') 'cached icon keys are exact and ordered'
-    $iconCalls=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'})
-    $expectedIconCalls=@(
-        'Bitmap:Gray:16','Draw:Gray:16','GetHicon:Gray:16','Clone:Gray:16','DestroyIcon:1001','DisposeIcon:Gray:16',
-        'Bitmap:Gray:32','Draw:Gray:32','GetHicon:Gray:32','Clone:Gray:32','DestroyIcon:1002','DisposeIcon:Gray:32',
-        'Bitmap:Green:16','Draw:Green:16','GetHicon:Green:16','Clone:Green:16','DestroyIcon:1003','DisposeIcon:Green:16',
-        'Bitmap:Green:32','Draw:Green:32','GetHicon:Green:32','Clone:Green:32','DestroyIcon:1004','DisposeIcon:Green:32',
-        'Bitmap:Yellow:16','Draw:Yellow:16','GetHicon:Yellow:16','Clone:Yellow:16','DestroyIcon:1005','DisposeIcon:Yellow:16',
-        'Bitmap:Yellow:32','Draw:Yellow:32','GetHicon:Yellow:32','Clone:Yellow:32','DestroyIcon:1006','DisposeIcon:Yellow:32',
-        'Bitmap:Red:16','Draw:Red:16','GetHicon:Red:16','Clone:Red:16','DestroyIcon:1007','DisposeIcon:Red:16',
-        'Bitmap:Red:32','Draw:Red:32','GetHicon:Red:32','Clone:Red:32','DestroyIcon:1008','DisposeIcon:Red:32'
-    )
-    Assert-CcodEqual ($expectedIconCalls-join ',') ($iconCalls-join ',') 'each temporary HICON is destroyed before its bitmap and the next icon'
-    Assert-CcodEqual 250 $context.Timer.Properties.Interval 'single timer is exactly 250 ms'
-    Assert-CcodEqual $true $context.Timer.Properties.Started 'timer starts once after graph creation'
-    $visibleIndex=$fake.State.Calls.IndexOf('Visible:TrayNotifyIcon:True')
-    $ownerIndex=$fake.State.Calls.IndexOf('NativeOwner:Create')
-    Assert-CcodTrue ($ownerIndex -ge 0 -and $visibleIndex -gt $ownerIndex) 'hidden owner creation completes before the icon becomes visible'
-    Assert-CcodEqual $true $context.NotifyIcon.Properties.Visible 'notify icon becomes visible only after setup'
-
-    $tickOutput=@(& $context.Timer.Events.Tick)
-    Assert-CcodEqual 0 $tickOutput.Count 'timer callback emits no output'
-    Assert-CcodEqual $false $context.CallbackFailure 'valid timer callback is not contained as a failure'
-    Assert-CcodEqual 1 $ticks.Count 'one tick invokes infrastructure callback once'
-
-    $first=Close-CcodTrayContext -Context $context
-    Assert-CcodEqual 'SchemaVersion,Closed,CleanupCodes' (($first.PSObject.Properties.Name)-join ',') 'close receipt has exact fields'
-    Assert-CcodEqual 1 $first.SchemaVersion 'close receipt schema'
-    Assert-CcodEqual $true $first.Closed 'first close succeeds'
-    Assert-CcodEqual 0 @($first.CleanupCodes).Count 'clean fake close has no failure code'
-    Assert-CcodEqual 'Closed' $context.State 'close latches state before cleanup'
-    Assert-CcodEqual 8 @($context.Icons.Values|Where-Object {$_.DisposeCount -eq 1}).Count 'all owned icon clones disposed exactly once'
-    Assert-CcodEqual 0 @($context.Icons.Values|Where-Object {$_.DisposeCount -gt 1}).Count 'no owned icon clone is disposed twice'
-    Assert-CcodEqual 1 $context.NotifyIcon.DisposeCount 'NotifyIcon is disposed exactly once'
-    Assert-CcodEqual 1 $fake.State.NativeOwnerDisposeCount 'hidden native menu owner is disposed exactly once'
-    Assert-CcodEqual $true $context.NativeMenuOwner.Disposed 'hidden native owner records deterministic disposal'
-    Assert-CcodEqual 0 @($fake.State.Objects|Where-Object {$_.DisposeCount -gt 1}).Count 'retained WinForms objects are never disposed twice'
-    $hideIndex=$fake.State.Calls.IndexOf('Visible:TrayNotifyIcon:False')
-    $notifyDisposeIndex=$fake.State.Calls.IndexOf('DisposeUi:TrayNotifyIcon')
-    $ownerDisposeIndex=$fake.State.Calls.IndexOf('NativeOwner:Dispose')
-    $contextDisposeIndex=$fake.State.Calls.IndexOf('DisposeUi:TrayApplicationContext')
-    $lastDetachIndex=-1
-    for($index=0;$index -lt $fake.State.Calls.Count;$index++){if($fake.State.Calls[$index] -like 'Detach:*'){$lastDetachIndex=$index}}
-    Assert-CcodTrue ($hideIndex -ge 0 -and $lastDetachIndex -gt $hideIndex -and $notifyDisposeIndex -gt $lastDetachIndex -and $ownerDisposeIndex -gt $notifyDisposeIndex -and $contextDisposeIndex -gt $ownerDisposeIndex) 'close hides, detaches, disposes NotifyIcon, hidden owner, then application context in order'
-    $callCount=$fake.State.Calls.Count
-    $second=Close-CcodTrayContext -Context $context
-    Assert-CcodEqual $true $second.Closed 'second close is a success no-op'
-    Assert-CcodEqual $callCount $fake.State.Calls.Count 'idempotent close runs no adapters twice'
-}))
-
-$results.Add((Invoke-CcodTest 'renders notification state without allocation and keeps native command dispatch bounded and inert after close' {
-    $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
-    try{
-        $context=New-CcodTrayContext -CommandQueue $queue -OnTick {} -Adapters $fake.Adapters
-        $presentation=New-CcodValidPresentation
-        $iconResourceCalls=@($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'}).Count
-        $output=@(Set-CcodTrayPresentation -Context $context -Presentation $presentation)
-        Assert-CcodEqual 0 $output.Count 'presentation emits no output'
-        Assert-CcodEqual 'Codex device connection: working' $context.NotifyIcon.Properties.Text 'tooltip resolves from the semantic state key'
-        Assert-CcodEqual 'Green' $context.NotifyIcon.Properties.Icon.Color 'cached green icon selected'
-        Assert-CcodEqual 'Active' $context.CurrentRender.Presentation.StateKey 'current native menu snapshot records the semantic presentation'
-        Assert-CcodEqual $true $context.CommandValues.AutomationChecked 'verified automation state is retained for selected commands'
-        Assert-CcodEqual $false $context.CommandValues.CandidateOptInChecked 'verified candidate state is retained for selected commands'
-        Assert-CcodEqual $iconResourceCalls @($fake.State.Calls|Where-Object {$_ -like 'Bitmap:*' -or $_ -like 'Draw:*' -or $_ -like 'GetHicon:*' -or $_ -like 'Clone:*' -or $_ -like 'DestroyIcon:*' -or $_ -like 'DisposeIcon:*'}).Count 'presentation allocates or disposes no icon resources'
-
-        $fake.State.NativeMenuResults.Enqueue(1008)
-        $callbackOutput=@(& $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'}))
-        Assert-CcodEqual 0 $callbackOutput.Count 'native command callback emits no output'
-        Assert-CcodEqual 'OpenLogs' $queue.Dequeue().Kind 'enabled snapshot command queues its exact kind'
-        foreach($n in 1..256){$queue.Enqueue([pscustomobject]@{N=$n})}
-        $fake.State.NativeMenuResults.Enqueue(1008)
-        @(& $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'}))|Out-Null
-        Assert-CcodEqual 256 $queue.Count 'command queue never exceeds 256'
-        Assert-CcodEqual $true $context.CommandOverflowed 'command overflow sets sticky flag'
-        $closedCallback=$context.NotifyIcon.Events.MouseUp
-        [void](Close-CcodTrayContext -Context $context)
-        $clockCalls=@($fake.State.Calls|Where-Object {$_ -ceq 'Clock:GetUtcNow'}).Count
-        $closedOutput=@(& $closedCallback $context.NotifyIcon ([pscustomobject]@{Button='Right'}))
-        Assert-CcodEqual 0 $closedOutput.Count 'closed callback is a no-output no-op'
-        Assert-CcodEqual $clockCalls @($fake.State.Calls|Where-Object {$_ -ceq 'Clock:GetUtcNow'}).Count 'closed callback invokes no clock or queue adapter'
+        & $context.Menu.Events.Popup $context.Menu $null
+        $receipt=Close-CcodTrayContext -Context $context
+        Assert-CcodEqual $true $receipt.Closed 'close succeeds while ContextMenu is open'
+        Assert-CcodEqual 1 $fake.State.MenuEndCount 'open ContextMenu is explicitly ended for shutdown'
+        $endIndex=$fake.State.Calls.IndexOf('Menu:End')
+        $unbindIndex=$fake.State.Calls.LastIndexOf('Set:TrayNotifyIcon:ContextMenu')
+        $notifyDisposeIndex=$fake.State.Calls.IndexOf('DisposeUi:TrayNotifyIcon')
+        $menuDisposeIndex=$fake.State.Calls.IndexOf('DisposeUi:TrayContextMenu')
+        Assert-CcodTrue ($endIndex -ge 0 -and $unbindIndex -gt $endIndex -and $notifyDisposeIndex -gt $unbindIndex -and $menuDisposeIndex -gt $notifyDisposeIndex) 'shutdown ends, unbinds, then disposes the framework-owned menu'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
@@ -750,9 +347,7 @@ $results.Add((Invoke-CcodTest 'renders the optional External renderer handoff wa
         Set-CcodTrayPresentation -Context $context -Presentation $presentation -Catalog $script:TestEnglishCatalog -LanguageMode en-US -SystemCultureName en-US
         Assert-CcodEqual 'Codex device connection: working' $context.NotifyIcon.Properties.Text 'External renderer warning keeps the active tooltip'
         Assert-CcodEqual 'Yellow' $context.NotifyIcon.Properties.Icon.Color 'External renderer warning uses the yellow icon'
-        $fake.State.NativeMenuResults.Enqueue(0)
-        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
-        Assert-CcodEqual 'External renderer handoff was not completed; Codex remains active' $fake.State.NativeMenuSpecs[0][1].Text 'warning text is carried by the next native snapshot'
+        Assert-CcodEqual 'External renderer handoff was not completed; Codex remains active' $context.Items.Status.Properties.Text 'warning text is rendered in the persistent ContextMenu'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
@@ -919,20 +514,19 @@ $results.Add((Invoke-CcodTest 'rejects initial queue and adapter contracts befor
 $results.Add((Invoke-CcodTest 'continues every tray and watcher cleanup stage with bounded allowlisted receipts' {
     $fake=New-CcodTrayFakeAdapters;$context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
     $context.CleanupCodes.Add('SECRET_PRESEEDED_CODE')
-    $cleanup=[pscustomobject]@{Hide=0;NativeEnd=0;Stop=0;Ui=0;Icon=0;Detach=0;NativeOwner=0;Exit=0}
+    $cleanup=[pscustomobject]@{Hide=0;MenuEnd=0;Stop=0;Ui=0;Icon=0;Detach=0;Exit=0}
     $context.Adapters.SetUiVisible={param($Object,$Visible)$cleanup.Hide++;throw 'SECRET_HIDE'}.GetNewClosure()
     $context.MenuOpen=$true
-    $context.Adapters.EndNativeMenu={$cleanup.NativeEnd++;throw 'SECRET_NATIVE_END'}.GetNewClosure()
+    $context.Adapters.EndMenu={$cleanup.MenuEnd++;throw 'SECRET_MENU_END'}.GetNewClosure()
     $context.Adapters.StopUiTimer={param($Timer)$cleanup.Stop++;throw 'SECRET_STOP'}.GetNewClosure()
     $context.Adapters.DisposeUiObject={param($Object)$cleanup.Ui++;throw 'SECRET_UI'}.GetNewClosure()
     $context.Adapters.DisposeIconResource={param($Object)$cleanup.Icon++;throw 'SECRET_ICON'}.GetNewClosure()
     $context.Adapters.DetachUiCallback={param($Receipt)$cleanup.Detach++;throw 'SECRET_DETACH'}.GetNewClosure()
-    $context.Adapters.DisposeNativeMenuOwner={param($Owner)$cleanup.NativeOwner++;throw 'SECRET_NATIVE_OWNER'}.GetNewClosure()
     $context.Adapters.ExitUiContext={param($Object)$cleanup.Exit++;throw 'SECRET_EXIT'}.GetNewClosure()
     $receipt=Close-CcodTrayContext -Context $context
-    $expected='CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED,CCOD_TRAY_CLEANUP_NATIVE_MENU_END_FAILED,CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED,CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED,CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_NATIVE_MENU_OWNER_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
+    $expected='CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED,CCOD_TRAY_CLEANUP_NATIVE_MENU_END_FAILED,CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED,CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED,CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED,CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
     Assert-CcodEqual $expected (@($receipt.CleanupCodes)-join ',') 'tray cleanup codes are ordered deduplicated and allowlisted'
-    Assert-CcodTrue ($cleanup.Hide -ge 1 -and $cleanup.NativeEnd -eq 1 -and $cleanup.Stop -eq 1 -and $cleanup.Ui -eq 3 -and $cleanup.Icon -eq 8 -and $cleanup.Detach -eq 2 -and $cleanup.NativeOwner -eq 1 -and $cleanup.Exit -eq 1) 'all native tray cleanup stages continue despite a native menu cancellation failure'
+    Assert-CcodTrue ($cleanup.Hide -ge 1 -and $cleanup.MenuEnd -eq 1 -and $cleanup.Stop -eq 1 -and $cleanup.Ui -eq 4 -and $cleanup.Icon -eq 8 -and $cleanup.Detach -ge 12 -and $cleanup.Exit -eq 1) 'all ContextMenu cleanup stages continue despite a menu cancellation failure'
     Assert-CcodTrue (($receipt|ConvertTo-Json -Compress) -cnotmatch 'SECRET') 'tray receipt exposes no injected text'
 
     $fake2=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$watcher=Start-CcodProcessWatcher -Queue $queue -OnFullReconciliationRequired {} -Adapters $fake2.Adapters;$queue.Enqueue('hint')
@@ -1075,12 +669,12 @@ $results.Add((Invoke-CcodTest 'accepts every exact Stopping callback-clear snaps
     }
 }))
 
-$results.Add((Invoke-CcodTest 'recovers every retained Win32 owner UI bitmap HICON clone and attachment emitted before a diagnostic failure' {
-    foreach($stage in @('CreateUiObject','CreateNativeMenuOwner','CreateBitmap','GetHicon','CloneIcon','AttachUiCallback')){
+$results.Add((Invoke-CcodTest 'recovers every retained ContextMenu UI bitmap HICON clone and attachment emitted before a diagnostic failure' {
+    foreach($stage in @('CreateUiObject','AddUiChild','CreateBitmap','GetHicon','CloneIcon','AttachUiCallback')){
         $fake=New-CcodTrayFakeAdapters;$original=$fake.Adapters[$stage]
         switch($stage){
             'CreateUiObject' {$fake.Adapters[$stage]={param($Kind,$Name)$value=& $original $Kind $Name;$value;Write-Warning 'SECRET_AFTER_UI'}.GetNewClosure()}
-            'CreateNativeMenuOwner' {$fake.Adapters[$stage]={$value=& $original;$value;Write-Warning 'SECRET_AFTER_NATIVE_OWNER'}.GetNewClosure()}
+            'AddUiChild' {$fake.Adapters[$stage]={param($Parent,$Child)& $original $Parent $Child;Write-Warning 'SECRET_AFTER_MENU_CHILD'}.GetNewClosure()}
             'CreateBitmap' {$fake.Adapters[$stage]={param($Color,$Size)$value=& $original $Color $Size;$value;Write-Warning 'SECRET_AFTER_BITMAP'}.GetNewClosure()}
             'GetHicon' {$fake.Adapters[$stage]={param($Bitmap)$value=& $original $Bitmap;$value;Write-Warning 'SECRET_AFTER_HICON'}.GetNewClosure()}
             'CloneIcon' {$fake.Adapters[$stage]={param($Hicon,$Color,$Size)$value=& $original $Hicon $Color $Size;$value;Write-Warning 'SECRET_AFTER_CLONE'}.GetNewClosure()}
@@ -1091,8 +685,7 @@ $results.Add((Invoke-CcodTest 'recovers every retained Win32 owner UI bitmap HIC
         Assert-CcodTrue (@($fake.State.Bitmaps|Where-Object {$_.DisposeCount -ne 1}).Count -eq 0) "$stage disposes every created bitmap once"
         Assert-CcodTrue (@($fake.State.IconClones|Where-Object {$_.DisposeCount -ne 1}).Count -eq 0) "$stage disposes every created clone once"
         if($stage -ceq 'GetHicon'){Assert-CcodEqual 1 @($fake.State.Calls|Where-Object {$_ -like 'DestroyIcon:*'}).Count 'diagnostic HICON is still destroyed'}
-        if($stage -ceq 'CreateNativeMenuOwner'){Assert-CcodEqual 1 $fake.State.NativeOwnerDisposeCount 'diagnostic hidden owner is disposed immediately'}
-        if($stage -ceq 'AttachUiCallback'){Assert-CcodEqual 1 @($fake.State.Calls|Where-Object {$_ -like 'Detach:TrayNotifyIcon:MouseUp'}).Count 'diagnostic MouseUp attachment is detached immediately'}
+        if($stage -ceq 'AttachUiCallback'){Assert-CcodTrue (@($fake.State.Calls|Where-Object {$_ -like 'Detach:*'}).Count -ge 1) 'diagnostic ContextMenu attachment is detached immediately'}
     }
     $invalid=New-CcodTrayFakeAdapters;$invalid.Adapters.GetHicon={param($Bitmap)'1001';Write-Warning 'invalid hicon'}
     Assert-CcodThrows {New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $invalid.Adapters} 'CCOD_TRAY_CREATE_FAILED'
