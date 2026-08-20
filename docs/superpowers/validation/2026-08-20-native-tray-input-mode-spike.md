@@ -41,6 +41,22 @@ WM_NULL_Delivered=5
 
 The selected command was the harmless `No-op` command. This closes the small selection smoke test but does not replace the required 50-trial Chinese/English gate.
 
+The required 50-trial runs then completed:
+
+```text
+Chinese: attempts=50, trackCalls=50, cancelCount=27, selectedCount=23,
+         foregroundFailures=0, ownerHasNoInputContext=true,
+         trackMinMs=558, trackMaxMs=2413, trackAverageMs=995,
+         WM_NULL_Delivered=50
+
+English: attempts=50, trackCalls=50, cancelCount=30, selectedCount=20,
+         foregroundFailures=0, ownerHasNoInputContext=true,
+         trackMinMs=197, trackMaxMs=12522, trackAverageMs=783,
+         WM_NULL_Delivered=50
+```
+
+The automated trace shows no immediate zero-return loop, foreground-proof failure, or missing `WM_NULL`. Final gate status still requires the user's confirmation that the visible input indicator did not change during either run and one explicit uncommitted-composition trial.
+
 ## Gate result
 
 **BLOCKED / NOT PASSED.** The current no-HIMC persistent-owner spike does not yet demonstrate stable repeated interaction on the target machine. No production TrayHost, IPC integration, installer build, push, tag, or Release may proceed from this evidence.
