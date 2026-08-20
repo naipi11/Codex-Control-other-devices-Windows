@@ -73,14 +73,17 @@ public sealed class CcodTrayNativeMenuItemV1
 
 public sealed class CcodTrayNativeMenuOwnerV1 : IDisposable
 {
+    private const uint WS_EX_TOOLWINDOW = 0x00000080;
     private const uint WS_POPUP = 0x80000000;
+    private const int SW_HIDE = 0;
+    private const int SW_SHOWNOACTIVATE = 4;
     private IntPtr handle;
     private readonly int managedThreadId;
 
     public CcodTrayNativeMenuOwnerV1()
     {
         managedThreadId = Thread.CurrentThread.ManagedThreadId;
-        handle = CreateWindowExW(0, "STATIC", "CcodTrayNativeMenuOwnerV1", WS_POPUP, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        handle = CreateWindowExW(WS_EX_TOOLWINDOW, "STATIC", "CcodTrayNativeMenuOwnerV1", WS_POPUP, -32000, -32000, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         if (handle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateWindowExW failed");
     }
 
@@ -98,6 +101,18 @@ public sealed class CcodTrayNativeMenuOwnerV1 : IDisposable
         if (managedThreadId != Thread.CurrentThread.ManagedThreadId) throw new InvalidOperationException("native menu owner thread mismatch");
     }
 
+    internal void ShowForMenu()
+    {
+        AssertOwnerThread();
+        ShowWindow(Handle, SW_SHOWNOACTIVATE);
+    }
+
+    internal void HideAfterMenu()
+    {
+        AssertOwnerThread();
+        if (handle != IntPtr.Zero) ShowWindow(handle, SW_HIDE);
+    }
+
     public IntPtr WindowHandle { get { return Handle; } }
 
     public void Dispose()
@@ -113,6 +128,10 @@ public sealed class CcodTrayNativeMenuOwnerV1 : IDisposable
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr window, int command);
 }
 
 public static class CcodTrayNativeMenuV1
@@ -162,14 +181,23 @@ public static class CcodTrayNativeMenuV1
         {
             Point point;
             if (!GetCursorPos(out point)) throw new Win32Exception(Marshal.GetLastWin32Error(), "GetCursorPos failed");
-            SetForegroundWindow(owner.Handle);
+            owner.ShowForMenu();
+            if (!SetForegroundWindow(owner.Handle)) throw new InvalidOperationException("native menu owner could not enter foreground");
+            if (GetForegroundWindow() != owner.Handle) throw new InvalidOperationException("native menu owner foreground was not retained");
             uint selected = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.X, point.Y, owner.Handle, IntPtr.Zero);
             if (!PostMessageW(owner.Handle, WM_NULL, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "PostMessageW failed");
             return unchecked((int)selected);
         }
         finally
         {
-            if (!DestroyMenu(menu)) throw new Win32Exception(Marshal.GetLastWin32Error(), "DestroyMenu failed");
+            try
+            {
+                owner.HideAfterMenu();
+            }
+            finally
+            {
+                if (!DestroyMenu(menu)) throw new Win32Exception(Marshal.GetLastWin32Error(), "DestroyMenu failed");
+            }
         }
     }
 
@@ -254,6 +282,9 @@ public static class CcodTrayNativeMenuV1
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);

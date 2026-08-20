@@ -569,6 +569,25 @@ Invoke-CcodTest 'menu-open tick checks shutdown but skips every heavy supervisor
     Assert-CcodTrue ($world.Calls.Contains('Exit:UI')) 'menu-open shutdown still exits the native menu loop'
 }
 
+Invoke-CcodTest 'default shutdown ends an active native menu before exit and still exits when EndMenu fails' {
+    $defaults=Get-CcodSupervisorDefaultAdapters
+    $calls=[Collections.Generic.List[string]]::new()
+    $applicationContext=[pscustomobject]@{}
+    $applicationContext|Add-Member -MemberType ScriptMethod -Name ExitThread -Value {$calls.Add('Exit:UI')}
+    $tray=[pscustomobject]@{
+        MenuOpen=$true
+        Adapters=@{EndNativeMenu={$calls.Add('End:Native');throw 'PRIVATE_NATIVE_END_FAILURE'}.GetNewClosure()}
+        ApplicationContext=$applicationContext
+    }
+    & $defaults.RequestUiExit $tray
+    Assert-CcodEqual 'End:Native|Exit:UI' (@($calls)-join '|') 'active-menu shutdown attempts EndMenu before it exits the same UI context'
+
+    $calls.Clear()
+    $tray.MenuOpen=$false
+    & $defaults.RequestUiExit $tray
+    Assert-CcodEqual 'Exit:UI' (@($calls)-join '|') 'closed menu does not receive an unnecessary EndMenu call'
+}
+
 Invoke-CcodTest 'observes and renders at 0 and 1000ms but not at intervening 250ms safety ticks' {
     $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
     foreach($elapsed in @([long]0,[long]250,[long]500,[long]750,[long]999,[long]1000)){$world.Elapsed.Enqueue($elapsed)}

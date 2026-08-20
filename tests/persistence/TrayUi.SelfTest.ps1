@@ -266,14 +266,25 @@ $results.Add((Invoke-CcodTest 'production native menu helper exposes owner show 
     Assert-CcodTrue ($null -ne $ownerType.GetMethod('Dispose')) 'native owner exposes deterministic disposal'
 }))
 
-$results.Add((Invoke-CcodTest 'native helper performs foreground tracking and WM_NULL handoff in exact order' {
+$results.Add((Invoke-CcodTest 'native helper only tracks after a visible offscreen tool owner is foreground and always hides it afterward' {
     $text=Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
+    $owner=[regex]::Match($text,'(?ms)public sealed class CcodTrayNativeMenuOwnerV1.*?^}\s*\r?\n\r?\npublic static class')
     $helper=[regex]::Match($text,'(?ms)public static class CcodTrayNativeMenuV1.*?^\s*}\s*''@')
+    Assert-CcodTrue $owner.Success 'native owner source is present'
     Assert-CcodTrue $helper.Success 'native helper source is present'
-    $foreground=$helper.Value.IndexOf('SetForegroundWindow(owner.Handle)')
+    $toolWindow=$owner.Value.IndexOf('WS_EX_TOOLWINDOW')
+    $offscreen=$owner.Value.IndexOf('-32000, -32000, 1, 1')
+    $show=$owner.Value.IndexOf('ShowWindow(Handle, SW_SHOWNOACTIVATE)')
+    $hide=$owner.Value.IndexOf('ShowWindow(handle, SW_HIDE)')
+    Assert-CcodTrue ($toolWindow -ge 0 -and $offscreen -gt $toolWindow -and $show -gt $offscreen -and $hide -gt $show) 'owner is an offscreen tool window and has explicit show/hide operations'
+    $showForMenu=$helper.Value.IndexOf('owner.ShowForMenu()')
+    $foreground=$helper.Value.IndexOf('if (!SetForegroundWindow(owner.Handle))')
+    $foregroundProof=$helper.Value.IndexOf('if (GetForegroundWindow() != owner.Handle)')
     $track=$helper.Value.IndexOf('TrackPopupMenuEx(')
     $post=$helper.Value.IndexOf('PostMessageW(owner.Handle, WM_NULL')
-    Assert-CcodTrue ($foreground -ge 0 -and $track -gt $foreground -and $post -gt $track) 'foreground ownership precedes tracking and WM_NULL handoff'
+    $hideFinally=$helper.Value.IndexOf('owner.HideAfterMenu()')
+    Assert-CcodTrue ($showForMenu -ge 0 -and $foreground -gt $showForMenu -and $foregroundProof -gt $foreground -and $track -gt $foregroundProof -and $post -gt $track) 'failed foreground ownership cannot reach TrackPopupMenuEx and WM_NULL follows tracking'
+    Assert-CcodTrue ($hideFinally -gt $post -and $helper.Value.IndexOf('finally') -lt $hideFinally) 'the owner is hidden from a finally path after menu processing'
 }))
 
 $results.Add((Invoke-CcodTest 'native menu spec preserves exact grouping command ids disabled rows checks and language radios' {
@@ -1214,7 +1225,7 @@ $results.Add((Invoke-CcodTest 'keeps production defaults lazy and the Task10C2 A
     }
     $text=Get-Content -LiteralPath $modulePath -Raw
     Assert-CcodTrue ($text.Contains('Register-WmiEvent -Class $ClassName')) 'production Trace default remains lazy source text only'
-    foreach($forbiddenText in @('PresentationFramework','PresentationCore','WindowsBase','WindowsFormsIntegration','Windows.Window','PostUiCallback','Dispatcher','Topmost','GetForegroundWindow','NativeFallback')){
+    foreach($forbiddenText in @('PresentationFramework','PresentationCore','WindowsBase','WindowsFormsIntegration','Windows.Window','PostUiCallback','Dispatcher','Topmost','NativeFallback')){
         Assert-CcodTrue (-not $text.Contains($forbiddenText)) "$forbiddenText is absent from the native tray implementation"
     }
 }))

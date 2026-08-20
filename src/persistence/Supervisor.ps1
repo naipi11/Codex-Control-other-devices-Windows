@@ -280,7 +280,24 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.NewTray={param($Queue,$OnTick,$Catalog,$LanguageMode,$SystemCultureName)New-CcodTrayContext -CommandQueue $Queue -OnTick $OnTick -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
     $defaults.SetTrayPresentation={param($Tray,$Presentation,$Catalog,$LanguageMode,$SystemCultureName)Set-CcodTrayPresentation -Context $Tray -Presentation $Presentation -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
     $defaults.StopTrayTimer={param($Tray)$Tray.Timer.Stop()}
-    $defaults.RequestUiExit={param($Tray)$Tray.ApplicationContext.ExitThread()}
+    $defaults.RequestUiExit={
+        param($Tray)
+        if($null -eq $Tray){return}
+        $menuOpen=$false
+        try{
+            $menuOpenProperty=$Tray.PSObject.Properties['MenuOpen']
+            $menuOpen=($null -ne $menuOpenProperty -and $menuOpenProperty.Value -is [bool] -and $menuOpenProperty.Value)
+            if($menuOpen){
+                $trayAdaptersProperty=$Tray.PSObject.Properties['Adapters']
+                $endNativeMenu=if($null -eq $trayAdaptersProperty -or $trayAdaptersProperty.Value -isnot [hashtable]){$null}else{$trayAdaptersProperty.Value['EndNativeMenu']}
+                if($endNativeMenu -is [scriptblock]){
+                    try{& $endNativeMenu|Out-Null}catch{}
+                }
+            }
+        }catch{}
+        $applicationContextProperty=$Tray.PSObject.Properties['ApplicationContext']
+        if($null -ne $applicationContextProperty -and $null -ne $applicationContextProperty.Value){$applicationContextProperty.Value.ExitThread()}
+    }
     $defaults.CloseTray={param($Tray)Close-CcodTrayContext -Context $Tray}
     $defaults.NewWatcher={param($Queue,$OnFull)Start-CcodProcessWatcher -Queue $Queue -OnFullReconciliationRequired $OnFull}
     $defaults.StopWatcher={param($Watcher)Stop-CcodProcessWatcher -Watcher $Watcher}
