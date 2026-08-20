@@ -3,12 +3,14 @@ Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'UiLocalization.psm1') -ErrorAction Stop
 
 $script:TrayWinFormsLoaded=$false
+$script:TrayNativeMenuLoaded=$false
 
 $script:TrayAdapterNames=@(
     'GetUtcNow','GetQueueCount','TryEnqueue','TryDequeue','GetManagedThreadId','GetApartmentState',
-    'CreateUiObject','AddUiChild','SetUiProperty','GetUiProperty','SetUiVisible','StartUiTimer','StopUiTimer',
+    'CreateUiObject','SetUiProperty','GetUiProperty','SetUiVisible','StartUiTimer','StopUiTimer',
     'AttachUiCallback','DetachUiCallback','DisposeUiObject','ExitUiContext','ShowErrorDialog','ConfirmUninstall',
-    'CreateBitmap','DrawBridgeIcon','GetHicon','CloneIcon','CloneIconBitmap','CreateBoldFont','DestroyIcon','DisposeIconResource',
+    'CreateNativeMenuOwner','ShowNativeMenu','EndNativeMenu','DisposeNativeMenuOwner',
+    'CreateBitmap','DrawBridgeIcon','GetHicon','CloneIcon','DestroyIcon','DisposeIconResource',
     'NewSourceIdentifier','RegisterTrace','RegisterIntrinsic','CleanupWatcherAttempt','DetachWatcherCallback','UnregisterWatcher',
     'RemoveWatcherJob','DisposeWatcherResource'
 )
@@ -22,7 +24,8 @@ $script:TrayUiCatalogKeys=@(
 $script:TrayCleanupCodeAllowlist=@(
     'CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED','CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED','CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED',
     'CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED','CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED','CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED',
-    'CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED','CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED','CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED','CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED'
+    'CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED','CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED','CCOD_TRAY_CLEANUP_CONTEXT_EXIT_FAILED','CCOD_TRAY_CLEANUP_CONTEXT_DISPOSE_FAILED',
+    'CCOD_TRAY_CLEANUP_NATIVE_MENU_END_FAILED','CCOD_TRAY_CLEANUP_NATIVE_MENU_OWNER_DISPOSE_FAILED'
 )
 $script:WatcherCleanupCodeAllowlist=@(
     'CCOD_WATCHER_CLEANUP_ATTEMPT_FAILED',
@@ -43,6 +46,268 @@ function Initialize-CcodTrayNativeMethodsV3 {
         $type='CcodTrayNativeMethodsV3' -as [type]
     }
     if($null -eq $type -or $null -eq $type.GetMethod('DestroyIcon')){throw 'native tray method contract is unavailable'}
+}
+
+function Initialize-CcodTrayNativeMenuV1 {
+    if($script:TrayNativeMenuLoaded){return}
+    $helper='CcodTrayNativeMenuV1' -as [type]
+    $owner='CcodTrayNativeMenuOwnerV1' -as [type]
+    $item='CcodTrayNativeMenuItemV1' -as [type]
+    if($null -eq $helper -or $null -eq $owner -or $null -eq $item){
+        $source=@'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public sealed class CcodTrayNativeMenuItemV1
+{
+    public int CommandId { get; set; }
+    public string Text { get; set; }
+    public bool Enabled { get; set; }
+    public bool Checked { get; set; }
+    public bool Radio { get; set; }
+    public bool Separator { get; set; }
+    public CcodTrayNativeMenuItemV1[] Children { get; set; }
+}
+
+public sealed class CcodTrayNativeMenuOwnerV1 : IDisposable
+{
+    private const uint WS_POPUP = 0x80000000;
+    private IntPtr handle;
+    private readonly int managedThreadId;
+
+    public CcodTrayNativeMenuOwnerV1()
+    {
+        managedThreadId = Thread.CurrentThread.ManagedThreadId;
+        handle = CreateWindowExW(0, "STATIC", "CcodTrayNativeMenuOwnerV1", WS_POPUP, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        if (handle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateWindowExW failed");
+    }
+
+    internal IntPtr Handle
+    {
+        get
+        {
+            if (handle == IntPtr.Zero) throw new ObjectDisposedException("CcodTrayNativeMenuOwnerV1");
+            return handle;
+        }
+    }
+
+    internal void AssertOwnerThread()
+    {
+        if (managedThreadId != Thread.CurrentThread.ManagedThreadId) throw new InvalidOperationException("native menu owner thread mismatch");
+    }
+
+    public IntPtr WindowHandle { get { return Handle; } }
+
+    public void Dispose()
+    {
+        if (handle == IntPtr.Zero) return;
+        if (!DestroyWindow(handle)) throw new Win32Exception(Marshal.GetLastWin32Error(), "DestroyWindow failed");
+        handle = IntPtr.Zero;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWindowExW(uint extendedStyle, string className, string windowName, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyWindow(IntPtr window);
+}
+
+public static class CcodTrayNativeMenuV1
+{
+    private const uint MF_STRING = 0x00000000;
+    private const uint MF_GRAYED = 0x00000001;
+    private const uint MF_CHECKED = 0x00000008;
+    private const uint MF_POPUP = 0x00000010;
+    private const uint MF_SEPARATOR = 0x00000800;
+    private const uint MIIM_FTYPE = 0x00000100;
+    private const uint MFT_RADIOCHECK = 0x00000200;
+    private const uint TPM_RIGHTBUTTON = 0x00000002;
+    private const uint TPM_RETURNCMD = 0x00000100;
+    private const uint WM_NULL = 0x0000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MenuItemInfo
+    {
+        public uint Size;
+        public uint Mask;
+        public uint Type;
+        public uint State;
+        public uint Id;
+        public IntPtr SubMenu;
+        public IntPtr CheckedBitmap;
+        public IntPtr UncheckedBitmap;
+        public UIntPtr ItemData;
+        public IntPtr TypeData;
+        public uint TextLength;
+        public IntPtr ItemBitmap;
+    }
+
+    public static int Show(CcodTrayNativeMenuOwnerV1 owner, CcodTrayNativeMenuItemV1[] items)
+    {
+        if (owner == null) throw new ArgumentNullException("owner");
+        if (items == null || items.Length == 0) throw new ArgumentException("native menu items are required", "items");
+        owner.AssertOwnerThread();
+        IntPtr menu = BuildMenu(items);
+        try
+        {
+            Point point;
+            if (!GetCursorPos(out point)) throw new Win32Exception(Marshal.GetLastWin32Error(), "GetCursorPos failed");
+            SetForegroundWindow(owner.Handle);
+            uint selected = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.X, point.Y, owner.Handle, IntPtr.Zero);
+            if (!PostMessageW(owner.Handle, WM_NULL, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "PostMessageW failed");
+            return unchecked((int)selected);
+        }
+        finally
+        {
+            if (!DestroyMenu(menu)) throw new Win32Exception(Marshal.GetLastWin32Error(), "DestroyMenu failed");
+        }
+    }
+
+    public static void EndMenu()
+    {
+        EndMenuNative();
+    }
+
+    private static IntPtr BuildMenu(CcodTrayNativeMenuItemV1[] items)
+    {
+        IntPtr menu = CreatePopupMenu();
+        if (menu == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreatePopupMenu failed");
+        try
+        {
+            for (int index = 0; index < items.Length; index++) AppendItem(menu, items[index]);
+            return menu;
+        }
+        catch
+        {
+            DestroyMenu(menu);
+            throw;
+        }
+    }
+
+    private static void AppendItem(IntPtr menu, CcodTrayNativeMenuItemV1 item)
+    {
+        if (item == null) throw new ArgumentException("native menu item is null");
+        if (item.Separator)
+        {
+            if (!AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null)) throw new Win32Exception(Marshal.GetLastWin32Error(), "AppendMenuW separator failed");
+            return;
+        }
+        if (String.IsNullOrEmpty(item.Text)) throw new ArgumentException("native menu item text is required");
+        uint flags = MF_STRING | (item.Enabled ? 0u : MF_GRAYED) | (item.Checked ? MF_CHECKED : 0u);
+        CcodTrayNativeMenuItemV1[] children = item.Children;
+        if (children != null && children.Length > 0)
+        {
+            IntPtr childMenu = BuildMenu(children);
+            if (!AppendMenuW(menu, flags | MF_POPUP, ToUIntPtr(childMenu), item.Text))
+            {
+                DestroyMenu(childMenu);
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "AppendMenuW submenu failed");
+            }
+            return;
+        }
+        if (item.CommandId <= 0 && item.Enabled) throw new ArgumentException("native menu command id is invalid");
+        if (!AppendMenuW(menu, flags, new UIntPtr(unchecked((uint)item.CommandId)), item.Text)) throw new Win32Exception(Marshal.GetLastWin32Error(), "AppendMenuW command failed");
+        if (item.Radio)
+        {
+            MenuItemInfo info = new MenuItemInfo();
+            info.Size = unchecked((uint)Marshal.SizeOf(typeof(MenuItemInfo)));
+            info.Mask = MIIM_FTYPE;
+            info.Type = MFT_RADIOCHECK;
+            if (!SetMenuItemInfoW(menu, unchecked((uint)item.CommandId), false, ref info)) throw new Win32Exception(Marshal.GetLastWin32Error(), "SetMenuItemInfoW failed");
+        }
+    }
+
+    private static UIntPtr ToUIntPtr(IntPtr value)
+    {
+        return IntPtr.Size == 8 ? new UIntPtr(unchecked((ulong)value.ToInt64())) : new UIntPtr(unchecked((uint)value.ToInt32()));
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr CreatePopupMenu();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AppendMenuW(IntPtr menu, uint flags, UIntPtr item, string text);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetMenuItemInfoW(IntPtr menu, uint item, [MarshalAs(UnmanagedType.Bool)] bool byPosition, ref MenuItemInfo info);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyMenu(IntPtr menu);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out Point point);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);
+
+    [DllImport("user32.dll", EntryPoint = "EndMenu", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EndMenuNative();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+}
+'@
+        [void](Add-Type -TypeDefinition $source -PassThru -ErrorAction Stop)
+        $helper='CcodTrayNativeMenuV1' -as [type]
+        $owner='CcodTrayNativeMenuOwnerV1' -as [type]
+        $item='CcodTrayNativeMenuItemV1' -as [type]
+    }
+    if($null -eq $helper -or $null -eq $owner -or $null -eq $item -or $null -eq $helper.GetMethod('Show') -or
+       $null -eq $helper.GetMethod('EndMenu') -or $null -eq $owner.GetMethod('Dispose')){throw 'native tray menu contract is unavailable'}
+    $script:TrayNativeMenuLoaded=$true
+}
+
+function ConvertTo-CcodTrayNativeMenuItems {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items)
+    Initialize-CcodTrayNativeMenuV1
+    if($Items.Count -lt 1){throw 'native menu items are required'}
+    $itemType='CcodTrayNativeMenuItemV1' -as [type]
+    if($null -eq $itemType){throw 'native menu item type is unavailable'}
+    $nativeItems=[Array]::CreateInstance($itemType,$Items.Count)
+    for($index=0;$index -lt $Items.Count;$index++){
+        $source=$Items[$index]
+        if(-not (Test-CcodExactProperties $source @('CommandId','Text','Enabled','Checked','Radio','Separator','Children')) -or
+           $source.CommandId -isnot [int] -or $source.CommandId -lt 0 -or $source.Text -isnot [string] -or
+           $source.Enabled -isnot [bool] -or $source.Checked -isnot [bool] -or $source.Radio -isnot [bool] -or
+           $source.Separator -isnot [bool] -or $source.Children -isnot [array]){throw 'native menu item is invalid'}
+        if($source.CommandId -ne 0 -and @(1001..1009) -cnotcontains $source.CommandId){throw 'native menu command id is invalid'}
+        if($source.Separator){
+            if($source.CommandId -ne 0 -or $source.Text.Length -ne 0 -or $source.Enabled -or $source.Checked -or $source.Radio -or $source.Children.Count -ne 0){throw 'native menu separator is invalid'}
+        }elseif($source.Text.Length -lt 1 -or $source.Text.Length -gt 300 -or (Test-CcodControlCharacter $source.Text)){
+            throw 'native menu item text is invalid'
+        }
+        if($source.Enabled -and $source.Children.Count -eq 0 -and $source.CommandId -le 0){throw 'native menu command id is invalid'}
+        $native=[Activator]::CreateInstance($itemType)
+        $native.CommandId=[int]$source.CommandId
+        $native.Text=[string]$source.Text
+        $native.Enabled=[bool]$source.Enabled
+        $native.Checked=[bool]$source.Checked
+        $native.Radio=[bool]$source.Radio
+        $native.Separator=[bool]$source.Separator
+        $native.Children=if($source.Children.Count -gt 0){ConvertTo-CcodTrayNativeMenuItems -Items @($source.Children)}else{[Array]::CreateInstance($itemType,0)}
+        $nativeItems.SetValue($native,$index)
+    }
+    Write-Output -NoEnumerate $nativeItems
 }
 
 function Throw-CcodTrayError {
@@ -223,40 +488,14 @@ function Get-CcodTrayDefaultAdapters {
             'ApplicationContext' {$object=New-Object Windows.Forms.ApplicationContext}
             'Timer' {$object=New-Object Windows.Forms.Timer}
             'NotifyIcon' {$object=New-Object Windows.Forms.NotifyIcon}
-            'Menu' {$object=New-Object Windows.Forms.ContextMenuStrip}
-            'Row' {$object=New-Object Windows.Forms.ToolStripMenuItem}
-            'MenuItem' {$object=New-Object Windows.Forms.ToolStripMenuItem}
-            'Separator' {$object=New-Object Windows.Forms.ToolStripSeparator}
             default {throw 'unsupported UI object kind'}
         }
         if($object.PSObject.Properties['Name']){$object.Name=$Name}
         $object
     }
-    $defaults.AddUiChild={
-        param($Parent,$Child)
-        Initialize-CcodTrayWinForms
-        if($Parent -is [Windows.Forms.ToolStripMenuItem] -and $Child -is [Windows.Forms.ToolStripItem]){
-            [void]$Parent.DropDownItems.Add($Child)
-            return
-        }
-        if($Parent -is [Windows.Forms.ContextMenuStrip] -and $Child -is [Windows.Forms.ToolStripItem]){
-            [void]$Parent.Items.Add($Child)
-            return
-        }
-        throw 'unsupported native menu parent'
-    }
     $defaults.SetUiProperty={
         param($Object,$Name,$Value)
         Initialize-CcodTrayWinForms
-        if($Object -is [Windows.Forms.NotifyIcon] -and $Name -ceq 'ContextMenuStrip'){
-            if($null -ne $Value -and $Value -isnot [Windows.Forms.ContextMenuStrip]){throw 'NotifyIcon ContextMenuStrip is invalid'}
-            $Object.ContextMenuStrip=$Value
-            return
-        }
-        if($Object -is [Windows.Forms.ToolStripItem] -and $Name -ceq 'Foreground'){
-            $Object.ForeColor=if($Value -is [Drawing.Color]){$Value}else{[Drawing.ColorTranslator]::FromHtml([string]$Value)}
-            return
-        }
         $property=$Object.PSObject.Properties[$Name]
         if($null -eq $property){throw 'unsupported native UI property'}
         $property.Value=$Value
@@ -264,7 +503,6 @@ function Get-CcodTrayDefaultAdapters {
     $defaults.GetUiProperty={
         param($Object,$Name)
         Initialize-CcodTrayWinForms
-        if($Object -is [Windows.Forms.ToolStripItem] -and $Name -ceq 'Visible'){return [bool]$Object.Available}
         $property=$Object.PSObject.Properties[$Name]
         if($null -eq $property){throw 'unsupported native UI property'}
         $property.Value
@@ -272,7 +510,6 @@ function Get-CcodTrayDefaultAdapters {
     $defaults.SetUiVisible={
         param($Object,$Visible)
         Initialize-CcodTrayWinForms
-        if($Object -is [Windows.Forms.ToolStripItem]){$Object.Available=[bool]$Visible;return}
         $Object.Visible=[bool]$Visible
     }
     $defaults.StartUiTimer={param($Timer)$Timer.Start()}
@@ -282,9 +519,7 @@ function Get-CcodTrayDefaultAdapters {
         Initialize-CcodTrayWinForms
         switch($EventName){
             'Tick' {$handler=[EventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_Tick($handler)}
-            'Click' {$handler=[EventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_Click($handler)}
-            'Opening' {$handler=[ComponentModel.CancelEventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_Opening($handler)}
-            'Closed' {$handler=[Windows.Forms.ToolStripDropDownClosedEventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_Closed($handler)}
+            'MouseUp' {$handler=[Windows.Forms.MouseEventHandler]{param($sender,$eventArgs)& $Callback $sender $eventArgs}.GetNewClosure();$Object.add_MouseUp($handler)}
             default {throw 'unsupported UI event'}
         }
         [pscustomobject][ordered]@{Target=$Object;EventName=$EventName;Handler=$handler}
@@ -293,9 +528,7 @@ function Get-CcodTrayDefaultAdapters {
         param($Attachment)
         switch($Attachment.EventName){
             'Tick' {$Attachment.Target.remove_Tick($Attachment.Handler)}
-            'Click' {$Attachment.Target.remove_Click($Attachment.Handler)}
-            'Opening' {$Attachment.Target.remove_Opening($Attachment.Handler)}
-            'Closed' {$Attachment.Target.remove_Closed($Attachment.Handler)}
+            'MouseUp' {$Attachment.Target.remove_MouseUp($Attachment.Handler)}
             default {throw 'unsupported UI event'}
         }
     }
@@ -307,6 +540,24 @@ function Get-CcodTrayDefaultAdapters {
         [Windows.Forms.MessageBox]::Show($Message,$Title,[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null
     }
     $defaults.ConfirmUninstall={param($Title,$Message)Invoke-CcodTrayUninstallConfirmation -Title $Title -Message $Message}
+    $defaults.CreateNativeMenuOwner={
+        Initialize-CcodTrayNativeMenuV1
+        $ownerType='CcodTrayNativeMenuOwnerV1' -as [type]
+        [Activator]::CreateInstance($ownerType)
+    }
+    $defaults.ShowNativeMenu={
+        param($Owner,$Items)
+        Initialize-CcodTrayNativeMenuV1
+        $nativeItems=ConvertTo-CcodTrayNativeMenuItems $Items
+        $helper='CcodTrayNativeMenuV1' -as [type]
+        $helper::Show($Owner,$nativeItems)
+    }
+    $defaults.EndNativeMenu={
+        Initialize-CcodTrayNativeMenuV1
+        $helper='CcodTrayNativeMenuV1' -as [type]
+        $helper::EndMenu()
+    }
+    $defaults.DisposeNativeMenuOwner={param($Owner)$Owner.Dispose()}
     $defaults.CreateBitmap={param($Color,$Size)Add-Type -AssemblyName System.Drawing -ErrorAction Stop;New-Object Drawing.Bitmap($Size,$Size)}
     $defaults.DrawBridgeIcon={
         param($Bitmap,$Color,$Size)
@@ -382,8 +633,6 @@ function Get-CcodTrayDefaultAdapters {
             if($null -ne $temporary){$temporary.Dispose()}
         }
     }
-    $defaults.CloneIconBitmap={param($Icon)$Icon.ToBitmap()}
-    $defaults.CreateBoldFont={param($Font)Add-Type -AssemblyName System.Drawing -ErrorAction Stop;[Drawing.Font]::new($Font,[Drawing.FontStyle]::Bold)}
     $defaults.DestroyIcon={
         param($Hicon)
         Initialize-CcodTrayNativeMethodsV3
@@ -527,8 +776,8 @@ function Test-CcodContextObject {
     try{
         $names=@(
             'SchemaVersion','State','OwnerManagedThreadId','CommandQueue','CommandOverflowed','CallbackFailure','QueueGate','CloseGate','OnTick','Adapters',
-            'MenuOpen','PendingRender','LastAppliedFingerprint',
-            'ApplicationContext','Timer','NotifyIcon','Menu','Rows','Items','LanguageItems','Separators','UnownedControls','Icons','TitleImage','TitleFont','Callbacks','CommandValues','CleanupCodes','CloseReceipt'
+            'MenuOpen','PendingRender','CurrentRender','LastAppliedFingerprint',
+            'ApplicationContext','Timer','NotifyIcon','NativeMenuOwner','Icons','Callbacks','CommandValues','CleanupCodes','CloseReceipt'
         )
         if(-not (Test-CcodExactProperties $Context $names) -or $Context.PSObject.TypeNames -cnotcontains 'Ccod.TrayContext'){return $false}
         if($Context.SchemaVersion -isnot [int] -or $Context.SchemaVersion -ne 1 -or $Context.State -isnot [string] -or
@@ -538,10 +787,8 @@ function Test-CcodContextObject {
             $Context.MenuOpen -isnot [bool] -or
             ($null -ne $Context.LastAppliedFingerprint -and ($Context.LastAppliedFingerprint -isnot [string] -or $Context.LastAppliedFingerprint -cnotmatch '^[0-9a-f]{64}$')) -or
             -not (Test-CcodTrayRenderState $Context.PendingRender) -or
-            -not (Test-CcodAdapterSet $Context.Adapters) -or $Context.Rows -isnot [Collections.Specialized.OrderedDictionary] -or
-            $Context.Items -isnot [Collections.Specialized.OrderedDictionary] -or $Context.LanguageItems -isnot [Collections.Specialized.OrderedDictionary] -or
-            $Context.Separators -isnot [Collections.Specialized.OrderedDictionary] -or $Context.UnownedControls -isnot [Collections.Generic.List[object]] -or
-           $Context.Icons -isnot [Collections.Specialized.OrderedDictionary] -or $Context.Callbacks -isnot [Collections.Generic.List[object]] -or
+            -not (Test-CcodTrayRenderState $Context.CurrentRender) -or
+            -not (Test-CcodAdapterSet $Context.Adapters) -or $Context.Icons -isnot [Collections.Specialized.OrderedDictionary] -or $Context.Callbacks -isnot [Collections.Generic.List[object]] -or
            $Context.CleanupCodes -isnot [Collections.Generic.List[string]] -or
             -not (Test-CcodOrderedKeys $Context.CommandValues @('AutomationChecked','CandidateOptInChecked','LanguageMode','UninstallTitle','UninstallMessage')) -or
             $Context.CommandValues.AutomationChecked -isnot [bool] -or $Context.CommandValues.CandidateOptInChecked -isnot [bool] -or
@@ -556,12 +803,7 @@ function Test-CcodContextObject {
             if(($null -ne $Context.OnTick -and $Context.OnTick -isnot [scriptblock]) -or $null -eq $Context.CloseReceipt -or $Context.MenuOpen -or $null -ne $Context.PendingRender){return $false}
         }elseif($Context.OnTick -isnot [scriptblock] -or $null -ne $Context.CloseReceipt){return $false}
         if($Context.State -cne 'Creating'){
-            if($null -eq $Context.ApplicationContext -or $null -eq $Context.Timer -or $null -eq $Context.NotifyIcon -or $null -eq $Context.Menu -or
-               -not (Test-CcodOrderedKeys $Context.Rows @('Title','Status')) -or
-               -not (Test-CcodOrderedKeys $Context.Items @('SessionReady','ApplyNow','ManualRetry','SetAutomationEnabled','SetCandidateCompatibleOptIn','Language','OpenLogs','Uninstall')) -or
-               -not (Test-CcodOrderedKeys $Context.LanguageItems @('System','zh-CN','en-US')) -or
-               -not (Test-CcodOrderedKeys $Context.Separators @('Status','Preferences','Danger')) -or
-               $null -eq $Context.TitleImage -or $null -eq $Context.TitleFont -or
+            if($null -eq $Context.ApplicationContext -or $null -eq $Context.Timer -or $null -eq $Context.NotifyIcon -or $null -eq $Context.NativeMenuOwner -or $null -eq $Context.CurrentRender -or
                -not (Test-CcodOrderedKeys $Context.Icons @('Gray:16','Gray:32','Green:16','Green:32','Yellow:16','Yellow:32','Red:16','Red:32'))){return $false}
         }
         return $true
@@ -608,8 +850,8 @@ function Test-CcodContextGateHandle {
     try{
         $names=@(
             'SchemaVersion','State','OwnerManagedThreadId','CommandQueue','CommandOverflowed','CallbackFailure','QueueGate','CloseGate','OnTick','Adapters',
-            'MenuOpen','PendingRender','LastAppliedFingerprint',
-            'ApplicationContext','Timer','NotifyIcon','Menu','Rows','Items','LanguageItems','Separators','UnownedControls','Icons','TitleImage','TitleFont','Callbacks','CommandValues','CleanupCodes','CloseReceipt'
+            'MenuOpen','PendingRender','CurrentRender','LastAppliedFingerprint',
+            'ApplicationContext','Timer','NotifyIcon','NativeMenuOwner','Icons','Callbacks','CommandValues','CleanupCodes','CloseReceipt'
         )
         return (Test-CcodExactProperties $Context $names) -and $Context.PSObject.TypeNames -ccontains 'Ccod.TrayContext' -and
             $null -ne $Context.CloseGate -and $Context.CloseGate.GetType() -eq [object]
@@ -638,62 +880,54 @@ function Invoke-CcodCleanupStage {
     try{& $Action}catch{Add-CcodCleanupCode $Codes $Code}
 }
 
-function Invoke-CcodTrayCommandCallback {
-    param($Context,[string]$Kind,$Sender,[AllowNull()]$ExplicitValue=$null)
+function Find-CcodTrayNativeMenuCommand {
+    param([object[]]$Items,[int]$CommandId)
+    foreach($item in @($Items)){
+        if(-not (Test-CcodExactProperties $item @('CommandId','Text','Enabled','Checked','Radio','Separator','Children'))){continue}
+        if(-not $item.Separator -and $item.CommandId -is [int] -and $item.CommandId -eq $CommandId){return $item}
+        if($item.Children -is [array] -and $item.Children.Count -gt 0){
+            $nested=Find-CcodTrayNativeMenuCommand -Items $item.Children -CommandId $CommandId
+            if($null -ne $nested){return $nested}
+        }
+    }
+    return $null
+}
+
+function Invoke-CcodTrayNativeCommandId {
+    param($Context,[object[]]$Items,[int]$CommandId)
     [Threading.Monitor]::Enter($Context.QueueGate)
     try{
         if($Context.State -cne 'Open'){return}
-        if($null -eq $Sender){return}
-        $enabled=Invoke-CcodTrayAdapter $Context.Adapters.GetUiProperty @($Sender,'Enabled') 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        if($enabled -isnot [bool] -or -not $enabled){return}
-        $value=$null
-        if($Kind -ceq 'SetAutomationEnabled' -or $Kind -ceq 'SetCandidateCompatibleOptIn'){
-            $verifiedValue=if($Kind -ceq 'SetAutomationEnabled'){$Context.CommandValues.AutomationChecked}else{$Context.CommandValues.CandidateOptInChecked}
-            $value=[bool](-not $verifiedValue)
-            Invoke-CcodTrayAdapter $Context.Adapters.SetUiProperty @($Sender,'Checked',[bool]$verifiedValue) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        }elseif($Kind -ceq 'SetUiLanguage'){
-            if($ExplicitValue -isnot [string] -or $script:TrayUiLanguageModes -cnotcontains $ExplicitValue){return}
-            $value=$ExplicitValue
-            Set-CcodTrayLanguageChecks $Context $Context.CommandValues.LanguageMode 'CCOD_TRAY_CREATE_FAILED'
-        }elseif($Kind -ceq 'Uninstall'){
-            $confirmed=Invoke-CcodTrayAdapter $Context.Adapters.ConfirmUninstall @($Context.CommandValues.UninstallTitle,$Context.CommandValues.UninstallMessage) 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            if($confirmed -isnot [bool] -or -not $confirmed){return}
+        $item=Find-CcodTrayNativeMenuCommand -Items $Items -CommandId $CommandId
+        if($null -eq $item -or $item.Enabled -isnot [bool] -or -not $item.Enabled){return}
+        $kind=$null;$value=$null
+        switch($CommandId){
+            1001 {$kind='ApplyNow'}
+            1002 {$kind='ManualRetry'}
+            1003 {$kind='SetAutomationEnabled';$value=[bool](-not $Context.CommandValues.AutomationChecked)}
+            1004 {$kind='SetCandidateCompatibleOptIn';$value=[bool](-not $Context.CommandValues.CandidateOptInChecked)}
+            1005 {$kind='SetUiLanguage';$value='System'}
+            1006 {$kind='SetUiLanguage';$value='zh-CN'}
+            1007 {$kind='SetUiLanguage';$value='en-US'}
+            1008 {$kind='OpenLogs'}
+            1009 {
+                $kind='Uninstall'
+                $confirmed=Invoke-CcodTrayAdapter $Context.Adapters.ConfirmUninstall @($Context.CommandValues.UninstallTitle,$Context.CommandValues.UninstallMessage) 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
+                if($confirmed -isnot [bool] -or -not $confirmed){return}
+            }
+            default {return}
         }
         $timestamp=Get-CcodCanonicalUtc $Context.Adapters 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        $command=[pscustomobject][ordered]@{Kind=$Kind;Value=$value;EnqueuedAtUtc=$timestamp}
+        $command=[pscustomobject][ordered]@{Kind=$kind;Value=$value;EnqueuedAtUtc=$timestamp}
         $queueArgument=[object[]]::new(1);$queueArgument[0]=$Context.CommandQueue
         $count=Invoke-CcodTrayAdapter $Context.Adapters.GetQueueCount $queueArgument 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         if($count -isnot [int] -or $count -lt 0){Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
         if($count -ge 256){$Context.CommandOverflowed=$true;return}
         $enqueueArguments=[object[]]::new(2);$enqueueArguments[0]=$Context.CommandQueue;$enqueueArguments[1]=$command
         $added=Invoke-CcodTrayAdapter $Context.Adapters.TryEnqueue $enqueueArguments 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        if($added -isnot [bool] -or -not $added){$Context.CommandOverflowed=$true;return}
+        if($added -isnot [bool] -or -not $added){$Context.CommandOverflowed=$true}
     }catch{if($Context.State -ceq 'Open'){$Context.CallbackFailure=$true}}
     finally{[Threading.Monitor]::Exit($Context.QueueGate)}
-}
-
-function Set-CcodTrayLocalizedControlText {
-    param($Context,$Strings,[string]$StateKey,[string]$FailureCode)
-    $adapter=$Context.Adapters
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Rows.Title,'Text',$Strings['Tray.Title']) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Rows.Status,'Text',$Strings['Status.'+$StateKey]) 0 $FailureCode 'Tray'
-    $tooltipStateKey=if($StateKey -ceq 'RendererHandoff'){'Active'}else{$StateKey}
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.NotifyIcon,'Text',$Strings['Tooltip.'+$tooltipStateKey]) 0 $FailureCode 'Tray'
-    $keys=[ordered]@{
-        SessionReady='Menu.SessionReady';ApplyNow='Menu.ApplyNow';ManualRetry='Menu.ManualRetry';SetAutomationEnabled='Menu.Automation'
-        SetCandidateCompatibleOptIn='Menu.CandidateOptIn';Language='Menu.Language';OpenLogs='Menu.OpenLogs';Uninstall='Menu.Uninstall'
-    }
-    foreach($key in $keys.Keys){Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Items[$key],'Text',$Strings[$keys[$key]]) 0 $FailureCode 'Tray'}
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.LanguageItems.System,'Text',$Strings['Menu.FollowSystem']) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.LanguageItems['zh-CN'],'Text',$Strings['Menu.Chinese']) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.LanguageItems['en-US'],'Text',$Strings['Menu.English']) 0 $FailureCode 'Tray'
-    $Context.CommandValues.UninstallTitle=$Strings['Dialog.UninstallTitle']
-    $Context.CommandValues.UninstallMessage=$Strings['Dialog.UninstallMessage']
-}
-
-function Set-CcodTrayLanguageChecks {
-    param($Context,[string]$LanguageMode,[string]$FailureCode)
-    foreach($mode in $script:TrayUiLanguageModes){Invoke-CcodTrayAdapter $Context.Adapters.SetUiProperty @($Context.LanguageItems[$mode],'Checked',[bool]($mode -ceq $LanguageMode)) 0 $FailureCode 'Tray'}
 }
 
 function Get-CcodTrayPresentationFingerprint {
@@ -745,26 +979,55 @@ function Test-CcodTrayRenderState {
     }catch{return $false}
 }
 
+function New-CcodTrayNativeMenuItem {
+    param(
+        [int]$CommandId,[string]$Text,[bool]$Enabled=$false,[bool]$Checked=$false,[bool]$Radio=$false,
+        [bool]$Separator=$false,[object[]]$Children=@()
+    )
+    [pscustomobject][ordered]@{
+        CommandId=$CommandId;Text=$Text;Enabled=$Enabled;Checked=$Checked;Radio=$Radio;Separator=$Separator;Children=[object[]]@($Children)
+    }
+}
+
+function New-CcodTrayNativeMenuSpec {
+    param($Render)
+    if(-not (Test-CcodTrayRenderState $Render) -or $null -eq $Render){Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
+    $presentation=$Render.Presentation;$strings=$Render.Localized
+    $items=[Collections.Generic.List[object]]::new()
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 0 -Text $strings['Tray.Title']))
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 0 -Text $strings['Status.'+$presentation.StateKey]))
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 0 -Text '' -Separator $true))
+    if($presentation.SessionReadyVisible){$items.Add((New-CcodTrayNativeMenuItem -CommandId 0 -Text $strings['Menu.SessionReady']))}
+    if($presentation.ApplyNowVisible){$items.Add((New-CcodTrayNativeMenuItem -CommandId 1001 -Text $strings['Menu.ApplyNow'] -Enabled $presentation.ApplyNowEnabled))}
+    if($presentation.ManualRetryVisible){$items.Add((New-CcodTrayNativeMenuItem -CommandId 1002 -Text $strings['Menu.ManualRetry'] -Enabled $presentation.ManualRetryEnabled))}
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 0 -Text '' -Separator $true))
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 1003 -Text $strings['Menu.Automation'] -Enabled $presentation.AutomationToggleEnabled -Checked $presentation.AutomationChecked))
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 1004 -Text $strings['Menu.CandidateOptIn'] -Enabled $presentation.CandidateOptInToggleEnabled -Checked $presentation.CandidateOptInChecked))
+    $languageItems=@(
+        New-CcodTrayNativeMenuItem -CommandId 1005 -Text $strings['Menu.FollowSystem'] -Enabled $true -Checked ($Render.LanguageMode -ceq 'System') -Radio $true
+        New-CcodTrayNativeMenuItem -CommandId 1006 -Text $strings['Menu.Chinese'] -Enabled $true -Checked ($Render.LanguageMode -ceq 'zh-CN') -Radio $true
+        New-CcodTrayNativeMenuItem -CommandId 1007 -Text $strings['Menu.English'] -Enabled $true -Checked ($Render.LanguageMode -ceq 'en-US') -Radio $true
+    )
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 0 -Text $strings['Menu.Language'] -Enabled $true -Children $languageItems))
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 1008 -Text $strings['Menu.OpenLogs'] -Enabled $presentation.OpenLogsEnabled))
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 0 -Text '' -Separator $true))
+    $items.Add((New-CcodTrayNativeMenuItem -CommandId 1009 -Text $strings['Menu.Uninstall'] -Enabled $presentation.UninstallEnabled))
+    Write-Output -NoEnumerate ([object[]]$items.ToArray())
+}
+
 function Invoke-CcodTrayRenderWrite {
     param($Context,$Render,[string]$FailureCode)
     if($Render.Fingerprint -ceq $Context.LastAppliedFingerprint){return}
     $presentation=$Render.Presentation;$adapter=$Context.Adapters
-    Set-CcodTrayLocalizedControlText $Context $Render.Localized $presentation.StateKey $FailureCode
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Rows.Status,'Foreground',@{Gray='#F5F7FA';Green='#57D6A1';Yellow='#F6B844';Red='#F06F6F'}[$presentation.Color]) 0 $FailureCode 'Tray'
+    $tooltipStateKey=if($presentation.StateKey -ceq 'RendererHandoff'){'Active'}else{$presentation.StateKey}
+    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.NotifyIcon,'Text',$Render.Localized['Tooltip.'+$tooltipStateKey]) 0 $FailureCode 'Tray'
     Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.NotifyIcon,'Icon',$Context.Icons[$presentation.Color+':16']) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiVisible @($Context.Items.SessionReady,[bool]$presentation.SessionReadyVisible) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiVisible @($Context.Items.ApplyNow,[bool]$presentation.ApplyNowVisible) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiVisible @($Context.Items.ManualRetry,[bool]$presentation.ManualRetryVisible) 0 $FailureCode 'Tray'
-    $enabled=[ordered]@{ApplyNow=$presentation.ApplyNowEnabled;ManualRetry=$presentation.ManualRetryEnabled;SetAutomationEnabled=$presentation.AutomationToggleEnabled;SetCandidateCompatibleOptIn=$presentation.CandidateOptInToggleEnabled;OpenLogs=$presentation.OpenLogsEnabled;Uninstall=$presentation.UninstallEnabled}
-    foreach($kind in $enabled.Keys){Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Items[$kind],'Enabled',[bool]$enabled[$kind]) 0 $FailureCode 'Tray'}
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Items.SessionReady,'Enabled',$false) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Items.Language,'Enabled',$true) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Items.SetAutomationEnabled,'Checked',[bool]$presentation.AutomationChecked) 0 $FailureCode 'Tray'
-    Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.Items.SetCandidateCompatibleOptIn,'Checked',[bool]$presentation.CandidateOptInChecked) 0 $FailureCode 'Tray'
-    Set-CcodTrayLanguageChecks $Context $Render.LanguageMode $FailureCode
     $Context.CommandValues.AutomationChecked=[bool]$presentation.AutomationChecked
     $Context.CommandValues.CandidateOptInChecked=[bool]$presentation.CandidateOptInChecked
     $Context.CommandValues.LanguageMode=$Render.LanguageMode
+    $Context.CommandValues.UninstallTitle=$Render.Localized['Dialog.UninstallTitle']
+    $Context.CommandValues.UninstallMessage=$Render.Localized['Dialog.UninstallMessage']
+    $Context.CurrentRender=$Render
     $Context.LastAppliedFingerprint=$Render.Fingerprint
 }
 
@@ -789,9 +1052,8 @@ function New-CcodTrayContext {
     $context=[pscustomobject][ordered]@{
         SchemaVersion=1;State='Creating';OwnerManagedThreadId=$threadId;CommandQueue=$CommandQueue
         CommandOverflowed=$false;CallbackFailure=$false;QueueGate=New-Object object;CloseGate=New-Object object;OnTick=$OnTick;Adapters=$adapter
-        MenuOpen=$false;PendingRender=$null;LastAppliedFingerprint=$null
-        ApplicationContext=$null;Timer=$null;NotifyIcon=$null;Menu=$null;Rows=[ordered]@{};Items=[ordered]@{};LanguageItems=[ordered]@{};Separators=[ordered]@{}
-        UnownedControls=[Collections.Generic.List[object]]::new();Icons=[ordered]@{};TitleImage=$null;TitleFont=$null
+        MenuOpen=$false;PendingRender=$null;CurrentRender=$null;LastAppliedFingerprint=$null
+        ApplicationContext=$null;Timer=$null;NotifyIcon=$null;NativeMenuOwner=$null;Icons=[ordered]@{}
         Callbacks=[Collections.Generic.List[object]]::new();CommandValues=[ordered]@{
             AutomationChecked=$false;CandidateOptInChecked=$false
             LanguageMode=$LanguageMode
@@ -805,47 +1067,7 @@ function New-CcodTrayContext {
         $context.ApplicationContext=Invoke-CcodOwnedTrayAdapter $adapter.CreateUiObject @('ApplicationContext','TrayApplicationContext') $adapter.DisposeUiObject $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.Timer=Invoke-CcodOwnedTrayAdapter $adapter.CreateUiObject @('Timer','TrayTimer') $adapter.DisposeUiObject $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.NotifyIcon=Invoke-CcodOwnedTrayAdapter $adapter.CreateUiObject @('NotifyIcon','TrayNotifyIcon') $adapter.DisposeUiObject $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        $context.Menu=Invoke-CcodOwnedTrayAdapter $adapter.CreateUiObject @('Menu','TrayMenu') $adapter.DisposeUiObject $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        foreach($row in @('Title','Status')){
-            $control=Invoke-CcodOwnedTrayAdapter $adapter.CreateUiObject @('Row',($row+'Row')) $adapter.DisposeUiObject $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            $context.UnownedControls.Add($control)
-            $context.Rows[$row]=$control
-            Invoke-CcodTrayAdapter $adapter.SetUiProperty @($control,'Enabled',$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        }
-        foreach($key in @('SessionReady','ApplyNow','ManualRetry','SetAutomationEnabled','SetCandidateCompatibleOptIn','Language','OpenLogs','Uninstall')){
-            $item=Invoke-CcodOwnedTrayAdapter $adapter.CreateUiObject @('MenuItem',($key+'Item')) $adapter.DisposeUiObject $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            $context.UnownedControls.Add($item)
-            $context.Items[$key]=$item
-            Invoke-CcodTrayAdapter $adapter.SetUiProperty @($item,'Enabled',[bool]($key -ceq 'Language')) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            if($key -ceq 'SetAutomationEnabled' -or $key -ceq 'SetCandidateCompatibleOptIn'){
-                Invoke-CcodTrayAdapter $adapter.SetUiProperty @($item,'CheckOnClick',$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-                Invoke-CcodTrayAdapter $adapter.SetUiProperty @($item,'Checked',$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            }
-        }
-        foreach($mode in $script:TrayUiLanguageModes){
-            $item=Invoke-CcodOwnedTrayAdapter $adapter.CreateUiObject @('MenuItem',($mode+'LanguageItem')) $adapter.DisposeUiObject $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            $context.UnownedControls.Add($item);$context.LanguageItems[$mode]=$item
-            Invoke-CcodTrayAdapter $adapter.SetUiProperty @($item,'Enabled',$true) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            Invoke-CcodTrayAdapter $adapter.SetUiProperty @($item,'CheckOnClick',$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            Invoke-CcodTrayAdapter $adapter.SetUiProperty @($item,'Checked',$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            $transfer=Invoke-CcodTraySideEffectAdapter $adapter.AddUiChild @($context.Items.Language,$item)
-            if($transfer.Completed){[void]$context.UnownedControls.Remove($item)}
-            if(-not $transfer.Succeeded){Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
-        }
-        foreach($key in @('Status','Preferences','Danger')){
-            $separator=Invoke-CcodOwnedTrayAdapter $adapter.CreateUiObject @('Separator',($key+'Separator')) $adapter.DisposeUiObject $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            $context.UnownedControls.Add($separator);$context.Separators[$key]=$separator
-        }
-        $topLevel=@(
-            $context.Rows.Title,$context.Rows.Status,$context.Separators.Status,$context.Items.SessionReady,$context.Items.ApplyNow,$context.Items.ManualRetry,
-            $context.Separators.Preferences,$context.Items.SetAutomationEnabled,$context.Items.SetCandidateCompatibleOptIn,$context.Items.Language,$context.Items.OpenLogs,
-            $context.Separators.Danger,$context.Items.Uninstall
-        )
-        foreach($control in $topLevel){
-            $transfer=Invoke-CcodTraySideEffectAdapter $adapter.AddUiChild @($context.Menu,$control)
-            if($transfer.Completed){[void]$context.UnownedControls.Remove($control)}
-            if(-not $transfer.Succeeded){Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
-        }
+        $context.NativeMenuOwner=Invoke-CcodOwnedTrayAdapter $adapter.CreateNativeMenuOwner @() $adapter.DisposeNativeMenuOwner $nonnull 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         foreach($color in @('Gray','Green','Yellow','Red')){
             foreach($size in @(16,32)){
                 $bitmap=$null;$hicon=[IntPtr]::Zero
@@ -865,93 +1087,72 @@ function New-CcodTrayContext {
                 }
             }
         }
-        $validTitleBitmap={param($value)[bool]($null -ne $value -and -not [object]::ReferenceEquals($value,$context.Icons['Gray:16']))}.GetNewClosure()
-        $context.TitleImage=Invoke-CcodOwnedTrayAdapter $adapter.CloneIconBitmap @($context.Icons['Gray:16']) $adapter.DisposeIconResource $validTitleBitmap 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        $baseFont=Invoke-CcodTrayAdapter $adapter.GetUiProperty @($context.Rows.Title,'Font') 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        if($null -eq $baseFont){Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
-        $validBoldFont={param($value)[bool]($null -ne $value -and -not [object]::ReferenceEquals($value,$baseFont) -and $value.PSObject.Properties['Bold'] -and $value.Bold -is [bool] -and $value.Bold)}.GetNewClosure()
-        $context.TitleFont=Invoke-CcodOwnedTrayAdapter $adapter.CreateBoldFont @($baseFont) $adapter.DisposeIconResource $validBoldFont 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.Rows.Title,'Image',$context.TitleImage) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.Rows.Title,'Font',$context.TitleFont) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        Set-CcodTrayLocalizedControlText $context $localized 'Waiting' 'CCOD_TRAY_CREATE_FAILED'
-        Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.Rows.Status,'Foreground','#F5F7FA') 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        Set-CcodTrayLanguageChecks $context $LanguageMode 'CCOD_TRAY_CREATE_FAILED'
-        Invoke-CcodTrayAdapter $adapter.SetUiVisible @($context.Items.SessionReady,$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        Invoke-CcodTrayAdapter $adapter.SetUiVisible @($context.Items.ApplyNow,$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        Invoke-CcodTrayAdapter $adapter.SetUiVisible @($context.Items.ManualRetry,$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        $invokeCommandCallback=${function:Invoke-CcodTrayCommandCallback}
-        $validClickAttachment={param($value)[bool]((Test-CcodExactProperties $value @('Target','EventName','Handler')) -and $null -ne $value.Target -and $value.EventName -ceq 'Click' -and $null -ne $value.Handler)}
-        foreach($kind in @('ApplyNow','ManualRetry','SetAutomationEnabled','SetCandidateCompatibleOptIn','OpenLogs','Uninstall')){
-            $contextRef=$context;$kindRef=$kind;$invokeCommandCallbackRef=$invokeCommandCallback
-            $callback={
-                param($sender,$eventArgs)
-                & $invokeCommandCallbackRef $contextRef $kindRef $sender
-            }.GetNewClosure()
-            $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.Items[$kind],'Click',$callback) $adapter.DetachUiCallback $validClickAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            $context.Callbacks.Add($attachment)
+        $initialPresentation=[pscustomobject][ordered]@{
+            Color='Gray';StateKey='Waiting';SessionReadyVisible=$false;ApplyNowVisible=$false;ApplyNowEnabled=$false;ManualRetryVisible=$false;ManualRetryEnabled=$false
+            AutomationToggleEnabled=$false;AutomationChecked=$false;CandidateOptInToggleEnabled=$false;CandidateOptInChecked=$false;OpenLogsEnabled=$false;UninstallEnabled=$false;Busy=$false
         }
-        foreach($mode in $script:TrayUiLanguageModes){
-            $contextRef=$context;$modeRef=$mode;$invokeCommandCallbackRef=$invokeCommandCallback
-            $callback={param($sender,$eventArgs)& $invokeCommandCallbackRef $contextRef 'SetUiLanguage' $sender $modeRef}.GetNewClosure()
-            $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.LanguageItems[$mode],'Click',$callback) $adapter.DetachUiCallback $validClickAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            $context.Callbacks.Add($attachment)
-        }
+        $initialRender=New-CcodTrayRenderState $initialPresentation $localized $LanguageMode $SystemCultureName
+        Invoke-CcodTrayRenderWrite $context $initialRender 'CCOD_TRAY_CREATE_FAILED'
         $contextRef=$context;$invokeAdapterRef=${function:Invoke-CcodTrayAdapter};$invokeRenderWriteRef=${function:Invoke-CcodTrayRenderWrite}
-        $opening={
+        $newNativeMenuSpecRef=${function:New-CcodTrayNativeMenuSpec};$invokeNativeCommandRef=${function:Invoke-CcodTrayNativeCommandId}
+        $mouseUp={
             param($sender,$eventArgs)
+            if($null -eq $eventArgs -or [string]$eventArgs.Button -cne 'Right'){return}
+            $items=$null;$selected=[int]0;$opened=$false
             [Threading.Monitor]::Enter($contextRef.QueueGate)
             try{
-                if($contextRef.State -cne 'Open'){return}
+                if($contextRef.State -cne 'Open' -or $contextRef.MenuOpen){return}
                 $current=& $invokeAdapterRef $contextRef.Adapters.GetManagedThreadId @() 1 'CCOD_TRAY_THREAD_INVALID' 'Tray'
-                if($current -isnot [int] -or $current -ne $contextRef.OwnerManagedThreadId){throw 'menu opening thread is invalid'}
-                if(-not $contextRef.MenuOpen){
-                    $contextRef.MenuOpen=$true
-                }
+                if($current -isnot [int] -or $current -ne $contextRef.OwnerManagedThreadId){throw 'native menu thread is invalid'}
+                $items=& $newNativeMenuSpecRef $contextRef.CurrentRender
+                $contextRef.MenuOpen=$true;$opened=$true
             }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}
             finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
-        }.GetNewClosure()
-        $validOpeningAttachment={param($value)[bool]((Test-CcodExactProperties $value @('Target','EventName','Handler')) -and $null -ne $value.Target -and $value.EventName -ceq 'Opening' -and $null -ne $value.Handler)}
-        $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.Menu,'Opening',$opening) $adapter.DetachUiCallback $validOpeningAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        $context.Callbacks.Add($attachment)
-
-        $closed={
-            param($sender,$eventArgs)
-            [Threading.Monitor]::Enter($contextRef.QueueGate)
+            if(-not $opened){return}
             try{
-                if($contextRef.State -cne 'Open'){return}
-                $current=& $invokeAdapterRef $contextRef.Adapters.GetManagedThreadId @() 1 'CCOD_TRAY_THREAD_INVALID' 'Tray'
-                if($current -isnot [int] -or $current -ne $contextRef.OwnerManagedThreadId){throw 'menu closed thread is invalid'}
-                if(-not $contextRef.MenuOpen){return}
-                $contextRef.MenuOpen=$false
-                $pending=$contextRef.PendingRender
+                $selected=& $invokeAdapterRef $contextRef.Adapters.ShowNativeMenu @($contextRef.NativeMenuOwner,$items) 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
+                if($selected -isnot [int] -or $selected -lt 0){throw 'native menu result is invalid'}
+            }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true};$selected=[int]0}
+            finally{
+                [Threading.Monitor]::Enter($contextRef.QueueGate)
                 try{
-                    if($null -ne $pending -and $pending.Fingerprint -cne $contextRef.LastAppliedFingerprint){
-                        & $invokeRenderWriteRef $contextRef $pending 'CCOD_TRAY_PRESENTATION_FAILED'
+                    if($contextRef.State -ceq 'Open'){
+                        $contextRef.MenuOpen=$false
+                        $pending=$contextRef.PendingRender
+                        try{
+                            if($null -ne $pending -and $pending.Fingerprint -cne $contextRef.LastAppliedFingerprint){& $invokeRenderWriteRef $contextRef $pending 'CCOD_TRAY_PRESENTATION_FAILED'}
+                        }finally{$contextRef.PendingRender=$null}
                     }
-                }finally{$contextRef.PendingRender=$null}
-            }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}
-            finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
+                }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}
+                finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
+            }
+            if($selected -gt 0 -and $contextRef.State -ceq 'Open' -and $invokeNativeCommandRef -is [scriptblock]){& $invokeNativeCommandRef $contextRef $items $selected}
         }.GetNewClosure()
-        $validClosedAttachment={param($value)[bool]((Test-CcodExactProperties $value @('Target','EventName','Handler')) -and $null -ne $value.Target -and $value.EventName -ceq 'Closed' -and $null -ne $value.Handler)}
-        $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.Menu,'Closed',$closed) $adapter.DetachUiCallback $validClosedAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
+        $validMouseUpAttachment={param($value)[bool]((Test-CcodExactProperties $value @('Target','EventName','Handler')) -and $null -ne $value.Target -and $value.EventName -ceq 'MouseUp' -and $null -ne $value.Handler)}
+        $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.NotifyIcon,'MouseUp',$mouseUp) $adapter.DetachUiCallback $validMouseUpAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.Callbacks.Add($attachment)
-
         $tick={
             param($sender,$eventArgs)
+            $shouldRun=$false;$menuOpenOnly=$false;$onTick=$null
             [Threading.Monitor]::Enter($contextRef.QueueGate)
             try{
                 if($contextRef.State -cne 'Open'){return}
                 $current=& $invokeAdapterRef $contextRef.Adapters.GetManagedThreadId @() 1 'CCOD_TRAY_THREAD_INVALID' 'Tray'
                 if($current -isnot [int] -or $current -ne $contextRef.OwnerManagedThreadId){return}
-                & $invokeAdapterRef $contextRef.OnTick @([bool]$contextRef.MenuOpen) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
+                $menuOpenOnly=[bool]$contextRef.MenuOpen;$onTick=$contextRef.OnTick;$shouldRun=$true
             }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}
             finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
+            if(-not $shouldRun -or $onTick -isnot [scriptblock]){return}
+            try{& $invokeAdapterRef $onTick @($menuOpenOnly) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
+            catch{
+                [Threading.Monitor]::Enter($contextRef.QueueGate)
+                try{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
+            }
         }.GetNewClosure()
         $validTickAttachment={param($value)[bool]((Test-CcodExactProperties $value @('Target','EventName','Handler')) -and $null -ne $value.Target -and $value.EventName -ceq 'Tick' -and $null -ne $value.Handler)}
         $attachment=Invoke-CcodOwnedTrayAdapter $adapter.AttachUiCallback @($context.Timer,'Tick',$tick) $adapter.DetachUiCallback $validTickAttachment 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         $context.Callbacks.Add($attachment)
         Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.Timer,'Interval',[int]250) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-        Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.NotifyIcon,'ContextMenuStrip',$context.Menu) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         Invoke-CcodTrayAdapter $adapter.SetUiProperty @($context.NotifyIcon,'Icon',$context.Icons['Gray:16']) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         Invoke-CcodTrayAdapter $adapter.StartUiTimer @($context.Timer) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
         Invoke-CcodTrayAdapter $adapter.SetUiVisible @($context.NotifyIcon,$true) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
@@ -980,13 +1181,16 @@ function Close-CcodTrayContext {
     if($Context.State -ceq 'Closing'){return $Context.CloseReceipt}
     $queueGate=$Context.QueueGate
     try{[Threading.Monitor]::Enter($queueGate)}catch{Throw-CcodTrayError 'CCOD_TRAY_INPUT_INVALID' 'Tray'}
+    $wasMenuOpen=$false
     try{
+        $wasMenuOpen=[bool]$Context.MenuOpen
         $Context.State='Closing'
         $Context.MenuOpen=$false;$Context.PendingRender=$null
         $Context.CloseReceipt=[pscustomobject][ordered]@{SchemaVersion=1;Closed=$true;CleanupCodes=@()}
     }finally{[Threading.Monitor]::Exit($queueGate)}
     $codes=[Collections.Generic.List[string]]::new();$Context.CleanupCodes=$codes;$adapter=$Context.Adapters
     if($null -ne $Context.NotifyIcon){Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.SetUiVisible @($Context.NotifyIcon,$false) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_ICON_HIDE_FAILED'}
+    if($wasMenuOpen){Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.EndNativeMenu @() 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_NATIVE_MENU_END_FAILED'}
     if($null -ne $Context.Timer){
         Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.StopUiTimer @($Context.Timer) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_TIMER_STOP_FAILED'
         Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DisposeUiObject @($Context.Timer) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_TIMER_DISPOSE_FAILED'
@@ -995,30 +1199,9 @@ function Close-CcodTrayContext {
         Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DetachUiCallback @($attachment) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_CALLBACK_DETACH_FAILED'
     }
     if($null -ne $Context.NotifyIcon){
-        Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.SetUiProperty @($Context.NotifyIcon,'ContextMenuStrip',$null) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED'
         Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DisposeUiObject @($Context.NotifyIcon) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_ICON_DISPOSE_FAILED'
     }
-    if($null -ne $Context.Menu){
-        $menuDisposal=Invoke-CcodTraySideEffectAdapter $adapter.DisposeUiObject @($Context.Menu)
-        if(-not $menuDisposal.Succeeded){Add-CcodCleanupCode $codes 'CCOD_TRAY_CLEANUP_MENU_DISPOSE_FAILED'}
-    }
-    $controls=[Collections.Generic.List[object]]::new()
-    foreach($candidate in @($Context.Rows.Values)+@($Context.Items.Values)+@($Context.LanguageItems.Values)+@($Context.Separators.Values)+@($Context.UnownedControls)){
-        if($null -eq $candidate){continue}
-        $duplicate=$false
-        foreach($existing in $controls){if([object]::ReferenceEquals($existing,$candidate)){$duplicate=$true;break}}
-        if(-not $duplicate){$controls.Add($candidate)}
-    }
-    foreach($control in $controls){
-        $isDisposed=$null
-        try{
-            $isDisposed=Invoke-CcodTrayAdapter $adapter.GetUiProperty @($control,'IsDisposed') 1 'CCOD_TRAY_CREATE_FAILED' 'Tray'
-            if($isDisposed -isnot [bool]){Throw-CcodTrayError 'CCOD_TRAY_CREATE_FAILED' 'Tray'}
-        }catch{Add-CcodCleanupCode $codes 'CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED';continue}
-        if(-not $isDisposed){Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DisposeUiObject @($control) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED'}
-    }
-    if($null -ne $Context.TitleImage){Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DisposeIconResource @($Context.TitleImage) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED'}
-    if($null -ne $Context.TitleFont){Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DisposeIconResource @($Context.TitleFont) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_CONTROL_DISPOSE_FAILED'}
+    if($null -ne $Context.NativeMenuOwner){Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DisposeNativeMenuOwner @($Context.NativeMenuOwner) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_NATIVE_MENU_OWNER_DISPOSE_FAILED'}
     foreach($icon in @($Context.Icons.Values)){
         if($null -ne $icon){Invoke-CcodCleanupStage {Invoke-CcodTrayAdapter $adapter.DisposeIconResource @($icon) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'} $codes 'CCOD_TRAY_CLEANUP_ICON_CLONE_DISPOSE_FAILED'}
     }
