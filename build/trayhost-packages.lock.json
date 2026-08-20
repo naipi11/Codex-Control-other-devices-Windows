@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "id": "Microsoft.NETFramework.ReferenceAssemblies.net48",
+      "version": "1.0.3",
+      "sha512": "XWKgyeNadNcTQaIVvQB8BrdCNrEar6fo/de1OdQRZ9HFy0jcBSaM8IV5q64ZampsSnC8AlTsACaGZUuoFw41RA=="
+    }
+  ]
+}
