@@ -17,6 +17,19 @@ Machine: current Windows 11 interactive session
 - During the user's observation, the menu visibly flashed/closed before the user considered 50 interactions complete. The receipt does not prove that each menu remained selectable, so this is not a passing acceptance result.
 - A later one-trial run received no user event and was stopped safely; it produced no additional evidence.
 
+## Trace follow-up
+
+One interactive five-cancel run completed normally with this bounded receipt:
+
+```text
+attempts=5, trackCalls=5, cancelCount=5, selectedCount=0,
+foregroundFailures=0, ownerHasNoInputContext=true,
+trackMinMs=498, trackMaxMs=3083, trackAverageMs=1074,
+WM_NULL_Delivered=5
+```
+
+The trace contained one `WM_CONTEXTMENU` path per attempt and no immediate zero-duration return. This is useful diagnostic evidence, but it is not the required 50-trial acceptance and does not cover a selected menu command or a measured Chinese/English input-mode comparison.
+
 ## Gate result
 
 **BLOCKED / NOT PASSED.** The current no-HIMC persistent-owner spike does not yet demonstrate stable repeated interaction on the target machine. No production TrayHost, IPC integration, installer build, push, tag, or Release may proceed from this evidence.
