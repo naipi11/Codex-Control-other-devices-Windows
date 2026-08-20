@@ -75,6 +75,18 @@ internal static class TrayHostProtocolSelfTest
         AssertTrue(threw, "authenticated payload tamper is rejected");
     }
 
+    private static void TestLargeEpochUsesUnsignedWireEncoding()
+    {
+        byte[] seed = Enumerable.Repeat((byte)0x11, 32).ToArray();
+        byte[] challenge = Enumerable.Repeat((byte)0x22, 32).ToArray();
+        byte[] nonce = Enumerable.Repeat((byte)0x33, 32).ToArray();
+        SessionKeys keys = ProtocolCodec.DeriveDirectionalKeys(seed, challenge, nonce, UInt64.MaxValue - 7UL);
+        MemoryStream stream = new MemoryStream();
+        ProtocolCodec.WriteAuthenticated(stream, ProtocolFrame.Authenticated(ProtocolDirection.ParentToHost, TrayHostMessageType.Ping, UInt64.MaxValue - 7UL, 1UL, new byte[] { 1 }), keys.ParentToHost);
+        stream.Position = 0;
+        AssertTrue(ProtocolCodec.ReadAuthenticated(stream, ProtocolDirection.ParentToHost, UInt64.MaxValue - 7UL, 1UL, keys.ParentToHost).Payload[0] == 1, "large epochs round-trip without checked byte-cast overflow");
+    }
+
     private static string[] ValidStrings()
     {
         string[] values = new string[18];
@@ -107,8 +119,9 @@ internal static class TrayHostProtocolSelfTest
             TestBootstrapFrameRoundTrip();
             TestBootstrapRejectsWrongDirection();
             TestAuthenticatedFrameRejectsReplayAndTamper();
+            TestLargeEpochUsesUnsignedWireEncoding();
             TestPresentationSnapshotValidation();
-            Console.WriteLine("TrayHost protocol self-tests passed: 5");
+            Console.WriteLine("TrayHost protocol self-tests passed: 6");
             return 0;
         }
         catch (Exception error)

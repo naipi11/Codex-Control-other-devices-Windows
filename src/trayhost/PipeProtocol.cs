@@ -257,7 +257,7 @@ internal static class ProtocolCodec
 
     private static bool AllZero(byte[] bytes) { for (int i = 0; i < bytes.Length; i++) { if (bytes[i] != 0) { return false; } } return true; }
     private static bool FixedEquals(byte[] left, byte[] right) { if (left.Length != right.Length) { return false; } int diff = 0; for (int i = 0; i < left.Length; i++) { diff |= left[i] ^ right[i]; } return diff == 0; }
-    private static void WriteUInt16(byte[] target, int offset, ushort value) { target[offset] = (byte)value; target[offset + 1] = (byte)(value >> 8); }
-    private static void WriteUInt32(byte[] target, int offset, uint value) { for (int i = 0; i < 4; i++) { target[offset + i] = (byte)(value >> (8 * i)); } }
-    private static void WriteUInt64(byte[] target, int offset, ulong value) { for (int i = 0; i < 8; i++) { target[offset + i] = (byte)(value >> (8 * i)); } }
+    private static void WriteUInt16(byte[] target, int offset, ushort value) { target[offset] = unchecked((byte)value); target[offset + 1] = unchecked((byte)(value >> 8)); }
+    private static void WriteUInt32(byte[] target, int offset, uint value) { for (int i = 0; i < 4; i++) { target[offset + i] = unchecked((byte)(value >> (8 * i))); } }
+    private static void WriteUInt64(byte[] target, int offset, ulong value) { for (int i = 0; i < 8; i++) { target[offset + i] = unchecked((byte)(value >> (8 * i))); } }
 }
