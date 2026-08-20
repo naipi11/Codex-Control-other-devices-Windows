@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 internal static class TrayNativeConstants
@@ -89,13 +90,21 @@ internal interface INativeTrayPlatform
 
 internal sealed class Win32TrayPlatform : INativeTrayPlatform
 {
-    private const string StaticClass = "STATIC";
+    private const string WindowClass = "CodexRemoteFixTrayHost";
+    private static readonly object WindowGate = new object();
+    private static readonly Dictionary<IntPtr, Win32TrayPlatform> Windows = new Dictionary<IntPtr, Win32TrayPlatform>();
+    private static readonly WndProcDelegate WindowProcThunk = WindowProc;
+    private Action<uint, IntPtr, IntPtr> _messageHandler;
+    private IntPtr _owner;
+
+    internal void SetMessageHandler(Action<uint, IntPtr, IntPtr> handler) { _messageHandler = handler; }
 
     public IntPtr CreateOwner()
     {
+        EnsureWindowClass();
         IntPtr owner = CreateWindowExW(
             TrayNativeConstants.WsExToolWindow,
-            StaticClass,
+            WindowClass,
             "CodexRemote-fix",
             TrayNativeConstants.WsPopup,
             -32000,
@@ -107,6 +116,8 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
             GetModuleHandleW(null),
             IntPtr.Zero);
         if (owner == IntPtr.Zero) { throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateOwner failed"); }
+        _owner = owner;
+        lock (WindowGate) { Windows[owner] = this; }
         return owner;
     }
 
@@ -134,10 +145,75 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     public bool PostMessage(IntPtr owner, uint message, UIntPtr wParam, IntPtr lParam) { return PostMessageW(owner, message, wParam, lParam); }
     public bool DestroyMenu(IntPtr menu) { return DestroyMenuNative(menu); }
     public bool EndMenu() { return EndMenuNative(); }
-    public bool DestroyOwner(IntPtr owner) { return DestroyWindow(owner); }
+    public bool DestroyOwner(IntPtr owner)
+    {
+        lock (WindowGate) { Windows.Remove(owner); }
+        _owner = IntPtr.Zero;
+        return DestroyWindow(owner);
+    }
+
+    internal static IntPtr RegisterTaskbarCreatedMessage() { return RegisterWindowMessageW("TaskbarCreated"); }
+    internal static bool GetCursorPosition(out TrayPoint point)
+    {
+        POINT value;
+        bool ok = GetCursorPos(out value);
+        point = new TrayPoint(value.X, value.Y);
+        return ok;
+    }
+    internal static int GetMessageLoop(out Message value)
+    {
+        MSG message;
+        int result = GetMessageW(out message, IntPtr.Zero, 0U, 0U);
+        value = new Message(message.Message, message.WParam, message.LParam);
+        return result;
+    }
+    internal static void TranslateAndDispatch(Message message)
+    {
+        MSG native = new MSG { Message = message.MessageId, WParam = message.WParam, LParam = message.LParam };
+        TranslateMessage(ref native); DispatchMessageW(ref native);
+    }
+    internal static void PostQuit(int exitCode) { PostQuitMessage(exitCode); }
+    internal static bool PostToWindow(IntPtr window, uint message) { return PostMessageW(window, message, UIntPtr.Zero, IntPtr.Zero); }
+
+    internal struct Message
+    {
+        internal uint MessageId; internal IntPtr WParam; internal IntPtr LParam;
+        internal Message(uint messageId, IntPtr wParam, IntPtr lParam) { MessageId = messageId; WParam = wParam; LParam = lParam; }
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { internal int X; internal int Y; }
+    [StructLayout(LayoutKind.Sequential)] private struct MSG { internal IntPtr HWnd; internal uint Message; internal IntPtr WParam; internal IntPtr LParam; internal uint Time; internal POINT Point; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct WNDCLASSEX { internal uint Size; internal uint Style; internal WndProcDelegate WndProc; internal int ClsExtra; internal int WndExtra; internal IntPtr Instance; internal IntPtr Icon; internal IntPtr Cursor; internal IntPtr Background; [MarshalAs(UnmanagedType.LPWStr)] internal string MenuName; [MarshalAs(UnmanagedType.LPWStr)] internal string ClassName; internal IntPtr SmallIcon; }
+    private delegate IntPtr WndProcDelegate(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    private static IntPtr WindowProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam)
+    {
+        Win32TrayPlatform platform = null;
+        lock (WindowGate) { Windows.TryGetValue(window, out platform); }
+        if (platform != null && platform._messageHandler != null)
+        {
+            try { platform._messageHandler(message, wParam, lParam); } catch { }
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    private static void EnsureWindowClass()
+    {
+        WNDCLASSEX value = new WNDCLASSEX { Size = (uint)Marshal.SizeOf(typeof(WNDCLASSEX)), WndProc = WindowProcThunk, Instance = GetModuleHandleW(null), ClassName = WindowClass };
+        ushort atom = RegisterClassExW(ref value);
+        if (atom == 0 && Marshal.GetLastWin32Error() != 1410) { throw new Win32Exception(Marshal.GetLastWin32Error(), "RegisterClassEx failed"); }
+    }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateWindowExW(int exStyle, string className, string windowName, int style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern ushort RegisterClassExW(ref WNDCLASSEX value);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr DefWindowProcW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr RegisterWindowMessageW(string name);
+    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll", SetLastError = true)] private static extern int GetMessageW(out MSG message, IntPtr window, uint minFilter, uint maxFilter);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool TranslateMessage(ref MSG message);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr DispatchMessageW(ref MSG message);
+    [DllImport("user32.dll")] private static extern void PostQuitMessage(int exitCode);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string moduleName);
     [DllImport("imm32.dll", SetLastError = true)] private static extern IntPtr ImmAssociateContext(IntPtr window, IntPtr context);
     [DllImport("imm32.dll", SetLastError = true)] private static extern IntPtr ImmGetContext(IntPtr window);

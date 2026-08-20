@@ -15,6 +15,7 @@ internal sealed class TrayWindow : IDisposable
     internal event Action<TrayCommand, ulong> CommandSelected;
     internal ulong CurrentRevision { get { return _current == null ? 0UL : _current.Revision; } }
     internal bool MenuOpen { get { return _menuOpen; } }
+    internal IntPtr OwnerHandle { get { return _owner; } }
 
     internal TrayWindow(INativeTrayPlatform native)
     {
