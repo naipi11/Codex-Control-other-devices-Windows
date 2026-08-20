@@ -1,9 +1,10 @@
 using System;
 using System.Collections.Generic;
 
-internal sealed class FakeSpikeNative : ISpikeNative
+internal sealed class FakeSpikeNative : ISpikeNative, ISpikeTrace
 {
     internal readonly List<string> Calls = new List<string>();
+    internal readonly List<string> Trace = new List<string>();
     internal IntPtr ContextValue;
     internal bool ForegroundResult = true;
     internal bool ForegroundProof = true;
@@ -31,6 +32,7 @@ internal sealed class FakeSpikeNative : ISpikeNative
     public bool ShellNotifyIcon(uint message, ref NotifyIconData data) { Calls.Add("Notify:" + message); return true; }
     public bool DestroyMenu(IntPtr menu) { Calls.Add("DestroyMenu"); return true; }
     public bool DestroyWindow(IntPtr hwnd) { Calls.Add("DestroyWindow"); return true; }
+    public void Record(string value) { Trace.Add(value); }
 }
 
 internal static class NoHimcSpikeSelfTest
@@ -60,6 +62,7 @@ internal static class NoHimcSpikeSelfTest
         controller.Initialize();
         UInt32 result = controller.ShowMenu(new Point(10, 20));
         AssertTrue(result == 77, "native command result is returned");
+        AssertTrue(fake.Trace.Contains("MenuTrackStart") && fake.Trace.Contains("MenuReturn:77"), "diagnostic trace records menu tracking and return");
         AssertEqual(
             "CreateOwner|Associate:null|GetContext|Notify:0|Notify:4|CreateMenu|Append:Spike title|CreateMenu|Append:Chinese|Append:English|SubMenu:Language|Append:No-op|SetForeground|GetForeground|TrackPopup|WM_NULL|Notify:3|DestroyMenu",
             String.Join("|", fake.Calls.ToArray()),

@@ -50,6 +50,11 @@ internal interface ISpikeNative
     bool DestroyWindow(IntPtr hwnd);
 }
 
+internal interface ISpikeTrace
+{
+    void Record(string value);
+}
+
 internal sealed class SpikeSnapshot
 {
     internal bool OwnerHasNoInputContext;
@@ -88,6 +93,12 @@ internal sealed class NoHimcSpikeController : IDisposable
     private bool _initialized;
     private bool _menuOpen;
     private readonly SpikeSnapshot _snapshot = new SpikeSnapshot();
+
+    private void Record(string value)
+    {
+        ISpikeTrace trace = _native as ISpikeTrace;
+        if (trace != null) { trace.Record(value); }
+    }
 
     internal NoHimcSpikeController(ISpikeNative native)
     {
@@ -138,6 +149,7 @@ internal sealed class NoHimcSpikeController : IDisposable
     {
         if (!_initialized || _menuOpen) { return 0; }
         _menuOpen = true;
+        Record("MenuAttempt");
         _snapshot.MenuAttempts++;
         IntPtr menu = IntPtr.Zero;
         try
@@ -154,19 +166,25 @@ internal sealed class NoHimcSpikeController : IDisposable
 
             if (!_native.SetForegroundWindow(_owner) || _native.GetForegroundWindow() != _owner)
             {
+                Record("ForegroundFailure");
                 _snapshot.ForegroundFailures++;
                 return 0;
             }
             _snapshot.TrackCalls++;
+            Record("MenuTrackStart");
             long trackStarted = Stopwatch.GetTimestamp();
             uint command = _native.TrackPopupMenuEx(menu, TpmReturnCmd | TpmRightButton | TpmNoNotify, point.X, point.Y, _owner, IntPtr.Zero);
             long elapsedMilliseconds = (Stopwatch.GetTimestamp() - trackStarted) * 1000L / Stopwatch.Frequency;
+            Record("TrackDurationMs:" + elapsedMilliseconds);
+            Record("MenuReturn:" + command);
             if (elapsedMilliseconds < _snapshot.TrackMinMilliseconds) { _snapshot.TrackMinMilliseconds = elapsedMilliseconds; }
             if (elapsedMilliseconds > _snapshot.TrackMaxMilliseconds) { _snapshot.TrackMaxMilliseconds = elapsedMilliseconds; }
             _snapshot.TrackTotalMilliseconds += elapsedMilliseconds;
             if (command == 0) { _snapshot.CancelCount++; } else { _snapshot.SelectedCount++; }
             if (!_native.PostMessage(_owner, WmNull, UIntPtr.Zero, IntPtr.Zero)) { throw new InvalidOperationException("WM_NULL failed"); }
+            Record("WM_NULL_Posted");
             if (!_native.ShellNotifyIcon(NimSetFocus, ref _iconData)) { throw new InvalidOperationException("NIM_SETFOCUS failed"); }
+            Record("NIM_SETFOCUS");
             return command;
         }
         finally
@@ -205,16 +223,19 @@ internal sealed class NoHimcSpikeController : IDisposable
     }
 }
 
-internal sealed class Win32SpikeNative : ISpikeNative
+internal sealed class Win32SpikeNative : ISpikeNative, ISpikeTrace
 {
     internal const uint CallbackMessage = 0x8001;
     internal static IntPtr ApplicationIcon;
     internal Action<Point> ContextMenuCallback;
+    internal readonly List<string> Trace = new List<string>();
     private static readonly NativeWindowProc WindowProc = WindowProcedure;
     private static Win32SpikeNative _current;
     private IntPtr _owner;
     private ushort _classAtom;
     private uint _threadId;
+
+    public void Record(string value) { Trace.Add(value); }
 
     public IntPtr CreatePersistentOwner()
     {
@@ -263,9 +284,19 @@ internal sealed class Win32SpikeNative : ISpikeNative
 
     private static IntPtr WindowProcedure(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam)
     {
+        if (_current != null)
+        {
+            if (message == 0x0211) { _current.Record("WM_ENTERMENULOOP"); }
+            else if (message == 0x0212) { _current.Record("WM_EXITMENULOOP"); }
+            else if (message == 0x001f) { _current.Record("WM_CANCELMODE"); }
+            else if (message == 0x011f) { _current.Record("WM_MENUSELECT"); }
+            else if (message == 0x0021) { _current.Record("WM_MOUSEACTIVATE"); }
+            else if (message == 0x0000) { _current.Record("WM_NULL_Delivered"); }
+        }
         if (message == CallbackMessage)
         {
             uint eventCode = unchecked((uint)lParam.ToInt64()) & 0xffffu;
+            if (_current != null) { _current.Record("ShellEvent:" + eventCode); }
             if (eventCode == 0x007b && _current != null && _current.ContextMenuCallback != null)
             {
                 POINT point;
@@ -337,7 +368,8 @@ internal static class NoHimcSpikeProgram
             SpikeSnapshot snapshot = controller.GetSnapshot();
             long minMilliseconds = snapshot.TrackCalls == 0 ? 0 : snapshot.TrackMinMilliseconds;
             long averageMilliseconds = snapshot.TrackCalls == 0 ? 0 : snapshot.TrackTotalMilliseconds / snapshot.TrackCalls;
-            File.WriteAllText(reportPath, "{\"attempts\":" + attempts + ",\"trackCalls\":" + snapshot.TrackCalls + ",\"trackMinMs\":" + minMilliseconds + ",\"trackMaxMs\":" + snapshot.TrackMaxMilliseconds + ",\"trackAverageMs\":" + averageMilliseconds + ",\"cancelCount\":" + snapshot.CancelCount + ",\"selectedCount\":" + snapshot.SelectedCount + ",\"foregroundFailures\":" + snapshot.ForegroundFailures + ",\"ownerHasNoInputContext\":" + (snapshot.OwnerHasNoInputContext ? "true" : "false") + "}", Encoding.UTF8);
+            string trace = String.Join(",", native.Trace.ToArray()).Replace("\"", "'");
+            File.WriteAllText(reportPath, "{\"attempts\":" + attempts + ",\"trackCalls\":" + snapshot.TrackCalls + ",\"trackMinMs\":" + minMilliseconds + ",\"trackMaxMs\":" + snapshot.TrackMaxMilliseconds + ",\"trackAverageMs\":" + averageMilliseconds + ",\"cancelCount\":" + snapshot.CancelCount + ",\"selectedCount\":" + snapshot.SelectedCount + ",\"foregroundFailures\":" + snapshot.ForegroundFailures + ",\"ownerHasNoInputContext\":" + (snapshot.OwnerHasNoInputContext ? "true" : "false") + ",\"trace\":\"" + trace + "\"}", Encoding.UTF8);
             return attempts == trials ? 0 : 1;
         }
         catch (Exception error)
