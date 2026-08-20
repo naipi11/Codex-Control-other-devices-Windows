@@ -171,7 +171,7 @@ function Get-CcodLifecycleSourceFiles {
         'Reset-CodexControlOtherDevices.ps1'
     )
     foreach ($leaf in $required) { $relative.Add($leaf) }
-    $trayHostRoot = Join-Path $root 'trayhost'
+    $trayHostRoot = Join-Path $root 'bin'
     if ([IO.Directory]::Exists($trayHostRoot)) {
         $expectedTrayHost = @('CodexRemote.TrayHost.exe','CodexRemote.TrayHost.exe.config','trayhost-build-provenance.json')
         $actualTrayHost = @(Get-ChildItem -LiteralPath $trayHostRoot -Force -ErrorAction Stop)
@@ -185,7 +185,7 @@ function Get-CcodLifecycleSourceFiles {
             if ($trayReparse -or $trayAds) {
                 Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'TrayHost artifact is a reparse point or has alternate data streams.' $trayFile.FullName
             }
-            $relative.Add('trayhost\' + $trayFile.Name)
+            $relative.Add('bin\' + $trayFile.Name)
         }
     }
     $runtimeRoot = Join-Path $root 'src\runtime'

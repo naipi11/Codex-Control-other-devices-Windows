@@ -72,10 +72,13 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
 $hash = Get-CcodBuildFileSha256 -Path $exe
 $sha256File = Join-Path $dist ("CodexRemote-fix-$Version-setup.exe.sha256.txt")
 Set-Content -LiteralPath $sha256File -Value ("{0} *{1}" -f $hash, [IO.Path]::GetFileName($exe)) -Encoding ascii
+$provenanceFile = Join-Path $dist ("CodexRemote-fix-$Version-trayhost-provenance.json")
+Copy-Item -LiteralPath (Join-Path $trayHostArtifact 'trayhost-build-provenance.json') -Destination $provenanceFile -Force
 
 Write-Host ''
 Write-Host 'Installer build completed:' -ForegroundColor Green
 Write-Host ("  Setup:    {0}" -f $exe)
 Write-Host ("  SHA-256:  {0}" -f $sha256File)
 Write-Host ("  Hash:     {0}" -f $hash)
+Write-Host ("  TrayHost: {0}" -f $provenanceFile)
 Write-Host ''

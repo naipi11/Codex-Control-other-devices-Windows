@@ -29,6 +29,10 @@ jobs:
         shell: pwsh
         run: npm test
 
+      - name: Run source-identical TrayHost smoke
+        shell: pwsh
+        run: ./tests/trayhost/Invoke-TrayHostSelfTest.ps1 -ProductionOnly
+
       - name: Build CodexRemote-fix installer
         shell: pwsh
         run: ./build/build.ps1
@@ -51,5 +55,5 @@ jobs:
           if (-not $exists) {
             gh release create $tag --repo $env:GITHUB_REPOSITORY --title "CodexRemote-fix $version" --generate-notes
           }
-          $assets = @(Get-ChildItem -LiteralPath (Join-Path $PWD 'build\dist') -File | Where-Object { $_.Extension -in @('.exe', '.txt') })
+          $assets = @(Get-ChildItem -LiteralPath (Join-Path $PWD 'build\dist') -File | Where-Object { $_.Extension -in @('.exe', '.txt', '.json') })
           gh release upload $tag --repo $env:GITHUB_REPOSITORY $assets.FullName --clobber

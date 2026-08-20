@@ -9,10 +9,10 @@ function Get-CcodTrayHostRuntimeRoot {
 
 function Import-CcodTrayHostAssembly {
     $runtimeRoot=Get-CcodTrayHostRuntimeRoot
-    $path=Join-Path $runtimeRoot 'trayhost\CodexRemote.TrayHost.exe'
+    $path=Join-Path $runtimeRoot 'bin\CodexRemote.TrayHost.exe'
     if(-not(Test-Path -LiteralPath $path -PathType Leaf)){throw 'CCOD_TRAYHOST_ARTIFACT_MISSING'}
     $full=[IO.Path]::GetFullPath($path)
-    if($script:CcodTrayHostAssemblyPath -cne $full){Add-Type -Path $full -ErrorAction Stop;$script:CcodTrayHostAssemblyPath=$full}
+    if($script:CcodTrayHostAssemblyPath -cne $full){[Reflection.Assembly]::LoadFrom($full)|Out-Null;$script:CcodTrayHostAssemblyPath=$full}
 }
 
 function Convert-CcodTrayHostColor([string]$Value) {
@@ -23,7 +23,7 @@ function Convert-CcodTrayHostState([string]$Value) {
 }
 
 function New-CcodTrayHostSnapshot {
-    param($Presentation,$Catalog,[string]$LanguageMode,[string]$SystemCultureName,[ulong]$Revision)
+    param($Presentation,$Catalog,[string]$LanguageMode,[string]$SystemCultureName,[UInt64]$Revision)
     $flags=[PresentationFlags]::None
     $flagMap=@{
         SessionReadyVisible=[PresentationFlags]::SessionReadyVisible;ApplyNowVisible=[PresentationFlags]::ApplyNowVisible;ApplyNowEnabled=[PresentationFlags]::ApplyNowEnabled
@@ -70,21 +70,21 @@ function New-CcodTrayHostSnapshot {
 function New-CcodTrayHostContext {
     param($CommandQueue,$OnTick,$Catalog,[string]$LanguageMode,[string]$SystemCultureName)
     Import-CcodTrayHostAssembly
-    $runtimeRoot=Get-CcodTrayHostRuntimeRoot;$runtimeId=Split-Path $runtimeRoot -Leaf;$exe=Join-Path $runtimeRoot 'trayhost\CodexRemote.TrayHost.exe'
+    $runtimeRoot=Get-CcodTrayHostRuntimeRoot;$runtimeId=Split-Path $runtimeRoot -Leaf;$exe=Join-Path $runtimeRoot 'bin\CodexRemote.TrayHost.exe'
     $initialPresentation=[pscustomobject][ordered]@{Color='Gray';StateKey='Waiting';SessionReadyVisible=$false;ApplyNowVisible=$false;ApplyNowEnabled=$false;ManualRetryVisible=$false;ManualRetryEnabled=$false;AutomationToggleEnabled=$true;AutomationChecked=$false;CandidateOptInToggleEnabled=$true;CandidateOptInChecked=$false;OpenLogsEnabled=$true;UninstallEnabled=$true;Busy=$false}
-    $initial=New-CcodTrayHostSnapshot $initialPresentation $Catalog $LanguageMode $SystemCultureName ([ulong]1)
+    $initial=New-CcodTrayHostSnapshot $initialPresentation $Catalog $LanguageMode $SystemCultureName ([UInt64]1)
     $process=[Diagnostics.Process]::GetCurrentProcess()
     try{
         $options=[TrayHostStartOptions]::new();$options.ExePath=$exe;$options.RuntimeId=$runtimeId;$options.ParentPid=$process.Id;$options.ParentCreationFileTimeUtc=$process.StartTime.ToFileTimeUtc();$options.InitialPresentation=$initial
         $client=[TrayHostParentClient]::Start($options)
     }finally{$process.Dispose()}
-    return [pscustomobject][ordered]@{Client=$client;CommandQueue=$CommandQueue;OnTick=$OnTick;Catalog=$Catalog;LanguageMode=$LanguageMode;SystemCultureName=$SystemCultureName;CurrentRevision=[ulong]1;MenuOpen=$false;Exited=$false;LastError=$null;ApplicationContext=[pscustomobject]@{}}
+    return [pscustomobject][ordered]@{Client=$client;CommandQueue=$CommandQueue;OnTick=$OnTick;Catalog=$Catalog;LanguageMode=$LanguageMode;SystemCultureName=$SystemCultureName;CurrentRevision=[UInt64]1;MenuOpen=$false;Exited=$false;LastError=$null;ApplicationContext=[pscustomobject]@{}}
 }
 
 function Set-CcodTrayHostPresentation {
     param($Context,$Presentation,$Catalog,[string]$LanguageMode,[string]$SystemCultureName)
     if($null -eq $Context -or $null -eq $Context.Client){throw 'CCOD_TRAYHOST_CONTEXT_INVALID'}
-    $revision=[ulong]([ulong]$Context.CurrentRevision + [ulong]1)
+    $revision=[UInt64]([UInt64]$Context.CurrentRevision + [UInt64]1)
     $snapshot=New-CcodTrayHostSnapshot $Presentation $Catalog $LanguageMode $SystemCultureName $revision
     if(-not $Context.Client.TryPublish($snapshot)){throw 'CCOD_TRAYHOST_PRESENTATION_FAILED'}
     $Context.Catalog=$Catalog;$Context.LanguageMode=$LanguageMode;$Context.SystemCultureName=$SystemCultureName;$Context.CurrentRevision=$revision
@@ -120,7 +120,7 @@ function Invoke-CcodTrayHostRunLoop {
     }
 }
 
-function Request-CcodTrayHostExit { param($Context) if($null -ne $Context -and $null -ne $Context.Client){[void]$Context.Client.BeginShutdown([ShutdownReason]::SupervisorExit,[ulong]$Context.CurrentRevision);$Context.Exited=$true} }
+function Request-CcodTrayHostExit { param($Context) if($null -ne $Context -and $null -ne $Context.Client){[void]$Context.Client.BeginShutdown([ShutdownReason]::SupervisorExit,[UInt64]$Context.CurrentRevision);$Context.Exited=$true} }
 function Close-CcodTrayHostContext { param($Context) if($null -ne $Context -and $null -ne $Context.Client){$Context.Client.Dispose();$Context.Client=$null};if($null -ne $Context){$Context.Exited=$true} }
 function Show-CcodTrayHostError { param($Context,$Catalog,$Key) if($null -ne $Context){$Context.LastError=$Key} }
 function End-CcodTrayHostMenu { param($Context) return $true }
