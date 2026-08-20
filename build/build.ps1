@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Version
+    [string]$Version,
+    [switch]$UseExistingTrayHost,
+    [string]$TrayHostArtifactDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,6 +33,18 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     throw "Invalid project version for the installer: $Version"
 }
 
+$trayHostArtifact = if ([string]::IsNullOrWhiteSpace($TrayHostArtifactDirectory)) {
+    Join-Path $PSScriptRoot 'generated\trayhost'
+} else {
+    [IO.Path]::GetFullPath($TrayHostArtifactDirectory)
+}
+Import-Module (Join-Path $PSScriptRoot 'TrayHostBuild.psm1') -Force
+if ($UseExistingTrayHost) {
+    Test-CcodTrayHostArtifact -RepositoryRoot $repoRoot -Version $Version -ArtifactDirectory $trayHostArtifact | Out-Null
+} else {
+    Invoke-CcodTrayHostBuild -RepositoryRoot $repoRoot -Version $Version -OutputDirectory $trayHostArtifact | Out-Null
+}
+
 $isccCandidates = @(
     (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
     (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
@@ -45,7 +59,7 @@ $scriptPath = Join-Path $PSScriptRoot 'CodexControlOtherDevices.iss'
 $dist = Join-Path $PSScriptRoot 'dist'
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-& $iscc "/DProjectVersion=$Version" "/O$dist\" $scriptPath
+& $iscc "/DProjectVersion=$Version" "/DTrayHostArtifactDirectory=$trayHostArtifact" "/O$dist\" $scriptPath
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
 }

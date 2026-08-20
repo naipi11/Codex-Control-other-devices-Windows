@@ -5,5 +5,6 @@ Thumbs.db
 node_modules/
 .worktrees/
 build/dist/
+build/generated/
 *.exe
 *.sha256.txt
