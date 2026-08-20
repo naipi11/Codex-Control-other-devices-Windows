@@ -556,6 +556,19 @@ Invoke-CcodTest 'gives Shutdown absolute priority over a slot journal command an
     Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -like 'Poll:*' -or $_ -like 'Start:*' -or $_ -eq 'Read:State'}).Count 'no lower priority work runs'
 }
 
+Invoke-CcodTest 'menu-open tick checks shutdown but skips every heavy supervisor path' {
+    $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
+    $world.CommandQueue.Enqueue([pscustomobject][ordered]@{Kind='OpenLogs';Value=$null;EnqueuedAtUtc='2030-02-03T03:04:05.0000000Z'})
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters $true
+    Assert-CcodEqual 0 $world.StateReads 'menu-open tick performs no state read'
+    Assert-CcodEqual 0 $world.JournalReads 'menu-open tick performs no journal read'
+    Assert-CcodEqual 0 @($world.Calls|Where-Object{$_ -eq 'Enumerate' -or $_ -like 'Poll:*' -or $_ -like 'Start:*' -or $_ -eq 'Open:Logs'}).Count 'menu-open tick performs no process worker decision or command work'
+    $world.ShutdownSignaled=$true
+    Invoke-CcodSupervisorTick $hostState $fixture.Fake.Adapters $true
+    Assert-CcodTrue $hostState.ShutdownRequested 'menu-open tick still latches shutdown'
+    Assert-CcodTrue ($world.Calls.Contains('Exit:UI')) 'menu-open shutdown still exits the native menu loop'
+}
+
 Invoke-CcodTest 'observes and renders at 0 and 1000ms but not at intervening 250ms safety ticks' {
     $fixture=New-CcodTickFixture;$world=$fixture.Fake.World;$hostState=$fixture.Host
     foreach($elapsed in @([long]0,[long]250,[long]500,[long]750,[long]999,[long]1000)){$world.Elapsed.Enqueue($elapsed)}

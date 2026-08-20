@@ -911,7 +911,7 @@ function Invoke-CcodSupervisorRefreshObservations {
 }
 
 function Invoke-CcodSupervisorTick {
-    param($HostState,[hashtable]$Adapters)
+    param($HostState,[hashtable]$Adapters,[bool]$MenuOpenOnly=$false)
     if($null -eq $HostState -or $HostState.ShutdownRequested){return}
     $signaled=Invoke-CcodSupervisorAdapter $Adapters.IsEventSignaled @($HostState.ShutdownEvent) 1
     if($signaled -isnot [bool]){throw 'shutdown state is invalid'}
@@ -925,6 +925,7 @@ function Invoke-CcodSupervisorTick {
         $HostState.TrayCallbackFailureLogged=$true
         Write-CcodSupervisorUiFailure $HostState $Adapters 'TrayCallback' 'CCOD_TRAY_CALLBACK_FAILED'
     }
+    if($MenuOpenOnly){return}
     if($null -ne $HostState.WorkerSlot){
         Invoke-CcodSupervisorPollSlot $HostState $Adapters
         if($null -eq $HostState.WorkerSlot){$HostState.ObservationDirty=$true}
@@ -1074,7 +1075,7 @@ function Invoke-CcodSupervisorHost {
             $hostState=New-CcodSupervisorHostState -Identity $identity -Layout $layout -Clock $clock -ShutdownEvent $shutdownEvent -CommandQueue $commandQueue -EventQueue $eventQueue -State $state -Journal $journal
             $hostState.UiLanguageMode=$preference.LanguageMode;$hostState.UiCatalog=$catalog
             $hostStateRef=$hostState;$adapterRef=$adapter
-            $onTick={Invoke-CcodSupervisorTick $hostStateRef $adapterRef}.GetNewClosure()
+            $onTick={param($menuOpen)Invoke-CcodSupervisorTick $hostStateRef $adapterRef ([bool]$menuOpen)}.GetNewClosure()
             $trayArguments=[object[]]::new(5);$trayArguments[0]=$commandQueue;$trayArguments[1]=$onTick;$trayArguments[2]=$catalog;$trayArguments[3]=$preference.LanguageMode;$trayArguments[4]=$cultureName
             $tray=Invoke-CcodSupervisorAdapter $adapter.NewTray $trayArguments 1
             if($null -eq $tray){throw 'tray contract is invalid'}

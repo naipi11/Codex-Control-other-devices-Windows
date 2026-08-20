@@ -311,9 +311,9 @@ $results.Add((Invoke-CcodTest 'production native item properties and menu lifecy
 }))
 
 $results.Add((Invoke-CcodTest 'native Opening and Closed freeze writes and flush only the latest render once' {
-    $fake=New-CcodTrayFakeAdapters;$context=$null
+    $fake=New-CcodTrayFakeAdapters;$context=$null;$tickModes=[Collections.Generic.List[bool]]::new()
     try{
-        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick ({param($menuOpen)$tickModes.Add([bool]$menuOpen)}.GetNewClosure()) -Adapters $fake.Adapters
         $active=New-CcodValidPresentation
         Set-CcodTrayPresentation -Context $context -Presentation $active
         $appliedFingerprint=$context.LastAppliedFingerprint
@@ -321,6 +321,9 @@ $results.Add((Invoke-CcodTest 'native Opening and Closed freeze writes and flush
 
         & $context.Menu.Events.Opening $context.Menu ([pscustomobject]@{Cancel=$false})
         Assert-CcodEqual $true $context.MenuOpen 'native Opening marks the system menu open'
+        Assert-CcodEqual $true $context.Timer.Properties.Started 'native Opening keeps the lightweight shutdown timer alive'
+        & $context.Timer.Events.Tick $context.Timer $null
+        Assert-CcodEqual 'True' (($tickModes|ForEach-Object {[string]$_})-join ',') 'an open native menu requests only the lightweight supervisor tick'
         $warning=New-CcodValidPresentation;$warning.Color='Yellow';$warning.StateKey='Inspecting'
         $blocked=New-CcodValidPresentation;$blocked.Color='Red';$blocked.StateKey='Error';$blocked.ApplyNowVisible=$true;$blocked.ApplyNowEnabled=$true
         Set-CcodTrayPresentation -Context $context -Presentation $warning
@@ -331,11 +334,33 @@ $results.Add((Invoke-CcodTest 'native Opening and Closed freeze writes and flush
 
         & $context.Menu.Events.Closed $context.Menu $null
         Assert-CcodEqual $false $context.MenuOpen 'native Closed marks the system menu closed'
+        Assert-CcodEqual $true $context.Timer.Properties.Started 'native Closed leaves the timer running'
         Assert-CcodEqual $null $context.PendingRender 'native Closed consumes the pending render once'
         Assert-CcodEqual 'Red' $context.NotifyIcon.Properties.Icon.Color 'native Closed applies only the latest pending icon'
         $writesAfterClose=@($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count
+        & $context.Timer.Events.Tick $context.Timer $null
+        Assert-CcodEqual 'True,False' (($tickModes|ForEach-Object {[string]$_})-join ',') 'the first tick after native Closed requests a normal supervisor tick'
         & $context.Menu.Events.Closed $context.Menu $null
         Assert-CcodEqual $writesAfterClose @($fake.State.Calls|Where-Object {$_ -like 'Set:*' -or $_ -like 'Visible:*'}).Count 'a repeated Closed event cannot flush twice'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
+$results.Add((Invoke-CcodTest 'native Closed contains a pending-render failure and leaves lightweight ticks alive' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null;$modes=[Collections.Generic.List[bool]]::new()
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick ({param($menuOpen)$modes.Add([bool]$menuOpen)}.GetNewClosure()) -Adapters $fake.Adapters
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
+        & $context.Menu.Events.Opening $context.Menu ([pscustomobject]@{Cancel=$false})
+        $blocked=New-CcodValidPresentation;$blocked.Color='Red';$blocked.StateKey='Error'
+        Set-CcodTrayPresentation -Context $context -Presentation $blocked
+        $context.Adapters.SetUiProperty={param($Object,$Name,$Value)throw 'FAKE_CLOSED_FLUSH_FAILURE'}
+        & $context.Menu.Events.Closed $context.Menu $null
+        Assert-CcodEqual $false $context.MenuOpen 'failed Closed flush still clears menu-open state'
+        Assert-CcodEqual $null $context.PendingRender 'failed Closed flush still clears the pending render'
+        Assert-CcodEqual $true $context.CallbackFailure 'failed Closed flush is contained as a tray callback failure'
+        Assert-CcodEqual $true $context.Timer.Properties.Started 'failed Closed flush cannot stop lightweight shutdown ticks'
+        & $context.Timer.Events.Tick $context.Timer $null
+        Assert-CcodEqual 'False' (($modes|ForEach-Object {[string]$_})-join ',') 'normal supervisor ticks remain callable after a failed Closed flush'
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 

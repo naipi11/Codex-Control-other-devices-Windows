@@ -904,7 +904,9 @@ function New-CcodTrayContext {
                 if($contextRef.State -cne 'Open'){return}
                 $current=& $invokeAdapterRef $contextRef.Adapters.GetManagedThreadId @() 1 'CCOD_TRAY_THREAD_INVALID' 'Tray'
                 if($current -isnot [int] -or $current -ne $contextRef.OwnerManagedThreadId){throw 'menu opening thread is invalid'}
-                $contextRef.MenuOpen=$true
+                if(-not $contextRef.MenuOpen){
+                    $contextRef.MenuOpen=$true
+                }
             }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}
             finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
         }.GetNewClosure()
@@ -919,12 +921,14 @@ function New-CcodTrayContext {
                 if($contextRef.State -cne 'Open'){return}
                 $current=& $invokeAdapterRef $contextRef.Adapters.GetManagedThreadId @() 1 'CCOD_TRAY_THREAD_INVALID' 'Tray'
                 if($current -isnot [int] -or $current -ne $contextRef.OwnerManagedThreadId){throw 'menu closed thread is invalid'}
+                if(-not $contextRef.MenuOpen){return}
                 $contextRef.MenuOpen=$false
                 $pending=$contextRef.PendingRender
-                if($null -ne $pending -and $pending.Fingerprint -cne $contextRef.LastAppliedFingerprint){
-                    & $invokeRenderWriteRef $contextRef $pending 'CCOD_TRAY_PRESENTATION_FAILED'
-                }
-                $contextRef.PendingRender=$null
+                try{
+                    if($null -ne $pending -and $pending.Fingerprint -cne $contextRef.LastAppliedFingerprint){
+                        & $invokeRenderWriteRef $contextRef $pending 'CCOD_TRAY_PRESENTATION_FAILED'
+                    }
+                }finally{$contextRef.PendingRender=$null}
             }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}
             finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
         }.GetNewClosure()
@@ -939,7 +943,7 @@ function New-CcodTrayContext {
                 if($contextRef.State -cne 'Open'){return}
                 $current=& $invokeAdapterRef $contextRef.Adapters.GetManagedThreadId @() 1 'CCOD_TRAY_THREAD_INVALID' 'Tray'
                 if($current -isnot [int] -or $current -ne $contextRef.OwnerManagedThreadId){return}
-                & $invokeAdapterRef $contextRef.OnTick @() 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
+                & $invokeAdapterRef $contextRef.OnTick @([bool]$contextRef.MenuOpen) 0 'CCOD_TRAY_CREATE_FAILED' 'Tray'
             }catch{if($contextRef.State -ceq 'Open'){$contextRef.CallbackFailure=$true}}
             finally{[Threading.Monitor]::Exit($contextRef.QueueGate)}
         }.GetNewClosure()
