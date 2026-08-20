@@ -26,7 +26,7 @@ public sealed class TrayHostStartReceipt
 
 public sealed class TrayHostParentClient : IDisposable
 {
-    internal static Func<ProcessStartInfo, Process> TestProcessFactory;
+    internal static Func<ProcessStartInfo, Process> TestProcessFactory = null;
 
     private readonly object _eventGate = new object();
     private readonly object _writeGate = new object();
@@ -86,7 +86,7 @@ public sealed class TrayHostParentClient : IDisposable
         using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) { rng.GetBytes(seed); rng.GetBytes(challenge); }
         ProtocolCodec.WriteBootstrap(_childInput, ProtocolFrame.Bootstrap(ProtocolDirection.ParentToHost, TrayHostMessageType.ParentHello, TrayHostWire.WriteParentHello(seed, challenge, options.ParentPid, options.ParentCreationFileTimeUtc, options.RuntimeId)));
         TrayHostHello host = TrayHostWire.ReadHostHello(ProtocolCodec.ReadBootstrap(_childOutput, ProtocolDirection.HostToParent).Payload);
-        if (host.ProcessId != _process.Id || host.RuntimeId != options.RuntimeId || host.HostEpoch == 0UL) { throw new InvalidOperationException("CCOD_TRAYHOST_IDENTITY_INVALID"); }
+        if (host.ProcessId != _process.Id || host.CreationFileTimeUtc != _process.StartTime.ToFileTimeUtc() || host.RuntimeId != options.RuntimeId || host.HostEpoch == 0UL) { throw new InvalidOperationException("CCOD_TRAYHOST_IDENTITY_INVALID"); }
         _keys = ProtocolCodec.DeriveDirectionalKeys(seed, challenge, host.HostNonce, host.HostEpoch);
         _writeSequence = 1UL; _readSequence = 1UL;
         WriteAuthenticated(TrayHostMessageType.Presentation, TrayHostWire.WritePresentation(options.InitialPresentation));
@@ -163,6 +163,7 @@ public sealed class TrayHostParentClient : IDisposable
             {
                 ProtocolFrame frame = ReadAuthenticated();
                 if (frame.MessageType == TrayHostMessageType.PresentationAck) { EnqueueEvent(TrayHostEvent.Ack(TrayHostWire.ReadRevision(frame.Payload))); }
+                else if (frame.MessageType == TrayHostMessageType.Action) { EnqueueEvent(TrayHostEvent.Action(TrayHostWire.ReadAction(frame.Payload))); }
                 else if (frame.MessageType == TrayHostMessageType.ShutdownAck) { EnqueueEvent(TrayHostEvent.Exited()); _transport.Dispose(); _stopped.Set(); return; }
                 else if (frame.MessageType == TrayHostMessageType.Fault) { EnqueueEvent(TrayHostEvent.Fault("CCOD_TRAYHOST_REMOTE_FAULT")); }
                 else if (frame.MessageType == TrayHostMessageType.Pong) { _work.Set(); }

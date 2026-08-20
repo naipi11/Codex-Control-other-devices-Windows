@@ -35,7 +35,8 @@ internal static class TrayHostParentClientSelfTest
         byte[] hostNonce = new byte[32];
         using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) { rng.GetBytes(hostNonce); }
         ulong epoch = 99UL;
-        ProtocolCodec.WriteBootstrap(output, ProtocolFrame.Bootstrap(ProtocolDirection.HostToParent, TrayHostMessageType.HostHello, TrayHostWire.WriteHostHello(Process.GetCurrentProcess().Id, hello.RuntimeId, hostNonce, epoch)));
+        Process peerProcess = Process.GetCurrentProcess();
+        ProtocolCodec.WriteBootstrap(output, ProtocolFrame.Bootstrap(ProtocolDirection.HostToParent, TrayHostMessageType.HostHello, TrayHostWire.WriteHostHello(peerProcess.Id, peerProcess.StartTime.ToFileTimeUtc(), hello.RuntimeId, hostNonce, epoch)));
         SessionKeys keys = ProtocolCodec.DeriveDirectionalKeys(hello.SessionSeed, hello.ParentChallenge, hostNonce, epoch);
         ProtocolFrame presentation = ProtocolCodec.ReadAuthenticated(input, ProtocolDirection.ParentToHost, epoch, 1UL, keys.ParentToHost);
         AssertTrue(presentation.MessageType == TrayHostMessageType.Presentation, "peer receives initial presentation");

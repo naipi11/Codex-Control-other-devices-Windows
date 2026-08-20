@@ -171,6 +171,23 @@ function Get-CcodLifecycleSourceFiles {
         'Reset-CodexControlOtherDevices.ps1'
     )
     foreach ($leaf in $required) { $relative.Add($leaf) }
+    $trayHostRoot = Join-Path $root 'trayhost'
+    if ([IO.Directory]::Exists($trayHostRoot)) {
+        $expectedTrayHost = @('CodexRemote.TrayHost.exe','CodexRemote.TrayHost.exe.config','trayhost-build-provenance.json')
+        $actualTrayHost = @(Get-ChildItem -LiteralPath $trayHostRoot -Force -ErrorAction Stop)
+        if (@($actualTrayHost | Where-Object { $_.PSIsContainer -or $expectedTrayHost -cnotcontains $_.Name }).Count -gt 0 -or
+            (@($actualTrayHost.Name | Sort-Object) -join ',') -cne (@($expectedTrayHost | Sort-Object) -join ',')) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'TrayHost artifact set is incomplete or contains unknown files.' $trayHostRoot
+        }
+        foreach ($trayFile in $actualTrayHost) {
+            $trayReparse = Test-CcodLifecycleReparse -Path $trayFile.FullName
+            $trayAds = Test-CcodLifecycleAlternateDataStreams -Path $trayFile.FullName
+            if ($trayReparse -or $trayAds) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'TrayHost artifact is a reparse point or has alternate data streams.' $trayFile.FullName
+            }
+            $relative.Add('trayhost\' + $trayFile.Name)
+        }
+    }
     $runtimeRoot = Join-Path $root 'src\runtime'
     foreach ($item in Get-ChildItem -LiteralPath $runtimeRoot -Force -Recurse -ErrorAction Stop) {
         if (Test-CcodLifecycleReparse -Path $item.FullName) {

@@ -183,7 +183,7 @@ function Invoke-CcodSupervisorNullableAdapter {
 function Import-CcodSupervisorModules {
     if($null -eq $script:CcodSupervisorScriptPath){throw 'supervisor script path is unavailable'}
     $moduleRoot=Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'modules'
-    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','RendererIntegration.psm1','SupervisorEngine.psm1','UiLocalization.psm1','UiPreferences.psm1','TrayUi.psm1','UiActions.psm1','WorkerRuntime.psm1')){
+    foreach($leaf in @('KernelObjects.psm1','PersistenceIO.psm1','StateStore.psm1','TransitionJournal.psm1','ProcessControl.psm1','RendererIntegration.psm1','SupervisorEngine.psm1','UiLocalization.psm1','UiPreferences.psm1','TrayUi.psm1','TrayHostClient.psm1','UiActions.psm1','WorkerRuntime.psm1')){
         Import-Module -Name (Join-Path $moduleRoot $leaf) -Force -ErrorAction Stop
     }
 }
@@ -236,7 +236,7 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.SetUiLanguageMode={param($StateRoot,$LanguageMode)Set-CcodUiLanguageMode -StateRoot $StateRoot -LanguageMode $LanguageMode|Out-Null}
     $defaults.GetSystemCultureName={[Globalization.CultureInfo]::CurrentUICulture.Name}
     $defaults.GetUiCatalog={param($ResourcesRoot,$LanguageMode,$SystemCultureName)Get-CcodUiCatalog -ResourcesRoot $ResourcesRoot -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
-    $defaults.ShowTrayError={param($Tray,$Catalog,$Key)Show-CcodTrayError -Context $Tray -Catalog $Catalog -Key $Key}
+    $defaults.ShowTrayError={param($Tray,$Catalog,$Key)if($null -ne $Tray -and $null -ne $Tray.PSObject.Properties['Client']){Show-CcodTrayHostError -Context $Tray -Catalog $Catalog -Key $Key}else{Show-CcodTrayError -Context $Tray -Catalog $Catalog -Key $Key}}
     $defaults.StartUninstall={param($InstallRoot,$RuntimeRoot,$PowerShellPath)Start-CcodTrayUninstall -InstallRoot $InstallRoot -RuntimeRoot $RuntimeRoot -PowerShellPath $PowerShellPath}
     $defaults.EnumerateProcessIds={Get-CcodChatGptProcessIds}
     $defaults.GetProcessSnapshot={param($ProcessId,$StatusEvidence)Get-CcodProcessSnapshot -ProcessId $ProcessId -StatusEvidence $StatusEvidence}
@@ -277,9 +277,9 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.NewQueue={param($Kind)Write-Output -NoEnumerate ([Collections.Concurrent.ConcurrentQueue[object]]::new())}
     $defaults.GetQueueCount={param($Queue)[int]$Queue.Count}
     $defaults.TryDequeue={param($Queue)$value=$null;$ok=$Queue.TryDequeue([ref]$value);[pscustomobject][ordered]@{Succeeded=[bool]$ok;Value=$value}}
-    $defaults.NewTray={param($Queue,$OnTick,$Catalog,$LanguageMode,$SystemCultureName)New-CcodTrayContext -CommandQueue $Queue -OnTick $OnTick -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
-    $defaults.SetTrayPresentation={param($Tray,$Presentation,$Catalog,$LanguageMode,$SystemCultureName)Set-CcodTrayPresentation -Context $Tray -Presentation $Presentation -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
-    $defaults.StopTrayTimer={param($Tray)$Tray.Timer.Stop()}
+    $defaults.NewTray={param($Queue,$OnTick,$Catalog,$LanguageMode,$SystemCultureName)New-CcodTrayHostContext -CommandQueue $Queue -OnTick $OnTick -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
+    $defaults.SetTrayPresentation={param($Tray,$Presentation,$Catalog,$LanguageMode,$SystemCultureName)Set-CcodTrayHostPresentation -Context $Tray -Presentation $Presentation -Catalog $Catalog -LanguageMode $LanguageMode -SystemCultureName $SystemCultureName}
+    $defaults.StopTrayTimer={param($Tray)if($null -ne $Tray -and $null -ne $Tray.PSObject.Properties['Client']){return};$Tray.Timer.Stop()}
     $defaults.RequestUiExit={
         param($Tray)
         if($null -eq $Tray){return}
@@ -295,10 +295,11 @@ function Get-CcodSupervisorDefaultAdapters {
                 }
             }
         }catch{}
+        if($null -ne $Tray -and $null -ne $Tray.PSObject.Properties['Client']){Request-CcodTrayHostExit -Context $Tray;return}
         $applicationContextProperty=$Tray.PSObject.Properties['ApplicationContext']
         if($null -ne $applicationContextProperty -and $null -ne $applicationContextProperty.Value){$applicationContextProperty.Value.ExitThread()}
     }
-    $defaults.CloseTray={param($Tray)Close-CcodTrayContext -Context $Tray}
+    $defaults.CloseTray={param($Tray)if($null -ne $Tray -and $null -ne $Tray.PSObject.Properties['Client']){Close-CcodTrayHostContext -Context $Tray}else{Close-CcodTrayContext -Context $Tray}}
     $defaults.NewWatcher={param($Queue,$OnFull)Start-CcodProcessWatcher -Queue $Queue -OnFullReconciliationRequired $OnFull}
     $defaults.StopWatcher={param($Watcher)Stop-CcodProcessWatcher -Watcher $Watcher}
     $defaults.GetWorkerLeafState={param($Path)Get-CcodWorkerLeafState -Path $Path}
@@ -325,7 +326,7 @@ function Get-CcodSupervisorDefaultAdapters {
     }
     $defaults.OpenLogs={param($Path)Open-CcodLogDirectory -Path $Path}
     $defaults.WriteLog={param($Record)if($null -ne $script:CcodSupervisorLogPath){Write-CcodRotatingLog -Path $script:CcodSupervisorLogPath -Message ($Record|ConvertTo-Json -Depth 4 -Compress)}}
-    $defaults.RunUiContext={param($Tray)Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop;[Windows.Forms.Application]::Run($Tray.ApplicationContext)}
+    $defaults.RunUiContext={param($Tray)if($null -ne $Tray -and $null -ne $Tray.PSObject.Properties['Client']){Invoke-CcodTrayHostRunLoop -Context $Tray}else{Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop;[Windows.Forms.Application]::Run($Tray.ApplicationContext)}}
     return $defaults
 }
 

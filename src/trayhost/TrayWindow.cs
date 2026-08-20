@@ -16,6 +16,9 @@ internal sealed class TrayWindow : IDisposable
     internal ulong CurrentRevision { get { return _current == null ? 0UL : _current.Revision; } }
     internal bool MenuOpen { get { return _menuOpen; } }
     internal IntPtr OwnerHandle { get { return _owner; } }
+    internal LanguageMode CurrentLanguage { get { return _current == null ? LanguageMode.System : _current.Language; } }
+    internal bool AutomationChecked { get { return _current != null && (_current.Flags & PresentationFlags.AutomationChecked) == PresentationFlags.AutomationChecked; } }
+    internal bool CandidateOptInChecked { get { return _current != null && (_current.Flags & PresentationFlags.CandidateOptInChecked) == PresentationFlags.CandidateOptInChecked; } }
 
     internal TrayWindow(INativeTrayPlatform native)
     {

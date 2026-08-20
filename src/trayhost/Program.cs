@@ -31,7 +31,7 @@ internal static class Program
         byte[] nonce = new byte[32]; using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) { rng.GetBytes(nonce); }
         ulong epoch = (ulong)DateTime.UtcNow.Ticks;
         Process self = Process.GetCurrentProcess();
-        ProtocolCodec.WriteBootstrap(output, ProtocolFrame.Bootstrap(ProtocolDirection.HostToParent, TrayHostMessageType.HostHello, TrayHostWire.WriteHostHello(self.Id, expectedRuntime, nonce, epoch)));
+        ProtocolCodec.WriteBootstrap(output, ProtocolFrame.Bootstrap(ProtocolDirection.HostToParent, TrayHostMessageType.HostHello, TrayHostWire.WriteHostHello(self.Id, self.StartTime.ToFileTimeUtc(), expectedRuntime, nonce, epoch)));
         SessionKeys keys = ProtocolCodec.DeriveDirectionalKeys(parent.SessionSeed, parent.ParentChallenge, nonce, epoch);
         ulong inboundSequence = 1UL; ulong outboundSequence = 1UL;
         ProtocolFrame initialFrame = ProtocolCodec.ReadAuthenticated(input, ProtocolDirection.ParentToHost, epoch, inboundSequence++, keys.ParentToHost);
@@ -44,7 +44,13 @@ internal static class Program
         TrayHostApplication application = null;
         Action<TrayCommand, ulong> command = delegate(TrayCommand selected, ulong revision)
         {
-            lock (WriteGate) { ProtocolCodec.WriteAuthenticated(output, ProtocolFrame.Authenticated(ProtocolDirection.HostToParent, TrayHostMessageType.Action, epoch, outboundSequence++, TrayHostWire.WriteAction(new TrayHostAction(Guid.NewGuid(), selected, revision))), keys.HostToParent); }
+            bool? boolValue = null; LanguageMode? languageValue = null;
+            if (selected == TrayCommand.SetAutomation) { boolValue = !window.AutomationChecked; }
+            else if (selected == TrayCommand.SetCandidateOptIn) { boolValue = !window.CandidateOptInChecked; }
+            else if (selected == TrayCommand.SetLanguageSystem) { languageValue = LanguageMode.System; }
+            else if (selected == TrayCommand.SetLanguageChinese) { languageValue = LanguageMode.Chinese; }
+            else if (selected == TrayCommand.SetLanguageEnglish) { languageValue = LanguageMode.English; }
+            lock (WriteGate) { ProtocolCodec.WriteAuthenticated(output, ProtocolFrame.Authenticated(ProtocolDirection.HostToParent, TrayHostMessageType.Action, epoch, outboundSequence++, TrayHostWire.WriteAction(new TrayHostAction(Guid.NewGuid(), selected, revision, boolValue, languageValue))), keys.HostToParent); }
         };
         Action work = delegate
         {

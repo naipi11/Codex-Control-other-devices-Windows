@@ -49,9 +49,12 @@ public sealed class TrayHostEvent
     public Guid ActionId { get; internal set; }
     public TrayCommand Command { get; internal set; }
     public ulong Revision { get; internal set; }
+    public bool? BoolValue { get; internal set; }
+    public LanguageMode? LanguageValue { get; internal set; }
     public string ErrorCode { get; internal set; }
 
     internal static TrayHostEvent Ack(ulong revision) { return new TrayHostEvent { Kind = TrayHostEventKind.PresentationAck, Revision = revision }; }
+    internal static TrayHostEvent Action(TrayHostAction action) { return new TrayHostEvent { Kind = TrayHostEventKind.Action, ActionId = action.ActionId, Command = action.Command, Revision = action.Revision, BoolValue = action.BoolValue, LanguageValue = action.LanguageValue }; }
     internal static TrayHostEvent Fault(string code) { return new TrayHostEvent { Kind = TrayHostEventKind.Fault, ErrorCode = code ?? "CCOD_TRAYHOST_FAULT" }; }
     internal static TrayHostEvent Exited() { return new TrayHostEvent { Kind = TrayHostEventKind.Exited }; }
 }
@@ -92,6 +95,12 @@ internal sealed class TrayHostAction
         ActionId = actionId;
         Command = command;
         Revision = revision;
+    }
+
+    internal TrayHostAction(Guid actionId, TrayCommand command, ulong revision, bool? boolValue, LanguageMode? languageValue)
+        : this(actionId, command, revision)
+    {
+        BoolValue = boolValue; LanguageValue = languageValue;
     }
 }
 

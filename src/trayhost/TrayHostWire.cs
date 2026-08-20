@@ -58,13 +58,13 @@ internal static class TrayHostWire
         }
     }
 
-    internal static byte[] WriteHostHello(int hostPid, string runtimeId, byte[] nonce, ulong epoch)
+    internal static byte[] WriteHostHello(int hostPid, long creationFileTimeUtc, string runtimeId, byte[] nonce, ulong epoch)
     {
         if (nonce == null || nonce.Length != 32 || epoch == 0UL) { throw new ArgumentException("host hello is invalid"); }
         using (MemoryStream stream = new MemoryStream())
         using (BinaryWriter writer = new BinaryWriter(stream, Utf8))
         {
-            writer.Write((byte)1); writer.Write(hostPid); writer.Write(DateTime.UtcNow.ToFileTimeUtc()); writer.Write(nonce); writer.Write(epoch); WriteString(writer, runtimeId, 128); return stream.ToArray();
+            writer.Write((byte)1); writer.Write(hostPid); writer.Write(creationFileTimeUtc); writer.Write(nonce); writer.Write(epoch); WriteString(writer, runtimeId, 128); return stream.ToArray();
         }
     }
 
@@ -122,6 +122,17 @@ internal static class TrayHostWire
     {
         if (action == null) { throw new ArgumentNullException("action"); }
         using (MemoryStream stream = new MemoryStream()) using (BinaryWriter writer = new BinaryWriter(stream)) { writer.Write(action.ActionId.ToByteArray()); writer.Write((ushort)action.Command); writer.Write(action.Revision); return stream.ToArray(); }
+    }
+
+    internal static TrayHostAction ReadAction(byte[] payload)
+    {
+        using (MemoryStream stream = new MemoryStream(payload ?? new byte[0]))
+        using (BinaryReader reader = new BinaryReader(stream))
+        {
+            byte[] idBytes = reader.ReadBytes(16); if (idBytes.Length != 16) { throw new ProtocolViolationException("action id is truncated"); }
+            TrayCommand command = (TrayCommand)reader.ReadUInt16(); ulong revision = reader.ReadUInt64(); RequireEnd(stream);
+            try { return new TrayHostAction(new Guid(idBytes), command, revision); } catch (ArgumentException error) { throw new ProtocolViolationException(error.Message); }
+        }
     }
 
     private static void WriteString(BinaryWriter writer, string value, int maximumChars)
