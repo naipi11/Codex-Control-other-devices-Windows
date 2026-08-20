@@ -59,6 +59,8 @@ The automated trace shows no immediate zero-return loop, foreground-proof failur
 
 The user confirmed that the visible input indicator did not change during either the Chinese or English 50-trial run. The uncommitted-composition trial was offered but no event was received, so composition preservation remains explicitly unverified.
 
+The user explicitly accepted proceeding with this composition limitation. Future implementation and release notes must retain the limitation and must not claim coverage of an active uncommitted composition.
+
 ## Gate result
 
 **BLOCKED / NOT PASSED.** The current no-HIMC persistent-owner spike does not yet demonstrate stable repeated interaction on the target machine. No production TrayHost, IPC integration, installer build, push, tag, or Release may proceed from this evidence.

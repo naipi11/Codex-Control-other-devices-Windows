@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - No task after Task 1 may start until the target-machine no-HIMC spike passes and the user explicitly confirms the result.
+- The target-machine spike passed its 50 Chinese/50 English menu and input-indicator checks; the user explicitly accepted proceeding with the active-composition scenario unverified. No implementation or release artifact may claim active-composition coverage.
 - Production never reads or writes another process's HIMC or TSF compartment.
 - No PowerShell, WinForms, WPF, Windows App SDK, `AttachThreadInput`, `SendInput`, network listener, named pipe, file queue, registry queue, or arbitrary command execution is allowed in TrayHost.
 - TrayHost receives no device key, account token, port, Codex path, source path, or arbitrary command text.
