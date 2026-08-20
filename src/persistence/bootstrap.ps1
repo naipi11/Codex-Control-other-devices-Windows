@@ -694,6 +694,7 @@ try {
                 Throw-CcodBootstrapError 'CCOD_BOOTSTRAP_LAUNCH_RELEASE_FAILED' 'The launch serialization lease could not be released after Supervisor readiness' $root
             }
             $exitCode = Wait-CcodBootstrapChild -Process $child
+            Write-CcodBootstrapLog -InstallRoot $root -Message ("Runtime {0} exited after readiness with code {1}" -f $runtimeId, $exitCode)
             $child = $null
             break
         }
@@ -703,7 +704,9 @@ try {
         } else {
             Write-CcodBootstrapLog -InstallRoot $root -Message ("Runtime {0} exited before signaling ready" -f $runtimeId)
         }
+        $childExitCode = [int]$child.ExitCode
         Stop-CcodBootstrapChild -Process $child
+        Write-CcodBootstrapLog -InstallRoot $root -Message ("Runtime {0} exited before readiness with code {1}" -f $runtimeId, $childExitCode)
         $child = $null
     }
 

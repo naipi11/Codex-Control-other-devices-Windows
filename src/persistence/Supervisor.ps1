@@ -254,7 +254,7 @@ function Get-CcodSupervisorDefaultAdapters {
     $defaults.GetPackageIdentity={
         if($null -eq (Get-Command Get-CcodPackageIdentity -ErrorAction SilentlyContinue)){
             $modulePath=Join-Path (Join-Path (Split-Path $script:CcodSupervisorScriptPath -Parent) 'modules') 'CompatibilityProbe.psm1'
-            Import-Module -Name $modulePath -Force -ErrorAction Stop
+            Import-Module -Name $modulePath -Force -Verbose:$false -ErrorAction Stop | Out-Null
         }
         Get-CcodPackageIdentity
     }

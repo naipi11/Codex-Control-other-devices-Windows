@@ -121,7 +121,7 @@ function Invoke-CcodTrayHostRunLoop {
 }
 
 function Request-CcodTrayHostExit { param($Context) if($null -ne $Context -and $null -ne $Context.Client){[void]$Context.Client.BeginShutdown([ShutdownReason]::SupervisorExit,[UInt64]$Context.CurrentRevision);$Context.Exited=$true} }
-function Close-CcodTrayHostContext { param($Context) if($null -ne $Context -and $null -ne $Context.Client){$Context.Client.Dispose();$Context.Client=$null};if($null -ne $Context){$Context.Exited=$true} }
+function Close-CcodTrayHostContext { param($Context) if($null -ne $Context -and $null -ne $Context.Client){$Context.Client.Dispose();$Context.Client=$null};if($null -ne $Context){$Context.Exited=$true};return [pscustomobject][ordered]@{Closed=$true;ErrorCode=$null} }
 function Show-CcodTrayHostError { param($Context,$Catalog,$Key) if($null -ne $Context){$Context.LastError=$Key} }
 function End-CcodTrayHostMenu { param($Context) return $true }
 
