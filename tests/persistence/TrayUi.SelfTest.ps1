@@ -372,6 +372,20 @@ $results.Add((Invoke-CcodTest 'NotifyIcon left MouseUp is inert while right Mous
     }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
 }))
 
+$results.Add((Invoke-CcodTest 'right-click passes the entire native menu snapshot as the second adapter argument without argument flattening' {
+    $fake=New-CcodTrayFakeAdapters;$context=$null
+    try{
+        $context=New-CcodTrayContext -CommandQueue (New-CcodTrayTestQueue) -OnTick {} -Adapters $fake.Adapters
+        Set-CcodTrayPresentation -Context $context -Presentation (New-CcodValidPresentation)
+        $fake.State.NativeMenuResults.Enqueue(0)
+        & $context.NotifyIcon.Events.MouseUp $context.NotifyIcon ([pscustomobject]@{Button='Right'})
+        $items=$fake.State.NativeMenuSpecs[0]
+        Assert-CcodEqual 11 @($items).Count 'ShowNativeMenu receives every top-level item as one Items argument'
+        Assert-CcodEqual 3 @($items[7].Children).Count 'ShowNativeMenu receives the complete language submenu'
+        Assert-CcodEqual '1005,1006,1007' (($items[7].Children|ForEach-Object {$_.CommandId})-join ',') 'nested command ids survive the adapter boundary'
+    }finally{if($null -ne $context -and $context.State -cne 'Closed'){Close-CcodTrayContext -Context $context|Out-Null}}
+}))
+
 $results.Add((Invoke-CcodTest 'native command ids 1001 through 1009 map exactly to queue-only commands without optimistic truth changes' {
     $fake=New-CcodTrayFakeAdapters;$queue=New-CcodTrayTestQueue;$context=$null
     try{
