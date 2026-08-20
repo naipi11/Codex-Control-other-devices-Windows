@@ -87,7 +87,7 @@ Neither Codex nor External renderer installation files are modified.
 
 *Example menu; the system tray and other applications are not shown.*
 
-The native WinForms menu shows actions only when their semantic state allows them: Apply now, Retry,
+The compiled native Win32 TrayHost menu shows actions only when their semantic state allows them: Apply now, Retry,
 Automation, Candidate-compatible trial, Logs, and Uninstall. Uninstall always requires explicit confirmation.
 
 | Color | State | Meaning |

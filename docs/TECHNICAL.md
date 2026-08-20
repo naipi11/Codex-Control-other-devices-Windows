@@ -150,9 +150,14 @@ The tray layer deliberately separates policy from presentation:
   OpenLogsEnabled, UninstallEnabled, Busy}`.
 - `Supervisor.ps1` owns preference reads, locale resolution, command routing, and
   error containment.
-- `TrayUi.psm1` owns the STA-thread `NotifyIcon`, native
-  `ContextMenuStrip`/`ToolStripMenuItem` controls, localized text, icon resources,
-  and confirmation dialogs. It does not decide whether automation is safe.
+- `TrayHostClient.psm1` loads the manifest-bound `CodexRemote.TrayHost.exe`,
+  publishes immutable bilingual snapshots, and translates only allow-listed host
+  actions into the supervisor queue. It never creates a window or menu.
+- `CodexRemote.TrayHost.exe` owns one persistent Win32 notification window,
+  `Shell_NotifyIcon`, `HMENU`, input-context guard, and message loop. It does not
+  import PowerShell, WinForms, WPF, network, or Codex business modules.
+- `TrayUi.psm1` remains only as a compatibility/test module for the legacy
+  implementation; it is not constructed by the production Supervisor.
 
 #### Catalog schema and locale resolution
 
@@ -212,23 +217,22 @@ automation-consent switch, quarantines safety state, or blocks a controller acti
 
 #### Live language changes and resource ownership
 
-A language menu click is handled on the tray's owning STA thread:
+A language menu click is handled through the authenticated TrayHost snapshot/action boundary:
 
 1. `Supervisor.ps1` resolves the requested catalog and validates the exact catalog
    contract.
 2. It atomically persists the requested mode in `ui-preferences.json`.
-3. `TrayUi.psm1` updates existing menu rows, language checkmarks, tooltip, and
-   title text in place; the `NotifyIcon`, menu, queue, callbacks, and semantic state
-   objects keep their identity.
+3. `TrayHostClient.psm1` publishes a new revision; the native host applies it
+   after the current menu closes and acknowledges the revision.
 4. If persistence or rendering fails, the previous mode/catalog is restored and a
    localized `Error.LanguageChange` message is contained; the compatibility loop
    continues.
 
-`TrayUi.psm1` generates eight cached icons (Gray/Green/Yellow/Red × 16/32). Each
-temporary bitmap and GDI HICON is disposed after its cloned `Icon` is captured.
-The title image and bold title font are separately owned resources. Close is
-idempotent, detaches callbacks, hides/disposes the `NotifyIcon`, disposes the native
-menu and controls once, then releases title resources and cached icons.
+The native host keeps one icon/resource graph for its lifetime. Menu tracking uses
+the persistent owner window and the documented foreground/`WM_NULL` sequence;
+there is no per-click owner window, WinForms popup, WPF window, or menu rebuild
+timer. Close is idempotent and destroys the menu, icon, owner window, pipe, and
+Job-owned child exactly once.
 
 #### Installation, manifest, and uninstall boundary
 
