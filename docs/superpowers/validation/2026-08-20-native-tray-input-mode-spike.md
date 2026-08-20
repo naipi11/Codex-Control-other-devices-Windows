@@ -30,6 +30,17 @@ WM_NULL_Delivered=5
 
 The trace contained one `WM_CONTEXTMENU` path per attempt and no immediate zero-duration return. This is useful diagnostic evidence, but it is not the required 50-trial acceptance and does not cover a selected menu command or a measured Chinese/English input-mode comparison.
 
+A separate five-selection run also completed normally:
+
+```text
+attempts=5, trackCalls=5, cancelCount=0, selectedCount=5,
+foregroundFailures=0, ownerHasNoInputContext=true,
+trackMinMs=645, trackMaxMs=1375, trackAverageMs=955,
+WM_NULL_Delivered=5
+```
+
+The selected command was the harmless `No-op` command. This closes the small selection smoke test but does not replace the required 50-trial Chinese/English gate.
+
 ## Gate result
 
 **BLOCKED / NOT PASSED.** The current no-HIMC persistent-owner spike does not yet demonstrate stable repeated interaction on the target machine. No production TrayHost, IPC integration, installer build, push, tag, or Release may proceed from this evidence.
