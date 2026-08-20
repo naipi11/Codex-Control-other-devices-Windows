@@ -504,6 +504,42 @@ function Test-CcodJsonHasNoDuplicateProperties {
     return $objects.Count -eq 0
 }
 
+function Convert-CcodJsonDateValuesInPlace {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [DateTime]) {
+        return $Value.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -is [DateTimeOffset]) {
+        return $Value.UtcDateTime.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -is [pscustomobject]) {
+        foreach ($property in @($Value.PSObject.Properties)) {
+            [void]($normalized = Convert-CcodJsonDateValuesInPlace -Value $property.Value)
+            [void]($property.Value = $normalized)
+        }
+        return $Value
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        foreach ($key in @($Value.Keys)) {
+            [void]($normalized = Convert-CcodJsonDateValuesInPlace -Value $Value[$key])
+            [void]($Value[$key] = $normalized)
+        }
+        return $Value
+    }
+    if ($Value -is [Collections.IList]) {
+        for ($index = 0; $index -lt $Value.Count; $index++) {
+            [void]($normalized = Convert-CcodJsonDateValuesInPlace -Value $Value[$index])
+            [void]($Value[$index] = $normalized)
+        }
+        return ,$Value
+    }
+    return $Value
+}
+
 function Read-CcodStrictJson {
     [CmdletBinding()]
     param(
@@ -526,6 +562,7 @@ function Read-CcodStrictJson {
     }
     try {
         $value = $json | ConvertFrom-Json -ErrorAction Stop
+        $value = Convert-CcodJsonDateValuesInPlace -Value $value
     } catch {
         Throw-CcodError 'CCOD_STATE_MALFORMED' "$Kind state is not valid JSON" $Path
     }

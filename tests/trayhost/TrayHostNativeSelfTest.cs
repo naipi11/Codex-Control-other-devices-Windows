@@ -114,6 +114,14 @@ internal static class TrayHostNativeSelfTest
         AssertTrue(threw && platform.Calls.Contains("ReleaseContext"), "unexpected owner HIMC is released and creation fails");
     }
 
+    private static void TestShellRightClickNotificationMapping()
+    {
+        AssertTrue(TrayHostApplication.IsContextMenuEvent(0x007bU, IntPtr.Zero), "WM_CONTEXTMENU opens the native menu");
+        AssertTrue(TrayHostApplication.IsContextMenuEvent(0x0205U, IntPtr.Zero), "WM_RBUTTONUP opens the native menu");
+        AssertTrue(TrayHostApplication.IsContextMenuEvent(TrayNativeConstants.WmApp + 1U, new IntPtr(0x0205)), "version-4 callback WM_RBUTTONUP opens the native menu");
+        AssertTrue(!TrayHostApplication.IsContextMenuEvent(TrayNativeConstants.WmApp + 1U, new IntPtr(0x0201)), "left click remains inert");
+    }
+
     public static int Main(string[] args)
     {
         try
@@ -123,6 +131,7 @@ internal static class TrayHostNativeSelfTest
             TestReentryAndPendingSnapshot();
             TestSelectedCommandAndTaskbarRestore();
             TestNoHimcFailureIsSafe();
+            TestShellRightClickNotificationMapping();
             Console.WriteLine("TrayHost native self-tests passed: 5");
             return 0;
         }

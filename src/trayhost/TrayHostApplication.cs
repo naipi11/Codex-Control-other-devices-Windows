@@ -7,7 +7,6 @@ internal sealed class TrayHostApplication : IDisposable
     private readonly Action<TrayCommand, ulong> _command;
     private readonly Action _work;
     private readonly uint _taskbarCreated;
-    private readonly uint _callbackMessage = TrayNativeConstants.WmApp + 1U;
     private bool _exitRequested;
 
     internal TrayHostApplication(TrayWindow window)
@@ -48,6 +47,17 @@ internal sealed class TrayHostApplication : IDisposable
         Win32TrayPlatform.PostQuit(0);
     }
 
+    internal static bool IsContextMenuEvent(uint message, IntPtr callbackData)
+    {
+        const uint wmContextMenu = 0x007bU;
+        const uint wmRButtonUp = 0x0205U;
+        if (message == wmContextMenu || message == wmRButtonUp) { return true; }
+        if (message != TrayNativeConstants.WmApp + 1U) { return false; }
+        uint eventCode = unchecked((uint)callbackData.ToInt64());
+        return (eventCode & 0xffffU) == wmContextMenu || (eventCode & 0xffffU) == wmRButtonUp ||
+               ((eventCode >> 16) & 0xffffU) == wmContextMenu || ((eventCode >> 16) & 0xffffU) == wmRButtonUp;
+    }
+
     private void HandleMessage(uint message, IntPtr wParam, IntPtr lParam)
     {
         if (message == TrayNativeConstants.WmApp + 2U)
@@ -64,15 +74,11 @@ internal sealed class TrayHostApplication : IDisposable
         {
             RequestExit(); return;
         }
-        if (message == 0x007BU || message == _callbackMessage)
+        if (IsContextMenuEvent(message, lParam))
         {
-            uint eventCode = message == _callbackMessage ? unchecked((uint)lParam.ToInt64()) & 0xffffU : 0x007bU;
-            if (eventCode == 0x007bU || message == 0x007bU)
-            {
-                TrayPoint point;
-                if (!Win32TrayPlatform.GetCursorPosition(out point)) { point = new TrayPoint(0, 0); }
-                try { _window.HandleContextMenu(point); } catch { }
-            }
+            TrayPoint point;
+            if (!Win32TrayPlatform.GetCursorPosition(out point)) { point = new TrayPoint(0, 0); }
+            try { _window.HandleContextMenu(point); } catch { }
         }
     }
 

@@ -49,6 +49,16 @@ try {
         Assert-CcodEqual 1 (Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings').schemaVersion 'schema round-trip'
     }
 
+    Invoke-CcodTest 'preserves ISO timestamp fields as JSON strings under Windows PowerShell' {
+        $path = Join-Path $root 'state\timestamp-string.json'
+        $timestamp = '2030-02-03T04:05:06.0000000Z'
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText($path, "{`"schemaVersion`":1,`"updatedAtUtc`":`"$timestamp`"}", $utf8)
+        $value = Read-CcodStrictJson -Path $path -ExpectedSchema 1 -Kind 'settings'
+        Assert-CcodTrue ($value.updatedAtUtc -is [string]) 'ISO timestamp fields must remain strings after parsing'
+        Assert-CcodEqual $timestamp $value.updatedAtUtc 'timestamp text must remain canonical'
+    }
+
     Invoke-CcodTest 'atomically replaces an existing JSON file without temporary or backup leftovers' {
         $path = Join-Path $root 'replace\settings.json'
         Write-CcodAtomicJson -Path $path -Value ([ordered]@{ schemaVersion = 1; value = 'before' })
