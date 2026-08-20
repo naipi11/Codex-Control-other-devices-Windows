@@ -57,6 +57,8 @@ English: attempts=50, trackCalls=50, cancelCount=30, selectedCount=20,
 
 The automated trace shows no immediate zero-return loop, foreground-proof failure, or missing `WM_NULL`. Final gate status still requires the user's confirmation that the visible input indicator did not change during either run and one explicit uncommitted-composition trial.
 
+The user confirmed that the visible input indicator did not change during either the Chinese or English 50-trial run. The uncommitted-composition trial was offered but no event was received, so composition preservation remains explicitly unverified.
+
 ## Gate result
 
 **BLOCKED / NOT PASSED.** The current no-HIMC persistent-owner spike does not yet demonstrate stable repeated interaction on the target machine. No production TrayHost, IPC integration, installer build, push, tag, or Release may proceed from this evidence.
