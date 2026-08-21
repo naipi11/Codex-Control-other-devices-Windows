@@ -132,6 +132,8 @@ internal static class TrayHostNativeSelfTest
         AssertTrue(TrayHostApplication.IsContextMenuEvent(0x007bU, IntPtr.Zero), "WM_CONTEXTMENU opens the native menu");
         AssertTrue(TrayHostApplication.IsContextMenuEvent(0x0205U, IntPtr.Zero), "WM_RBUTTONUP opens the native menu");
         AssertTrue(TrayHostApplication.IsContextMenuEvent(TrayNativeConstants.WmApp + 1U, new IntPtr(0x0205)), "version-4 callback WM_RBUTTONUP opens the native menu");
+        AssertTrue(TrayHostApplication.IsContextMenuEvent(TrayNativeConstants.WmApp + 1U, new IntPtr(0x007b), IntPtr.Zero), "legacy callback WM_CONTEXTMENU in wParam opens the native menu");
+        AssertTrue(TrayHostApplication.IsContextMenuEvent(TrayNativeConstants.WmApp + 1U, new IntPtr(0x0205), IntPtr.Zero), "legacy callback WM_RBUTTONUP in wParam opens the native menu");
         AssertTrue(!TrayHostApplication.IsContextMenuEvent(TrayNativeConstants.WmApp + 1U, new IntPtr(0x0201)), "left click remains inert");
     }
 

@@ -49,13 +49,25 @@ internal sealed class TrayHostApplication : IDisposable
 
     internal static bool IsContextMenuEvent(uint message, IntPtr callbackData)
     {
+        return IsContextMenuEvent(message, IntPtr.Zero, callbackData);
+    }
+
+    internal static bool IsContextMenuEvent(uint message, IntPtr wParam, IntPtr lParam)
+    {
         const uint wmContextMenu = 0x007bU;
+        const uint wmRButtonDown = 0x0204U;
         const uint wmRButtonUp = 0x0205U;
-        if (message == wmContextMenu || message == wmRButtonUp) { return true; }
+        if (message == wmContextMenu || message == wmRButtonDown || message == wmRButtonUp) { return true; }
         if (message != TrayNativeConstants.WmApp + 1U) { return false; }
-        uint eventCode = unchecked((uint)callbackData.ToInt64());
-        return (eventCode & 0xffffU) == wmContextMenu || (eventCode & 0xffffU) == wmRButtonUp ||
-               ((eventCode >> 16) & 0xffffU) == wmContextMenu || ((eventCode >> 16) & 0xffffU) == wmRButtonUp;
+        return HasContextMenuEvent(wParam, wmContextMenu, wmRButtonDown, wmRButtonUp) ||
+               HasContextMenuEvent(lParam, wmContextMenu, wmRButtonDown, wmRButtonUp);
+    }
+
+    private static bool HasContextMenuEvent(IntPtr value, uint wmContextMenu, uint wmRButtonDown, uint wmRButtonUp)
+    {
+        uint eventCode = unchecked((uint)value.ToInt64());
+        return (eventCode & 0xffffU) == wmContextMenu || (eventCode & 0xffffU) == wmRButtonDown || (eventCode & 0xffffU) == wmRButtonUp ||
+               ((eventCode >> 16) & 0xffffU) == wmContextMenu || ((eventCode >> 16) & 0xffffU) == wmRButtonDown || ((eventCode >> 16) & 0xffffU) == wmRButtonUp;
     }
 
     private void HandleMessage(uint message, IntPtr wParam, IntPtr lParam)
@@ -74,7 +86,7 @@ internal sealed class TrayHostApplication : IDisposable
         {
             RequestExit(); return;
         }
-        if (IsContextMenuEvent(message, lParam))
+        if (IsContextMenuEvent(message, wParam, lParam))
         {
             TrayPoint point;
             if (!Win32TrayPlatform.GetCursorPosition(out point)) { point = new TrayPoint(0, 0); }
