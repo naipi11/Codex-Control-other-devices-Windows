@@ -20,15 +20,15 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 > 这是非官方运行时兼容方案，会在随机 `127.0.0.1` 端口启用 Chromium 调试接口。
 > 请仅在可信的 Windows 电脑上运行，并在每次 Codex 更新后重新执行兼容性检查。
 
-## 修复前后证据
+## 本项目修复什么
 
-![真实修复前后截图展览图](docs/assets/codexremote-fix-before-after-zh-CN.gif)
+在受影响的 Windows 版本中，Codex Desktop 本来就包含
+**设置 → 连接 → 控制其他设备**，但运行时缺陷会把这个标签隐藏。CodexRemote-fix
+恢复这个已有页面，不修改 Codex UI、账号授权或原生配对流程。
 
-*外框是 AI 生成的科技感展览包装；面板全部来自真实脱敏 Windows 截图，外框不是 Codex 窗口。*
+![基于真实修复后 Codex 截图的 AI 展示图](docs/assets/codexremote-fix-connections-showcase.gif)
 
-| 修复前：授权列表为空 | 修复后：授权设备可见 |
-| --- | --- |
-| ![真实 Codex“连接”页面修复前](docs/assets/codexremote-fix-real-empty-connections-zh-CN.png) | ![真实 Codex“连接”页面修复后](docs/assets/codexremote-fix-real-connections-zh-CN.png) |
+*AI 只修改展示边框和光效；中间的 Codex 界面是真实脱敏截图，没有新增虚构控件或软件窗口。*
 
 ## 快速开始
 
@@ -47,7 +47,6 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 已验证：Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`；
 隐藏的控制器标签、原生托盘菜单、双语菜单切换和常驻守护程序均可用。
-已有控制器设备的授权恢复问题见下方发布说明，仍在单独修复中。
 
 ## v2.4.15 更新内容
 
@@ -56,9 +55,6 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 - 托盘菜单保持双语：跟随系统、中文、English，状态可原地更新。
 - 加固启动与恢复流程；升级中断后可安全接管新启动的普通 Codex，不触碰设备密钥。
 - 保留现有加密设备密钥和服务器端授权。
-
-已知问题：部分 Codex Windows 更新后，**控制其他设备** 标签虽然可见，但之前授权的控制器设备列表可能为空。
-请不要重新配对或删除密钥文件；profile 映射恢复将在后续版本单独修复。
 
 ## 日常使用
 
