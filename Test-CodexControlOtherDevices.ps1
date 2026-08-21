@@ -79,7 +79,7 @@ if ($Json) {
     $result | ConvertTo-Json -Depth 8 -Compress
 } else {
     Write-Host ''
-    Write-Host 'Codex Control other devices - compatibility check' -ForegroundColor Cyan
+    Write-Host 'CodexRemote-fix - compatibility check' -ForegroundColor Cyan
     Write-Host ('  Ready:            {0}' -f $result.Ready)
     $packageDisplay = if ($null -eq $result.PackageVersion) { 'not found' } else { $result.PackageVersion }
     $nodeDisplay = if ($null -eq $result.NodeVersion) { 'not found' } else { $result.NodeVersion }

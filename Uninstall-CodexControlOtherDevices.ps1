@@ -50,7 +50,7 @@ $receipt = Invoke-CcodUninstall `
     -RemoveDeviceKeyStore:([bool]$RemoveDeviceKeyStore)
 
 Write-Host ''
-Write-Host 'Codex Control other devices - uninstall result' -ForegroundColor Cyan
+Write-Host 'CodexRemote-fix - uninstall result' -ForegroundColor Cyan
 Write-Host ('  Outcome:          {0}' -f $receipt.Outcome)
 if ($receipt.BackupPath) {
     Write-Host ("  Key backup:       {0}" -f $receipt.BackupPath)

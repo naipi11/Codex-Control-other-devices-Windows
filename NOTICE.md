@@ -1,7 +1,7 @@
 # Provenance and attribution
 
 This repository documents and implements a Windows-oriented compatibility
-workflow for `naipi11/Codex-Control-other-devices-Windows`. It combines the
+workflow for `naipi11/CodexRemote-fix`. It combines the
 public runtime technique credited below with read-only inspection of the locally
 installed Codex Desktop `26.721.4979.0` package and a successful end-to-end test
 on Windows 11.

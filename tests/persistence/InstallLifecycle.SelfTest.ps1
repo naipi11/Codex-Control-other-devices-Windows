@@ -26,7 +26,7 @@ function New-CcodLifecycleSourceFixture {
     New-Item -ItemType Directory -Path (Join-Path $Root 'src\persistence\resources') -Force | Out-Null
     [IO.File]::WriteAllText(
         (Join-Path $Root 'package.json'),
-        (@{ name = 'codex-control-other-devices-windows'; version = $Version; private = $true } | ConvertTo-Json -Depth 4),
+        (@{ name = 'codexremote-fix'; version = $Version; private = $true } | ConvertTo-Json -Depth 4),
         [Text.UTF8Encoding]::new($false)
     )
     foreach ($leaf in @('Test-CodexControlOtherDevices.ps1', 'Start-CodexControlOtherDevices.ps1', 'Reset-CodexControlOtherDevices.ps1')) {

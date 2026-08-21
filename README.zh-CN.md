@@ -9,6 +9,10 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 本项目不修改 `ChatGPT.exe`、`app.asar`，不写入 `C:\Program Files\WindowsApps`
 中的任何文件。安装发布版安装包后，由常驻托盘守护程序自动接管。
 
+项目和仓库的公开名称现为 **CodexRemote-fix**。为保证旧安装可以原地升级、
+不丢失设置和设备授权，旧脚本文件名、`%LOCALAPPDATA%\CodexControlOtherDevices`
+运行时目录以及计划任务内部标识会继续保留。
+
 > [!IMPORTANT]
 > 注册设备时请完成账号或工作区要求的 MFA、SSO 或 passkey 验证。
 
@@ -18,7 +22,7 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载 `CodexRemote-fix-2.4.15-setup.exe` 和 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`，并核对 SHA-256。
+1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.15-setup.exe` 和 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`，并核对 SHA-256。
 2. 运行 `CodexRemote-fix-2.4.15-setup.exe`，无需管理员权限。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
@@ -27,7 +31,7 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 *示例界面；已移除账号、设备与环境信息。*
 
 当前安装包及其 SHA-256 校验值始终发布在
-[Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 页面。
+[Releases](https://github.com/naipi11/CodexRemote-fix/releases) 页面。
 
 升级时直接运行新版安装包即可，现有设置与设备密钥会保留。
 
@@ -70,7 +74,7 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 每次发布都会在本 README 和 GitHub Release 正文中追加简短的中英文更新说明。
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
+Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/CodexRemote-fix/releases)
 查看是否有更新安装包；也可以从开始菜单运行 **CodexRemote-fix compatibility check（兼容性检查）**
 快捷方式，确认当前守护程序仍匹配。
 

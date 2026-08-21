@@ -10,6 +10,11 @@ This project does not modify `ChatGPT.exe`, `app.asar`, or anything under
 `C:\Program Files\WindowsApps`. After installation, a persistent tray supervisor
 manages everything automatically.
 
+The public project and repository name is **CodexRemote-fix**. Legacy script
+filenames, the `%LOCALAPPDATA%\CodexControlOtherDevices` runtime root, and the
+scheduled-task identifiers remain unchanged internally so existing installations
+can upgrade in place without losing settings or device authorization.
+
 > [!IMPORTANT]
 > Complete the MFA, SSO, or passkey checks required by your account or workspace before enrolling a device.
 
@@ -20,7 +25,7 @@ manages everything automatically.
 
 ## Quick start
 
-1. Download `CodexRemote-fix-2.4.15-setup.exe` and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page, then verify the SHA-256.
+1. Download `CodexRemote-fix-2.4.15-setup.exe` and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
 2. Run `CodexRemote-fix-2.4.15-setup.exe`; no administrator rights are required.
 3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
@@ -29,7 +34,7 @@ manages everything automatically.
 *Example screen; account, device, and environment details have been removed.*
 
 The current installer and its SHA-256 checksum are always published on the
-[Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page.
+[Releases](https://github.com/naipi11/CodexRemote-fix/releases) page.
 
 To upgrade, run the new installer over the previous installation. Existing settings and device
 keys are preserved. The installer also replaces a legacy supervisor that did not record its
@@ -77,7 +82,7 @@ and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`.
 Each release appends a short bilingual change summary to this README and to the GitHub release body.
 The full history is in [CHANGELOG.md](CHANGELOG.md).
 
-After a Codex Desktop update, check the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
+After a Codex Desktop update, check the [Releases](https://github.com/naipi11/CodexRemote-fix/releases)
 page for a newer installer, or run the **CodexRemote-fix compatibility check** shortcut from the Start menu
 to confirm the current supervisor still matches.
 

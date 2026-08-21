@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" role="img" aria-labelledby="title desc">
-  <title id="title">Codex Control other devices persistence flow</title>
+  <title id="title">CodexRemote-fix persistence flow</title>
   <desc id="desc">Install once, run the tray supervisor, survive Codex restarts or compatible updates, and keep Control other devices available.</desc>
   <style>
     .ui { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }

@@ -6,16 +6,16 @@ param(
 
 $ErrorActionPreference='Stop'
 $runtimeManifestModule=Join-Path $PSScriptRoot 'src\persistence\modules\RuntimeManifest.psm1'
-if(-not (Test-Path -LiteralPath $runtimeManifestModule -PathType Leaf)){throw 'Codex Control other devices support files are incomplete. Run the installer from a complete checkout.'}
+if(-not (Test-Path -LiteralPath $runtimeManifestModule -PathType Leaf)){throw 'CodexRemote-fix support files are incomplete. Run the installer from a complete checkout.'}
 Import-Module $runtimeManifestModule -Force
 
 function Resolve-CcodResetInstalledController {
     param([Parameter(Mandatory)][string]$InstallRoot)
     $activePath=Join-Path $InstallRoot 'active.json'
-    if(-not (Test-Path -LiteralPath $activePath -PathType Leaf)){throw [Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('Codex Control other devices is not installed. Run Install-CodexControlOtherDevices.ps1 first; this checkout wrapper will not create persistent checkout state.'),'CCOD_INSTALL_REQUIRED',[Management.Automation.ErrorCategory]::ObjectNotFound,$InstallRoot)}
+    if(-not (Test-Path -LiteralPath $activePath -PathType Leaf)){throw [Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('CodexRemote-fix is not installed. Run Install-CodexControlOtherDevices.ps1 first; this checkout wrapper will not create persistent checkout state.'),'CCOD_INSTALL_REQUIRED',[Management.Automation.ErrorCategory]::ObjectNotFound,$InstallRoot)}
     $active=Read-CcodActiveRuntime -InstallRoot $InstallRoot;$runtime=[IO.Path]::GetFullPath((Join-Path (Join-Path $InstallRoot 'runtime') $active.activeRuntime))
     $validation=Test-CcodRuntimeManifest -RuntimeDirectory $runtime -ExpectedRuntimeId $active.activeRuntime
-    if(-not $validation.Valid){throw "Installed runtime validation failed: $($validation.Code). Repair or reinstall Codex Control other devices."}
+    if(-not $validation.Valid){throw "Installed runtime validation failed: $($validation.Code). Repair or reinstall CodexRemote-fix."}
     $controller=Join-Path $runtime 'src\persistence\SessionController.ps1';$stateModule=Join-Path $runtime 'src\persistence\modules\StateStore.psm1'
     if(-not (Test-Path -LiteralPath $controller -PathType Leaf) -or -not (Test-Path -LiteralPath $stateModule -PathType Leaf)){throw 'The verified active runtime lacks required reset files. Repair or reinstall.'}
     [pscustomobject]@{RuntimeId=$active.activeRuntime;Controller=[IO.Path]::GetFullPath($controller);StateModule=[IO.Path]::GetFullPath($stateModule)}

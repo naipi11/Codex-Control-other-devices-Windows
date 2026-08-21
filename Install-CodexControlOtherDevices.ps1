@@ -38,7 +38,7 @@ $receipt = Invoke-CcodInstall `
     -DoNotStart:([bool]$DoNotStart)
 
 Write-Host ''
-Write-Host 'Codex Control other devices - install result' -ForegroundColor Cyan
+Write-Host 'CodexRemote-fix - install result' -ForegroundColor Cyan
 Write-Host ('  Outcome:          {0}' -f $receipt.Outcome)
 if ($receipt.RuntimeId) { Write-Host ('  Runtime ID:       {0}' -f $receipt.RuntimeId) }
 if ($receipt.PreviousRuntimeId) { Write-Host ('  Previous runtime: {0}' -f $receipt.PreviousRuntimeId) }
