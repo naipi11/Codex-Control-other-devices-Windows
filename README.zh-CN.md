@@ -20,19 +20,15 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 > 这是非官方运行时兼容方案，会在随机 `127.0.0.1` 端口启用 Chromium 调试接口。
 > 请仅在可信的 Windows 电脑上运行，并在每次 Codex 更新后重新执行兼容性检查。
 
-![CodexRemote-fix 工作流程：安装、重启 Codex、恢复“控制其他设备”](docs/assets/codexremote-fix-demo-zh-CN.gif)
-
-*隐私安全的动图示意；不显示账号、真实设备名或桌面皮肤。*
-
 ## 快速开始
 
 1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.15-setup.exe` 和 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`，并核对 SHA-256。
 2. 运行 `CodexRemote-fix-2.4.15-setup.exe`，无需管理员权限。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
-![CodexRemote-fix 已验证的“控制其他设备”界面（中文）](docs/assets/codexremote-fix-control-zh-CN.png)
+![真实 Codex“连接”页面：已启用“控制其他设备”](docs/assets/codexremote-fix-real-connections-zh-CN.png)
 
-*隐私安全的已验证状态示意，设备名使用通用占位名称。*
+*真实 Windows 截图；设备名称已替换为通用名称。*
 
 当前安装包及其 SHA-256 校验值始终发布在
 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 页面。
@@ -95,9 +91,9 @@ External renderer 的 `pause` 标记会跳过集成。External renderer 状态�
 
 ## 托盘菜单
 
-![CodexRemote-fix 原生托盘菜单（中文）](docs/assets/codexremote-fix-tray-menu-zh-CN.png)
+![真实 Windows 托盘菜单截图](docs/assets/codexremote-fix-real-tray-menu-zh-CN.png)
 
-*示例菜单；未展示系统托盘与其他应用。*
+*真实 Windows 截图；未包含桌面皮肤和其他应用。*
 
 编译后的原生 Win32 TrayHost 菜单按语义状态显示或隐藏操作：立即应用、重试、自动化开关、兼容更新试用、日志、卸载。
 卸载必须先确认。
