@@ -7,6 +7,7 @@
   const API_SLOT = "__CODEX_STATSIG_GATE_BRIDGE__";
   const TARGET_GATE = "782640499";
   const REMOTE_CONTROL_CLIENT_ENVIRONMENTS_GATE = "2055603567";
+  const REMOTE_CONTROL_REFRESH_MESSAGE = "refresh-remote-control-connections";
   const GATE_OVERRIDES = Object.freeze({
     [TARGET_GATE]: false,
     [REMOTE_CONTROL_CLIENT_ENVIRONMENTS_GATE]: true,
@@ -32,6 +33,7 @@
   const wrapperMarker = Symbol("codex.cleanroom.statsig.gate-wrapper");
   const records = [];
   const refreshedClients = new WeakSet();
+  let remoteControlRefreshRequested = false;
   let scans = 0;
 
   function isObjectLike(value) {
@@ -155,6 +157,25 @@
     }
   }
 
+  function requestRemoteControlRefresh() {
+    if (remoteControlRefreshRequested) {
+      return;
+    }
+    const sender = globalThis.electronBridge?.sendMessageFromView;
+    if (typeof sender !== "function") {
+      return;
+    }
+    remoteControlRefreshRequested = true;
+    try {
+      const result = Reflect.apply(sender, globalThis.electronBridge, [{ type: REMOTE_CONTROL_REFRESH_MESSAGE }]);
+      if (result != null && typeof result.catch === "function") {
+        result.catch(() => {});
+      }
+    } catch {
+      // The main process may not have registered the message yet; the renderer bridge remains usable.
+    }
+  }
+
   function wrapGateMethod(receiver, methodName) {
     const found = findDataMethod(receiver, methodName);
     if (!found) {
@@ -255,6 +276,7 @@
 
   function scan() {
     scans += 1;
+    requestRemoteControlRefresh();
     const root = globalThis.__STATSIG__;
     if (!isObjectLike(root)) {
       return probe();

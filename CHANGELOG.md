@@ -7,10 +7,12 @@ This file keeps the short bilingual summary for every published release.
 ### English
 
 - Refreshed the README visuals with a privacy-safe animated workflow, verified-state control view, and native Windows-style tray menu illustration.
+- Added a one-shot post-injection refresh for the existing remote-control enrollment catalog.
 
 ### 简体中文
 
 - 更新 README 展示素材：新增隐私安全的动图工作流程、已验证状态界面和 Windows 原生风格托盘菜单示意图。
+- 新增注入完成后的一次远程控制授权设备目录刷新。
 
 ## v2.4.15
 

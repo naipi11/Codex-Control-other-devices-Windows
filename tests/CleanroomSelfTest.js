@@ -509,6 +509,12 @@ async function rendererPayloadTest(root) {
     __STATSIG__: { clients: [client] },
     clearInterval() {},
     console,
+    electronBridge: {
+      sendMessageFromView(message) {
+        calls.push({ kind: "remote-refresh", message });
+        return Promise.resolve();
+      },
+    },
     setInterval() {
       return { unref() {} };
     },
@@ -518,6 +524,9 @@ async function rendererPayloadTest(root) {
   const initial = vm.runInContext(source, context, { filename: "renderer-payload.js" });
   assert.equal(initial.proof, true);
   assert.equal(refreshCalls, 1);
+  assert.equal(calls.find((entry) => entry.kind === "remote-refresh")?.message?.type, "refresh-remote-control-connections");
+  context.__CODEX_STATSIG_GATE_BRIDGE__.scan();
+  assert.equal(calls.filter((entry) => entry.kind === "remote-refresh").length, 1);
   assert.equal(client.checkGate("782640499"), false);
   assert.equal(client.checkGate("2055603567"), true);
   assert.equal(client.checkGate("unrelated-gate"), true);
