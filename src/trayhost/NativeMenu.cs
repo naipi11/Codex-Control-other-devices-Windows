@@ -26,8 +26,12 @@ internal sealed class NativeMenu : IDisposable
         {
             ownerShown = _native.ShowOwner(_owner);
             if (!ownerShown) { return 0U; }
-            if (!_native.SetForegroundWindow(_owner) || _native.GetForegroundWindow() != _owner) { return 0U; }
+            _native.SetForegroundWindow(_owner);
+            _native.GetForegroundWindow();
             uint flags = TrayNativeConstants.TpmReturnCmd | TrayNativeConstants.TpmRightButton | TrayNativeConstants.TpmNoNotify;
+            // The Shell can deny foreground activation for a notification callback.
+            // TrackPopupMenuEx still provides the native menu in that case; WM_NULL
+            // and the owner cleanup below preserve the documented dismissal path.
             return _native.TrackPopupMenuEx(_menu, flags, point.X, point.Y, _owner, IntPtr.Zero);
         }
         finally

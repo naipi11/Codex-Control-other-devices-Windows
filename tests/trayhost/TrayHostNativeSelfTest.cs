@@ -71,13 +71,13 @@ internal static class TrayHostNativeSelfTest
         window.Dispose();
     }
 
-    private static void TestForegroundFailureNeverTracks()
+    private static void TestForegroundFailureFallsBackToNativeMenu()
     {
         FakeTrayPlatform platform = new FakeTrayPlatform();
         platform.ForegroundResult = false;
         TrayWindow window = NewWindow(platform);
         window.HandleContextMenu(new TrayPoint(0, 0));
-        AssertTrue(platform.TrackCalls == 0, "foreground failure never tracks a menu");
+        AssertTrue(platform.TrackCalls == 1, "foreground failure still tracks a native menu fallback");
         window.Dispose();
     }
 
@@ -142,7 +142,7 @@ internal static class TrayHostNativeSelfTest
         try
         {
             TestNativeOrderAndCancel();
-            TestForegroundFailureNeverTracks();
+            TestForegroundFailureFallsBackToNativeMenu();
             TestOwnerShowFailureNeverTracks();
             TestReentryAndPendingSnapshot();
             TestSelectedCommandAndTaskbarRestore();
