@@ -23,7 +23,9 @@
   const GATE_METHODS = Object.freeze([...CHECK_GATE_METHODS, ...STRUCTURED_GATE_METHODS]);
 
   const existing = globalThis[API_SLOT];
-  if (existing?.version === 1 && existing?.targetGate === TARGET_GATE && typeof existing.install === "function") {
+  if (existing?.version === 1 && existing?.targetGate === TARGET_GATE &&
+      existing?.remoteControlClientEnvironmentsGate === REMOTE_CONTROL_CLIENT_ENVIRONMENTS_GATE &&
+      typeof existing.install === "function") {
     return existing.install();
   }
 
@@ -293,6 +295,7 @@
     probe,
     scan,
     targetGate: TARGET_GATE,
+    remoteControlClientEnvironmentsGate: REMOTE_CONTROL_CLIENT_ENVIRONMENTS_GATE,
     version: 1,
   });
   try {
