@@ -18,6 +18,8 @@ internal static class TrayNativeConstants
     internal const uint TpmRightButton = 0x00000002;
     internal const uint TpmNoNotify = 0x00000080;
     internal const uint TpmLayoutRtl = 0x00004000;
+    internal const int SwHide = 0;
+    internal const int SwShownoactivate = 4;
     internal const uint WmNull = 0x0000;
     internal const uint WmApp = 0x8000;
     internal const uint NimAdd = 0x00000000;
@@ -82,6 +84,8 @@ internal interface INativeTrayPlatform
     IntPtr CreateSubMenu();
     bool AppendMenu(IntPtr menu, uint flags, UIntPtr command, string text);
     bool AppendSubMenu(IntPtr menu, IntPtr child, string text);
+    bool ShowOwner(IntPtr owner);
+    bool HideOwner(IntPtr owner);
     bool SetForegroundWindow(IntPtr owner);
     IntPtr GetForegroundWindow();
     uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);
@@ -152,6 +156,8 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     public IntPtr CreateSubMenu() { return CreatePopupMenuNative(); }
     public bool AppendMenu(IntPtr menu, uint flags, UIntPtr command, string text) { return AppendMenuW(menu, flags, command, text ?? String.Empty); }
     public bool AppendSubMenu(IntPtr menu, IntPtr child, string text) { return AppendMenuW(menu, TrayNativeConstants.MfPopup | TrayNativeConstants.MfString, new UIntPtr(unchecked((ulong)child.ToInt64())), text ?? String.Empty); }
+    public bool ShowOwner(IntPtr owner) { ShowWindowNative(owner, TrayNativeConstants.SwShownoactivate); return true; }
+    public bool HideOwner(IntPtr owner) { ShowWindowNative(owner, TrayNativeConstants.SwHide); return true; }
     public bool SetForegroundWindow(IntPtr owner) { return SetForegroundWindowNative(owner); }
     public IntPtr GetForegroundWindow() { return GetForegroundWindowNative(); }
     public uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters) { return TrackPopupMenuExNative(menu, flags, x, y, owner, parameters); }
@@ -237,6 +243,7 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr LoadIconW(IntPtr instance, IntPtr name);
     [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyIconNative(IntPtr icon);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AppendMenuW(IntPtr menu, uint flags, UIntPtr newItem, string text);
+    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ShowWindowNative(IntPtr window, int command);
     [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetForegroundWindowNative(IntPtr window);
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr GetForegroundWindowNative();
     [DllImport("user32.dll", SetLastError = true)] private static extern uint TrackPopupMenuExNative(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);

@@ -21,8 +21,11 @@ internal sealed class NativeMenu : IDisposable
     internal uint Show(TrayPoint point)
     {
         Build();
+        bool ownerShown = false;
         try
         {
+            ownerShown = _native.ShowOwner(_owner);
+            if (!ownerShown) { return 0U; }
             if (!_native.SetForegroundWindow(_owner) || _native.GetForegroundWindow() != _owner) { return 0U; }
             uint flags = TrayNativeConstants.TpmReturnCmd | TrayNativeConstants.TpmRightButton | TrayNativeConstants.TpmNoNotify;
             return _native.TrackPopupMenuEx(_menu, flags, point.X, point.Y, _owner, IntPtr.Zero);
@@ -35,6 +38,7 @@ internal sealed class NativeMenu : IDisposable
             focusData.hWnd = _owner;
             focusData.uID = 1U;
             _native.SetNotificationFocus(ref focusData);
+            if (ownerShown) { _native.HideOwner(_owner); }
             Dispose();
         }
     }

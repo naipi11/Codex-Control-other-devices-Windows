@@ -6,6 +6,7 @@ internal sealed class FakeTrayPlatform : INativeTrayPlatform
     internal readonly List<string> Calls = new List<string>();
     internal bool ForegroundResult = true;
     internal bool ForegroundProof = true;
+    internal bool ShowOwnerResult = true;
     internal IntPtr OwnerInputContext = IntPtr.Zero;
     internal uint TrackResult;
     internal bool SawNonzeroIcon;
@@ -25,6 +26,8 @@ internal sealed class FakeTrayPlatform : INativeTrayPlatform
     public IntPtr CreateSubMenu() { return new IntPtr(31); }
     public bool AppendMenu(IntPtr menu, uint flags, UIntPtr command, string text) { Calls.Add("Append:" + text); return true; }
     public bool AppendSubMenu(IntPtr menu, IntPtr child, string text) { Calls.Add("SubMenu:" + text); return true; }
+    public bool ShowOwner(IntPtr owner) { Calls.Add("ShowOwner"); return ShowOwnerResult; }
+    public bool HideOwner(IntPtr owner) { Calls.Add("HideOwner"); return true; }
     public bool SetForegroundWindow(IntPtr owner) { Calls.Add("SetForeground"); return ForegroundResult; }
     public IntPtr GetForegroundWindow() { Calls.Add("GetForeground"); return ForegroundProof ? new IntPtr(10) : new IntPtr(11); }
     public uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters) { Calls.Add("Track"); TrackCalls++; if (DuringTrack != null) { DuringTrack(); } return TrackResult; }
@@ -64,7 +67,7 @@ internal static class TrayHostNativeSelfTest
         platform.TrackResult = 0;
         AssertTrue(window.HandleContextMenu(new TrayPoint(10, 20)) == 0, "cancel returns zero");
         AssertTrue(platform.SawNonzeroIcon, "NIM_ADD receives a valid HICON");
-        AssertEqual("CreateOwner|Associate:null|GetContext|LoadIcon|NIM_ADD|NIM_SETVERSION|GetContext|GetContext|CreateMenu|Append:s0|Append:s1|Append:s2|Append:s3|Append:s4|Append:s5|Append:s6|SubMenu:s7|Append:s8|Append:s9|Append:s10|Append:s11|SubMenu:s12|Append:s13|Append:s14|Append:s15|SetForeground|GetForeground|Track|WM_NULL|NIM_SETFOCUS|DestroyMenu", String.Join("|", platform.Calls.ToArray()), "native menu order is exact");
+        AssertEqual("CreateOwner|Associate:null|GetContext|LoadIcon|NIM_ADD|NIM_SETVERSION|GetContext|GetContext|CreateMenu|Append:s0|Append:s1|Append:s2|Append:s3|Append:s4|Append:s5|Append:s6|SubMenu:s7|Append:s8|Append:s9|Append:s10|Append:s11|SubMenu:s12|Append:s13|Append:s14|Append:s15|ShowOwner|SetForeground|GetForeground|Track|WM_NULL|NIM_SETFOCUS|HideOwner|DestroyMenu", String.Join("|", platform.Calls.ToArray()), "native menu order is exact");
         window.Dispose();
     }
 
@@ -75,6 +78,16 @@ internal static class TrayHostNativeSelfTest
         TrayWindow window = NewWindow(platform);
         window.HandleContextMenu(new TrayPoint(0, 0));
         AssertTrue(platform.TrackCalls == 0, "foreground failure never tracks a menu");
+        window.Dispose();
+    }
+
+    private static void TestOwnerShowFailureNeverTracks()
+    {
+        FakeTrayPlatform platform = new FakeTrayPlatform();
+        platform.ShowOwnerResult = false;
+        TrayWindow window = NewWindow(platform);
+        window.HandleContextMenu(new TrayPoint(0, 0));
+        AssertTrue(platform.TrackCalls == 0, "owner show failure never tracks a menu");
         window.Dispose();
     }
 
@@ -128,6 +141,7 @@ internal static class TrayHostNativeSelfTest
         {
             TestNativeOrderAndCancel();
             TestForegroundFailureNeverTracks();
+            TestOwnerShowFailureNeverTracks();
             TestReentryAndPendingSnapshot();
             TestSelectedCommandAndTaskbarRestore();
             TestNoHimcFailureIsSafe();
