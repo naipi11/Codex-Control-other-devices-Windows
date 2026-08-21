@@ -2,6 +2,16 @@
 
 This file keeps the short bilingual summary for every published release.
 
+## Unreleased
+
+### English
+
+- Refreshed the README visuals with a privacy-safe animated workflow, verified-state control view, and native Windows-style tray menu illustration.
+
+### 简体中文
+
+- 更新 README 展示素材：新增隐私安全的动图工作流程、已验证状态界面和 Windows 原生风格托盘菜单示意图。
+
 ## v2.4.15
 
 ### English

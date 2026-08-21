@@ -23,15 +23,19 @@ can upgrade in place without losing settings or device authorization.
 > `127.0.0.1` port. Run it only on a trusted Windows machine, and re-run the compatibility check
 > after every Codex update.
 
+![CodexRemote-fix workflow: install, restart Codex, and restore Control other devices](docs/assets/codexremote-fix-demo-en-US.gif)
+
+*Privacy-safe animated illustration; names, account details, and desktop skin are not shown.*
+
 ## Quick start
 
 1. Download `CodexRemote-fix-2.4.15-setup.exe` and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
 2. Run `CodexRemote-fix-2.4.15-setup.exe`; no administrator rights are required.
 3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
-![Settings → Connections → Control other devices (English)](docs/assets/control-other-devices-active-en-US.png)
+![CodexRemote-fix verified Control other devices view (English)](docs/assets/codexremote-fix-control-en-US.png)
 
-*Example screen; account, device, and environment details have been removed.*
+*Privacy-safe verified-state illustration using generic device names.*
 
 The current installer and its SHA-256 checksum are always published on the
 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page.
@@ -59,10 +63,6 @@ Known issue: on some Codex Windows updates, previously authorized controller dev
 mapping recovery is being handled as a follow-up fix.
 
 ## Everyday use
-
-![Persistent tray supervisor flow (English)](docs/assets/persistent-supervisor-flow-en-US.svg)
-
-*Illustration; simplified for readability.*
 
 - The logon task `Codex Control Other Devices Supervisor` starts the tray supervisor automatically; no manual steps are needed.
 - The desktop shortcut **CodexRemote-fix** is an optional way to start the tray supervisor if its icon is not visible. It does not start a repair or change a Codex session by itself.
@@ -105,9 +105,9 @@ Neither Codex nor External renderer installation files are modified.
 
 ## Tray menu
 
-![Tray menu (English)](docs/assets/tray-menu-en-US.png)
+![CodexRemote-fix native tray menu (English)](docs/assets/codexremote-fix-tray-menu-en-US.png)
 
-*Example menu; the system tray and other applications are not shown.*
+*Privacy-safe Windows-style menu illustration; the actual menu is rendered by the native TrayHost.*
 
 The compiled native Win32 TrayHost menu shows actions only when their semantic state allows them: Apply now, Retry,
 Automation, Candidate-compatible trial, Logs, and Uninstall. Uninstall always requires explicit confirmation.

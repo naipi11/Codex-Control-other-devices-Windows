@@ -20,15 +20,19 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 > 这是非官方运行时兼容方案，会在随机 `127.0.0.1` 端口启用 Chromium 调试接口。
 > 请仅在可信的 Windows 电脑上运行，并在每次 Codex 更新后重新执行兼容性检查。
 
+![CodexRemote-fix 工作流程：安装、重启 Codex、恢复“控制其他设备”](docs/assets/codexremote-fix-demo-zh-CN.gif)
+
+*隐私安全的动图示意；不显示账号、真实设备名或桌面皮肤。*
+
 ## 快速开始
 
 1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.15-setup.exe` 和 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`，并核对 SHA-256。
 2. 运行 `CodexRemote-fix-2.4.15-setup.exe`，无需管理员权限。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
-![设置 → 连接 → 控制其他设备（中文）](docs/assets/control-other-devices-active-zh-CN.png)
+![CodexRemote-fix 已验证的“控制其他设备”界面（中文）](docs/assets/codexremote-fix-control-zh-CN.png)
 
-*示例界面；已移除账号、设备与环境信息。*
+*隐私安全的已验证状态示意，设备名使用通用占位名称。*
 
 当前安装包及其 SHA-256 校验值始终发布在
 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 页面。
@@ -51,10 +55,6 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 请不要重新配对或删除密钥文件；profile 映射恢复将在后续版本单独修复。
 
 ## 日常使用
-
-![常驻托盘守护流程（中文）](docs/assets/persistent-supervisor-flow-zh-CN.svg)
-
-*示意图；为便于阅读已简化。*
 
 - 登录后计划任务 `Codex Control Other Devices Supervisor` 自动启动托盘守护程序，无需手动操作。
 - 若未看到托盘图标，可双击桌面上的 **CodexRemote-fix** 启动托盘守护程序；它本身不会启动修复，也不会改变当前 Codex 会话。
@@ -95,7 +95,7 @@ External renderer 的 `pause` 标记会跳过集成。External renderer 状态�
 
 ## 托盘菜单
 
-![托盘菜单（中文）](docs/assets/tray-menu-zh-CN.png)
+![CodexRemote-fix 原生托盘菜单（中文）](docs/assets/codexremote-fix-tray-menu-zh-CN.png)
 
 *示例菜单；未展示系统托盘与其他应用。*
 
