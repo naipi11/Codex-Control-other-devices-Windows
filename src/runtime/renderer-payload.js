@@ -6,6 +6,11 @@
 
   const API_SLOT = "__CODEX_STATSIG_GATE_BRIDGE__";
   const TARGET_GATE = "782640499";
+  const REMOTE_CONTROL_CLIENT_ENVIRONMENTS_GATE = "2055603567";
+  const GATE_OVERRIDES = Object.freeze({
+    [TARGET_GATE]: false,
+    [REMOTE_CONTROL_CLIENT_ENVIRONMENTS_GATE]: true,
+  });
   const CHECK_GATE_METHODS = Object.freeze([
     "checkGate",
     "checkGateWithExposureLoggingDisabled",
@@ -30,8 +35,16 @@
     return (typeof value === "object" && value !== null) || typeof value === "function";
   }
 
+  function getGateOverride(value) {
+    if (typeof value !== "string" && typeof value !== "number") {
+      return null;
+    }
+    const override = GATE_OVERRIDES[String(value)];
+    return typeof override === "boolean" ? override : null;
+  }
+
   function isTargetGate(value) {
-    return (typeof value === "string" || typeof value === "number") && String(value) === TARGET_GATE;
+    return String(value) === TARGET_GATE && getGateOverride(value) !== null;
   }
 
   function findDataMethod(receiver, methodName) {
@@ -69,9 +82,9 @@
     return CHECK_GATE_METHODS.includes(methodName) ? "check" : "structured";
   }
 
-  function forceResolvedGateResultFalse(result) {
+  function forceResolvedGateResult(result, enabled) {
     if (!isObjectLike(result)) {
-      return false;
+      return enabled;
     }
     try {
       const descriptors = Object.getOwnPropertyDescriptors(result);
@@ -81,7 +94,7 @@
           descriptors[field] = {
             configurable: descriptor.configurable,
             enumerable: descriptor.enumerable,
-            value: false,
+            value: enabled,
             writable: Object.hasOwn(descriptor, "writable") ? descriptor.writable : true,
           };
         }
@@ -94,27 +107,27 @@
           Object.defineProperty(clone, field, {
             configurable: true,
             enumerable: true,
-            value: false,
+            value: enabled,
             writable: true,
           });
         } else if (Array.isArray(result) && field in result) {
-          clone[field] = false;
+          clone[field] = enabled;
         }
       }
       return clone;
     } catch {
       const clone = { ...result };
-      if ("value" in result) clone.value = false;
-      if ("enabled" in result) clone.enabled = false;
+      if ("value" in result) clone.value = enabled;
+      if ("enabled" in result) clone.enabled = enabled;
       return clone;
     }
   }
 
-  function forceStructuredGateResultFalse(result) {
+  function forceStructuredGateResult(result, enabled) {
     if (result != null && typeof result.then === "function") {
-      return result.then(forceResolvedGateResultFalse);
+      return result.then((value) => forceResolvedGateResult(value, enabled));
     }
-    return forceResolvedGateResultFalse(result);
+    return forceResolvedGateResult(result, enabled);
   }
 
   function recordExistingWrapper(receiver, methodName, wrapper, kind) {
@@ -137,11 +150,12 @@
 
     const original = found.method;
     const wrapper = function cleanroomStatsigGateMethod(...args) {
-      if (isTargetGate(args[0])) {
+      const override = getGateOverride(args[0]);
+      if (override !== null) {
         if (kind === "check") {
-          return false;
+          return override;
         }
-        return forceStructuredGateResultFalse(Reflect.apply(original, this, args));
+        return forceStructuredGateResult(Reflect.apply(original, this, args), override);
       }
       return Reflect.apply(original, this, args);
     };

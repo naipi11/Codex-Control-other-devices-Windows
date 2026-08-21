@@ -393,6 +393,7 @@ async function rendererPayloadTest(root) {
   const initial = vm.runInContext(source, context, { filename: "renderer-payload.js" });
   assert.equal(initial.proof, true);
   assert.equal(client.checkGate("782640499"), false);
+  assert.equal(client.checkGate("2055603567"), true);
   assert.equal(client.checkGate("unrelated-gate"), true);
   assert.deepEqual(client.getConfig("kept"), { name: "kept" });
   const shaped = client.getFeatureGate("782640499");
