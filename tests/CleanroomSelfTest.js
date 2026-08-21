@@ -230,7 +230,7 @@ function hostBuiltin(name) {
   return require(name);
 }
 
-function processFacade(getBuiltinModule) {
+function processFacade(getBuiltinModule, overrides = {}) {
   const facade = {
     env: process.env,
     execPath: process.execPath,
@@ -240,15 +240,16 @@ function processFacade(getBuiltinModule) {
   if (typeof getBuiltinModule === "function") {
     facade.getBuiltinModule = getBuiltinModule;
   }
+  Object.assign(facade, overrides);
   return facade;
 }
 
-function loadBridgeInVm(root, { getBuiltinModule, requireBuiltin } = {}) {
+function loadBridgeInVm(root, { getBuiltinModule, requireBuiltin, processOverride } = {}) {
   const globals = {
     Buffer,
     clearTimeout,
     console,
-    process: processFacade(getBuiltinModule),
+    process: processOverride ?? processFacade(getBuiltinModule),
     setTimeout,
   };
   if (typeof requireBuiltin === "function") {
@@ -258,6 +259,125 @@ function loadBridgeInVm(root, { getBuiltinModule, requireBuiltin } = {}) {
   context.globalThis = context;
   const source = fs.readFileSync(path.join(root, "..", "src", "runtime", "main-payload.js"), "utf8");
   return vm.runInContext(source, context, { filename: "main-payload.js" });
+}
+
+async function dlopenInterceptionTest(root, storePath) {
+  let originalCalls = 0;
+  const processOverride = processFacade(hostBuiltin, {
+    resourcesPath: "C:\\Codex\\resources",
+    dlopen() {
+      originalCalls += 1;
+      throw new Error("original dlopen should not receive the device-key addon");
+    },
+  });
+  const bridge = loadBridgeInVm(root, { processOverride });
+  const report = bridge.installMainBridge({ storePath, scheduleInspectorClose: false, spoofPlatform: false });
+  assert.equal(report.dlopenInterception, "installed");
+  const moduleObject = { exports: {} };
+  processOverride.dlopen(moduleObject, "C:\\Codex\\resources\\native\\remote-control-device-key.node");
+  assert.equal(typeof moduleObject.exports.getDeviceKeyPublic, "function");
+  const moduleBuiltin = hostBuiltin("module");
+  const cached = moduleBuiltin._cache?.[path.resolve("C:\\Codex\\resources\\native\\remote-control-device-key.node")];
+  assert.equal(typeof cached?.exports?.getDeviceKeyPublic, "function");
+  assert.equal(originalCalls, 0);
+  return { dlopenInterceptionVerified: true };
+}
+
+async function fallbackCodexHomeStoreTest(tempDirectory) {
+  const keyId = "dk_fallback_probe";
+  const publicKeySpkiDerBase64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZaf2qYNDtZ2O7M2ps8y2z6kXIWhF+yJ1nHxswUYScD5glcm8QuNeY9+FGfvn80xWZ/Tw1yluch6kTaG+z9L/1Q==";
+  const alternatePublicKeySpkiDerBase64 = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" }).publicKey
+    .export({ format: "der", type: "spki" }).toString("base64");
+  const primary = path.join(tempDirectory, "profile-store.json");
+  const fallback = path.join(tempDirectory, "default-store.json");
+  fs.writeFileSync(primary, JSON.stringify({ schemaVersion: 1, keys: {
+    [keyId]: {
+      algorithm: "ecdsa_p256_sha256",
+      encryptedPrivateKeyBase64: "AA==",
+      protectionClass: "os_protected_nonextractable",
+      publicKeySpkiDerBase64: alternatePublicKeySpkiDerBase64,
+    },
+  }}));
+  fs.writeFileSync(fallback, JSON.stringify({ schemaVersion: 1, keys: {
+    [keyId]: {
+      algorithm: "ecdsa_p256_sha256",
+      encryptedPrivateKeyBase64: "AA==",
+      protectionClass: "os_protected_nonextractable",
+      publicKeySpkiDerBase64,
+    },
+  }}));
+  const service = new DeviceKeyService({ storePath: primary, fallbackStorePath: fallback });
+  assert.deepEqual(await service.getDeviceKeyPublic(keyId), {
+    algorithm: "ecdsa_p256_sha256",
+    keyId,
+    protectionClass: "os_protected_nonextractable",
+    publicKeySpkiDerBase64,
+  });
+  assert.equal(service.storePath, path.resolve(fallback));
+  return { fallbackStoreLookupVerified: true, staleProfileRecordReplaced: true };
+}
+
+async function userProfileFallbackStoreTest(tempDirectory) {
+  const keyId = "dk_userprofile_probe";
+  const publicKeySpkiDerBase64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZaf2qYNDtZ2O7M2ps8y2z6kXIWhF+yJ1nHxswUYScD5glcm8QuNeY9+FGfvn80xWZ/Tw1yluch6kTaG+z9L/1Q==";
+  const profileHome = path.join(tempDirectory, "windows-user-profile");
+  const fallback = path.join(profileHome, ".codex", "remote-control-device-keys.windows.json");
+  const primary = path.join(tempDirectory, "appcontainer-profile-store.json");
+  fs.mkdirSync(path.dirname(fallback), { recursive: true });
+  fs.writeFileSync(primary, JSON.stringify({ schemaVersion: 1, keys: {} }));
+  fs.writeFileSync(fallback, JSON.stringify({ schemaVersion: 1, keys: {
+    [keyId]: {
+      algorithm: "ecdsa_p256_sha256",
+      encryptedPrivateKeyBase64: "AA==",
+      protectionClass: "os_protected_nonextractable",
+      publicKeySpkiDerBase64,
+    },
+  }}));
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousHome = os.homedir;
+  process.env.USERPROFILE = profileHome;
+  os.homedir = () => path.join(tempDirectory, "appcontainer-home");
+  try {
+    const service = new DeviceKeyService({ storePath: primary });
+    assert.equal(service.fallbackStorePath, path.resolve(fallback));
+    assert.equal((await service.getDeviceKeyPublic(keyId)).keyId, keyId);
+  } finally {
+    os.homedir = previousHome;
+    if (previousUserProfile == null) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+  }
+  return { userProfileFallbackVerified: true };
+}
+
+async function profileEnrollmentMigrationTest(tempDirectory) {
+  const sourceHome = path.join(tempDirectory, "canonical-home");
+  const targetHome = path.join(tempDirectory, "profile-home");
+  const sourcePath = path.join(sourceHome, ".codex-global-state.json");
+  const targetPath = path.join(targetHome, ".codex-global-state.json");
+  const mapping = {
+    "Codex Desktop\nprod\nuser": {
+      accountUserId: "user",
+      algorithm: "ecdsa_p256_sha256",
+      clientId: "cli_profile_migration",
+      keyId: "dk_profile_migration",
+      protectionClass: "os_protected_nonextractable",
+      publicKeySpkiDerBase64: "public",
+    },
+  };
+  fs.mkdirSync(sourceHome, { recursive: true });
+  fs.mkdirSync(targetHome, { recursive: true });
+  fs.writeFileSync(sourcePath, JSON.stringify({
+    "electron-remote-control-client-enrollments": mapping,
+    "unrelated-state": { keep: true },
+  }));
+  fs.writeFileSync(targetPath, JSON.stringify({ "unrelated-state": { target: true } }));
+  const result = DeviceKeyService.migrateRemoteControlProfile({ sourceHome, targetHome });
+  assert.equal(result.migrated, true);
+  const migrated = JSON.parse(fs.readFileSync(targetPath, "utf8"));
+  assert.deepEqual(migrated["electron-remote-control-client-enrollments"], mapping);
+  assert.deepEqual(migrated["unrelated-state"], { target: true });
+  assert.equal(Object.values(mapping)[0].encryptedPrivateKeyBase64, undefined);
+  return { enrollmentOnly: true, profileMappingMigrated: true };
 }
 
 async function vmDeviceKeyLifecycle(bridge, storePath, payloadText) {
@@ -746,6 +866,10 @@ async function main() {
     ["malformed-store-preservation", () => malformedPreservationTest(path.join(tempDirectory, "malformed.json"))],
     ["legacy-pem-store", () => legacyStoreTest(path.join(tempDirectory, "legacy.json"))],
     ["electron-restricted-crypto-fallback", () => electronRestrictedCryptoFallbackTest(root, path.join(tempDirectory, "electron-crypto.json"))],
+    ["native-addon-dlopen-interception", () => dlopenInterceptionTest(root, path.join(tempDirectory, "dlopen.json"))],
+    ["codex-home-store-fallback", () => fallbackCodexHomeStoreTest(tempDirectory)],
+    ["userprofile-store-fallback", () => userProfileFallbackStoreTest(tempDirectory)],
+    ["profile-enrollment-migration", () => profileEnrollmentMigrationTest(tempDirectory)],
     ["node-without-get-builtin-module", () => nodeWithoutGetBuiltinModuleTest(root, path.join(tempDirectory, "node-22-0.json"))],
     ["synchronous-key-generation-fallback", () => synchronousKeyGenerationFallbackTest(root, path.join(tempDirectory, "sync-crypto.json"))],
     ["incomplete-crypto-rejection", () => incompleteCryptoRejectionTest(root)],

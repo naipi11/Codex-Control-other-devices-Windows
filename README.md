@@ -20,8 +20,8 @@ manages everything automatically.
 
 ## Quick start
 
-1. Download `CodexRemote-fix-2.4.12-setup.exe` and `CodexRemote-fix-2.4.12-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page, then verify the SHA-256.
-2. Run `CodexRemote-fix-2.4.12-setup.exe`; no administrator rights are required.
+1. Download `CodexRemote-fix-2.4.15-setup.exe` and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page, then verify the SHA-256.
+2. Run `CodexRemote-fix-2.4.15-setup.exe`; no administrator rights are required.
 3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
 ![Settings → Connections → Control other devices (English)](docs/assets/control-other-devices-active-en-US.png)
@@ -36,8 +36,22 @@ keys are preserved. The installer also replaces a legacy supervisor that did not
 session state, including one left behind by an earlier interrupted upgrade, so a restart is not
 needed after upgrading.
 
-Verified on Windows 11 · Codex Desktop `26.803.10989.0` · Node.js `22.23.1`:
-the tab, controller enrollment, device list, and remote projects are all working.
+Verified on Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`:
+the hidden controller tab, native tray menu, bilingual menu switching, and persistent
+supervisor are working. Existing controller-device enrollment recovery is tracked separately
+in the release notes below.
+
+## What's new in v2.4.15
+
+- Rebuilt the tray surface as a compiled native Win32 TrayHost using the normal Windows context-menu behavior.
+- Added a product icon, Start-menu registration, and a **CodexRemote-fix** desktop shortcut.
+- Kept the tray menu bilingual: Follow system, 中文, and English, with in-place state updates.
+- Hardened startup/recovery so an interrupted upgrade can adopt one newly launched ordinary Codex instance without touching device keys.
+- Preserved the existing encrypted device-key store and server-side authorization.
+
+Known issue: on some Codex Windows updates, previously authorized controller devices can disappear from
+**Control other devices** even though the tab is visible. Do not re-pair or delete the key store; profile
+mapping recovery is being handled as a follow-up fix.
 
 ## Everyday use
 
@@ -57,8 +71,11 @@ the tab, controller enrollment, device list, and remote projects are all working
 
 Every tagged release ships a Windows installer and its SHA-256 checksum as release assets.
 The `.github/workflows/release.yml` workflow builds the installer from the tag automatically,
-so the 2.4.12 release includes the ready-to-run `CodexRemote-fix-2.4.12-setup.exe`
-and `CodexRemote-fix-2.4.12-setup.exe.sha256.txt`.
+so the 2.4.15 release includes the ready-to-run `CodexRemote-fix-2.4.15-setup.exe`
+and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`.
+
+Each release appends a short bilingual change summary to this README and to the GitHub release body.
+The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 After a Codex Desktop update, check the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
 page for a newer installer, or run the **CodexRemote-fix compatibility check** shortcut from the Start menu

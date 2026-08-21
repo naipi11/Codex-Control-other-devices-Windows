@@ -1245,7 +1245,10 @@ function Invoke-CcodReplayTransition {
             return Complete-CcodCloseResult $result $Paths $adapter $Transition.transactionId
         }
         $probe=& $adapter.StaticProbe $state.Settings.nodeCandidates $Paths.CheckerPath;$result.package=ConvertTo-CcodSessionPackage $probe
-        if($Transition.runtimeId -cne $Request.runtimeId -or $Transition.packageFullName -cne $probe.PackageFullName -or $Transition.appAsarSha256 -cne $probe.AppAsarSha256){
+        $crossRuntimeCloseReplay=$Transition.stage -ceq 'CloseRequested' -and $Request.restartOrdinary -and
+            $null -eq $Transition.specialPid -and $null -eq $Transition.rendererPort -and $null -eq $Transition.mainPort
+        if((($Transition.runtimeId -cne $Request.runtimeId) -and -not $crossRuntimeCloseReplay) -or
+            $Transition.packageFullName -cne $probe.PackageFullName -or $Transition.appAsarSha256 -cne $probe.AppAsarSha256){
             Throw-CcodSessionError 'CCOD_RECOVERY_UNPROVEN' 'The active runtime package does not match the durable transition identity' $Transition
         }
         if($Transition.stage -ceq 'CloseRequested'){
@@ -1257,6 +1260,27 @@ function Invoke-CcodReplayTransition {
             $recordedPid=if($null -ne $Transition.specialPid){$Transition.specialPid}else{$Transition.sourcePid}
             $recordedTime=if($null -ne $Transition.specialPid){$Transition.specialCreationTimeUtc}else{$Transition.sourceCreationTimeUtc}
             $roots=@(Get-CcodCurrentPackageRoots $state.Status $probe $Request $adapter)
+            # A recovery can be interrupted after the old root exits but after the
+            # replacement ordinary Codex has already been launched.  In that
+            # narrow case the durable CloseRequested record still names the old
+            # PID, while exactly one new ordinary root is present.  Adopt it only
+            # for a restart-enabled Recover request and only when its start time
+            # is strictly after the transaction update; this keeps ambiguous or
+            # pre-existing roots fail-closed.
+            if($Request.restartOrdinary -and $null -eq $Transition.specialPid -and $roots.Count -eq 1){
+                $candidateRoot=$roots[0]
+                $recordedCurrent=$null
+                if($null -ne $recordedPid){$recordedCurrent=& $adapter.GetProcess $recordedPid $state.Status}
+                $transitionTime=[DateTime]::MinValue;$candidateTime=[DateTime]::MinValue
+                $timeEvidence=$Transition.updatedAtUtc -is [string] -and $candidateRoot.CreationTimeUtc -is [string] -and
+                    [DateTime]::TryParseExact($Transition.updatedAtUtc,'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$transitionTime) -and
+                    [DateTime]::TryParseExact($candidateRoot.CreationTimeUtc,'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$candidateTime)
+                if($null -eq $recordedCurrent -and $candidateRoot.Mode -ceq 'Ordinary' -and $candidateRoot.IsTopLevel -is [bool] -and $candidateRoot.IsTopLevel -and
+                    $null -eq $candidateRoot.RendererPort -and $null -eq $candidateRoot.MainPort -and $timeEvidence -and $candidateTime -gt $transitionTime){
+                    & $adapter.SetTransition $Paths.TransitionPath $Transition.transactionId 'CloseRequested' 'Recovered' $null $candidateRoot $null $null | Out-Null
+                    return Complete-CcodRecoveredReplay $result $Request $Paths $adapter $probe $candidateRoot $Transition.transactionId
+                }
+            }
             if($roots.Count -eq 0){
                 $cold=[pscustomobject][ordered]@{StopObservation='CloseTreeIndeterminate';RecoveryObservation='NotApplicable';SpecialObservation='NoCandidate';PortObservation=$portObservation;SpecialCandidates=@();OrdinaryCandidates=@()}
                 $decision=Get-CcodReplayDecision -Transition $Transition -Observed $cold

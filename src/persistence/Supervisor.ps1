@@ -289,7 +289,11 @@ function Get-CcodSupervisorDefaultAdapters {
             $menuOpen=($null -ne $menuOpenProperty -and $menuOpenProperty.Value -is [bool] -and $menuOpenProperty.Value)
             if($menuOpen){
                 $trayAdaptersProperty=$Tray.PSObject.Properties['Adapters']
-                $endNativeMenu=if($null -eq $trayAdaptersProperty -or $trayAdaptersProperty.Value -isnot [hashtable]){$null}else{$trayAdaptersProperty.Value['EndNativeMenu']}
+                $endNativeMenu=$null
+                if($null -ne $trayAdaptersProperty -and $trayAdaptersProperty.Value -is [hashtable]){
+                    $endNativeMenu=$trayAdaptersProperty.Value['EndMenu']
+                    if($null -eq $endNativeMenu){$endNativeMenu=$trayAdaptersProperty.Value['EndNativeMenu']}
+                }
                 if($endNativeMenu -is [scriptblock]){
                     try{[void](Invoke-CcodSupervisorAdapterCapture $endNativeMenu @())}catch{}
                 }

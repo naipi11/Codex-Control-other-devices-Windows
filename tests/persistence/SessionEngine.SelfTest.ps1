@@ -1215,6 +1215,24 @@ try {
         Assert-CcodEqual 'Closed' $terminal.outcome 'Closed replay performs archival only without requiring a live tree again'
     }
 
+    Invoke-CcodTest 'adopts one newly launched ordinary root after an interrupted recovery close' {
+        $request=New-CcodEngineRequest -Action Recover -RestartOrdinary $true -TransactionId 'c8c3b2cc-30cc-4cb7-9fb8-55df3a6f4b25'
+        $transition=New-CcodEngineTransition -Stage CloseRequested
+        $transition.runtimeId='runtime-old'
+        $ordinary=New-CcodEngineSnapshot -Pid 302 -CreationTimeUtc '2030-02-03T04:06:04.0000000Z' -Mode Ordinary
+        $events=[Collections.Generic.List[string]]::new();$counts=[pscustomobject]@{SpecialStart=0;OrdinaryStart=0;Recover=0;Node=0}
+        $adapters=New-CcodEngineAdapters -Processes @($ordinary) -Events $events -Counters $counts
+        $adapters.ListProcesses={param($StatusEvidence)@($ordinary)}
+        $adapters.GetProcess={param($ProcessId,$StatusEvidence)if([int]$ProcessId -eq [int]$ordinary.Pid){$ordinary}else{$null}}.GetNewClosure()
+        $adapters.GetTree={param($Root,$StatusEvidence)@($Root)}
+        $adapters.StopProcess={throw 'interrupted recovery must not stop the newly launched ordinary root'}
+        $result=Invoke-CcodReplayTransition -Request $request -Paths $paths -Transition $transition -Adapters $adapters
+        Assert-CcodEqual 'Recovered' $result.outcome 'new ordinary root is adopted after the recorded old root disappeared across a runtime upgrade'
+        Assert-CcodEqual $ordinary.Pid $result.recovery.pid 'adopted recovery reports the new ordinary PID'
+        Assert-CcodTrue (($events -join ',') -cmatch 'Complete:Recovered') 'adopting the new ordinary root archives the interrupted transaction'
+        Assert-CcodEqual 0 $counts.OrdinaryStart 'adoption does not start a duplicate ordinary Codex'
+    }
+
     Invoke-CcodTest 'rejects durable close replay from a different current Windows session before stop' {
         $special=New-CcodEngineSnapshot -Pid 201 -CreationTimeUtc '2030-02-03T04:05:07.0000000Z' -Mode Unrelated -RendererPort 41001 -MainPort 41002
         $alive=@{201=$special};$stops=[pscustomobject]@{Count=0};$adapters=New-CcodEngineAdapters -Processes @($special)

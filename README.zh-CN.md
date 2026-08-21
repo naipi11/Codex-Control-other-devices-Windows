@@ -18,8 +18,8 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载 `CodexRemote-fix-2.4.12-setup.exe` 和 `CodexRemote-fix-2.4.12-setup.exe.sha256.txt`，并核对 SHA-256。
-2. 运行 `CodexRemote-fix-2.4.12-setup.exe`，无需管理员权限。
+1. 从 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) 下载 `CodexRemote-fix-2.4.15-setup.exe` 和 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`，并核对 SHA-256。
+2. 运行 `CodexRemote-fix-2.4.15-setup.exe`，无需管理员权限。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
 ![设置 → 连接 → 控制其他设备（中文）](docs/assets/control-other-devices-active-zh-CN.png)
@@ -31,8 +31,20 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 升级时直接运行新版安装包即可，现有设置与设备密钥会保留。
 
-已验证：Windows 11 · Codex Desktop `26.803.10989.0` · Node.js `22.23.1`；
-标签显示、控制器授权、设备列表、远程项目均可用。
+已验证：Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`；
+隐藏的控制器标签、原生托盘菜单、双语菜单切换和常驻守护程序均可用。
+已有控制器设备的授权恢复问题见下方发布说明，仍在单独修复中。
+
+## v2.4.15 更新内容
+
+- 托盘界面重构为编译后的原生 Win32 TrayHost，使用 Windows 默认右键菜单行为。
+- 新增产品图标、开始菜单注册和 **CodexRemote-fix** 桌面快捷方式。
+- 托盘菜单保持双语：跟随系统、中文、English，状态可原地更新。
+- 加固启动与恢复流程；升级中断后可安全接管新启动的普通 Codex，不触碰设备密钥。
+- 保留现有加密设备密钥和服务器端授权。
+
+已知问题：部分 Codex Windows 更新后，**控制其他设备** 标签虽然可见，但之前授权的控制器设备列表可能为空。
+请不要重新配对或删除密钥文件；profile 映射恢复将在后续版本单独修复。
 
 ## 日常使用
 
@@ -52,8 +64,11 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 每个带 tag 的发布都会附带 Windows 安装包及其 SHA-256 校验文件。
 `.github/workflows/release.yml` 会在 tag 上自动构建安装包，因此后续每次更新都会
-为 2.4.12 发布提供可直接运行的 `CodexRemote-fix-2.4.12-setup.exe`
-及 `CodexRemote-fix-2.4.12-setup.exe.sha256.txt`。
+为 2.4.15 发布提供可直接运行的 `CodexRemote-fix-2.4.15-setup.exe`
+及 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`。
+
+每次发布都会在本 README 和 GitHub Release 正文中追加简短的中英文更新说明。
+完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
 查看是否有更新安装包；也可以从开始菜单运行 **CodexRemote-fix compatibility check（兼容性检查）**

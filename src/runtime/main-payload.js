@@ -9,6 +9,8 @@
   const PROTECTION_MODE = "allow_os_protected_nonextractable";
   const PROTECTION_CLASS = "os_protected_nonextractable";
   const STORE_FILENAME = "remote-control-device-keys.windows.json";
+  const GLOBAL_STATE_FILENAME = ".codex-global-state.json";
+  const ENROLLMENT_STATE_KEY = "electron-remote-control-client-enrollments";
   const INJECT_OPTIONS_SLOT = "__CODEX_CLEANROOM_MAIN_OPTIONS__";
   const STATE_SYMBOL = Symbol.for("codex.cleanroom.device-key-bridge.state.v1");
 
@@ -261,6 +263,97 @@
     return path.join(resolveCodexHome(options), STORE_FILENAME);
   }
 
+  function resolveWindowsUserProfileHome() {
+    const candidates = [
+      process.env.USERPROFILE,
+      process.env.HOMEDRIVE && process.env.HOMEPATH ? `${process.env.HOMEDRIVE}${process.env.HOMEPATH}` : null,
+      os.homedir(),
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string" || candidate.trim().length === 0) {
+        continue;
+      }
+      try {
+        const resolved = path.resolve(candidate.trim());
+        if (path.isAbsolute(resolved)) {
+          return resolved;
+        }
+      } catch {
+        // Try the next Windows profile source.
+      }
+    }
+    throw bridgeError("USER_PROFILE_UNAVAILABLE", "The Windows user profile path is unavailable");
+  }
+
+  function isEnrollmentRecord(value) {
+    return (
+      isPlainObject(value) &&
+      typeof value.accountUserId === "string" && value.accountUserId.length > 0 &&
+      value.algorithm === ALGORITHM &&
+      typeof value.clientId === "string" && value.clientId.length > 0 &&
+      typeof value.keyId === "string" && value.keyId.length > 0 &&
+      value.protectionClass === PROTECTION_CLASS &&
+      typeof value.publicKeySpkiDerBase64 === "string" && value.publicKeySpkiDerBase64.length > 0 &&
+      Object.keys(value).every((key) => ["accountUserId", "algorithm", "clientId", "keyId", "protectionClass", "publicKeySpkiDerBase64"].includes(key))
+    );
+  }
+
+  function readGlobalStateObject(filePath) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      return isPlainObject(parsed) ? parsed : {};
+    } catch (error) {
+      if (error?.code === "ENOENT") return {};
+      throw bridgeError("PROFILE_MAPPING_MALFORMED", "Codex global state is not valid JSON");
+    }
+  }
+
+  function migrateRemoteControlProfile(options = {}) {
+    const sourceHome = path.resolve(String(options.sourceHome ?? resolveWindowsUserProfileHome()));
+    const targetHome = path.resolve(String(options.targetHome ?? resolveCodexHome(options)));
+    const sourcePath = path.join(sourceHome, GLOBAL_STATE_FILENAME);
+    const targetPath = path.join(targetHome, GLOBAL_STATE_FILENAME);
+    if (sourcePath === targetPath) return { migrated: false, reason: "same-profile", recordCount: 0 };
+
+    const sourceState = readGlobalStateObject(sourcePath);
+    const sourceMapping = sourceState[ENROLLMENT_STATE_KEY];
+    if (!isPlainObject(sourceMapping)) return { migrated: false, reason: "source-mapping-missing", recordCount: 0 };
+    const sourceRecords = Object.values(sourceMapping);
+    if (sourceRecords.length === 0 || sourceRecords.some((record) => !isEnrollmentRecord(record))) {
+      throw bridgeError("PROFILE_MAPPING_MALFORMED", "Codex remote-control enrollment mapping is malformed");
+    }
+
+    const targetState = readGlobalStateObject(targetPath);
+    if (isPlainObject(targetState[ENROLLMENT_STATE_KEY]) && Object.keys(targetState[ENROLLMENT_STATE_KEY]).length > 0) {
+      return { migrated: false, reason: "target-mapping-present", recordCount: Object.keys(targetState[ENROLLMENT_STATE_KEY]).length };
+    }
+    targetState[ENROLLMENT_STATE_KEY] = sourceMapping;
+    fs.mkdirSync(targetHome, { recursive: true });
+    const temporary = path.join(targetHome, `.${GLOBAL_STATE_FILENAME}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    fs.writeFileSync(temporary, `${JSON.stringify(targetState)}\n`, "utf8");
+    try {
+      fs.renameSync(temporary, targetPath);
+    } catch (error) {
+      try { fs.rmSync(temporary, { force: true }); } catch { /* best effort cleanup */ }
+      throw bridgeError("PROFILE_MAPPING_WRITE_FAILED", "Codex profile mapping could not be migrated");
+    }
+    return { migrated: true, reason: "copied-canonical-enrollment", recordCount: sourceRecords.length };
+  }
+
+  function cacheNativeAddon(addon) {
+    if (typeof process.resourcesPath !== "string" || !process.resourcesPath.trim() || Module._cache == null) {
+      return { status: "unavailable", path: null };
+    }
+    const addonPath = path.resolve(process.resourcesPath, "native", TARGET_ADDON_BASENAME);
+    const cached = Module._cache[addonPath] ?? { id: addonPath, filename: addonPath, loaded: true, exports: addon };
+    cached.id = cached.id ?? addonPath;
+    cached.filename = cached.filename ?? addonPath;
+    cached.loaded = true;
+    cached.exports = addon;
+    Module._cache[addonPath] = cached;
+    return { status: "installed", path: addonPath };
+  }
+
   const DPAPI_SCRIPT = [
     "$ErrorActionPreference = 'Stop'",
     "Add-Type -AssemblyName System.Security",
@@ -444,6 +537,8 @@
   class DeviceKeyService {
     constructor(options = {}) {
       this.storePath = resolveStorePath(options);
+      const fallback = options.fallbackStorePath ?? path.join(resolveWindowsUserProfileHome(), ".codex", STORE_FILENAME);
+      this.fallbackStorePath = typeof fallback === "string" && fallback.trim().length > 0 ? path.resolve(fallback.trim()) : null;
       this.dpapiTimeoutMs = options.dpapiTimeoutMs ?? 15_000;
       this.queue = Promise.resolve();
     }
@@ -454,10 +549,10 @@
       return result;
     }
 
-    async _loadStore() {
+    async _loadStoreAt(storePath) {
       let rawText;
       try {
-        rawText = await fs.promises.readFile(this.storePath, "utf8");
+        rawText = await fs.promises.readFile(storePath, "utf8");
       } catch (error) {
         if (error?.code === "ENOENT") {
           return { kind: "v1", rawText: null, records: new Map() };
@@ -466,6 +561,30 @@
       }
       const parsed = parseStoreText(rawText);
       return { ...parsed, rawText };
+    }
+
+    async _loadStore() {
+      return this._loadStoreAt(this.storePath);
+    }
+
+    async _loadStoreForKey(keyId) {
+      const primary = await this._loadStore();
+      if (this.fallbackStorePath == null || this.fallbackStorePath === this.storePath) {
+        return primary;
+      }
+      try {
+        const fallback = await this._loadStoreAt(this.fallbackStorePath);
+        // The user-profile store is canonical across Codex Desktop profiles.
+        // Prefer it even when a stale profile contains the same key id; the
+        // enrollment mapping is validated against the public key material.
+        if (fallback.records.has(keyId)) {
+          this.storePath = this.fallbackStorePath;
+          return fallback;
+        }
+      } catch {
+        // Preserve the primary store error/absence semantics when fallback is unavailable.
+      }
+      return primary;
     }
 
     async _loadPrivate(record) {
@@ -597,7 +716,7 @@
     deleteDeviceKey(keyId) {
       return this._enqueue(async () => {
         validateKeyId(keyId);
-        const store = await this._loadStore();
+        const store = await this._loadStoreForKey(keyId);
         if (!store.records.has(keyId)) {
           throw bridgeError("KEY_NOT_FOUND", "Device key was not found");
         }
@@ -611,7 +730,7 @@
     getDeviceKeyPublic(keyId) {
       return this._enqueue(async () => {
         validateKeyId(keyId);
-        const store = await this._loadStore();
+        const store = await this._loadStoreForKey(keyId);
         const record = store.records.get(keyId);
         if (!record) {
           throw bridgeError("KEY_NOT_FOUND", "Device key was not found");
@@ -642,7 +761,7 @@
         const bytes = Buffer.isBuffer(payload)
           ? Buffer.from(payload)
           : Buffer.from(new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength));
-        const store = await this._loadStore();
+        const store = await this._loadStoreForKey(keyId);
         const record = store.records.get(keyId);
         if (!record) {
           throw bridgeError("KEY_NOT_FOUND", "Device key was not found");
@@ -653,6 +772,8 @@
       });
     }
   }
+
+  DeviceKeyService.migrateRemoteControlProfile = migrateRemoteControlProfile;
 
   function normalizedBasename(request) {
     if (typeof request !== "string") {
@@ -721,10 +842,19 @@
       return { ...globalThis[STATE_SYMBOL].report, inspectorClose: reusedClose, reused: true };
     }
 
+    let profileMigration;
+    try {
+      profileMigration = migrateRemoteControlProfile(options);
+    } catch (error) {
+      profileMigration = { migrated: false, reason: error?.code ?? "migration-failed", recordCount: 0 };
+    }
     const service = new DeviceKeyService(options);
     const addon = makeAddon(service);
+    const cacheInterception = cacheNativeAddon(addon);
     const originalLoad = Module._load;
+    const originalDlopen = process.dlopen;
     const platformShim = options.spoofPlatform === false ? { installed: false, reason: "disabled" } : installPlatformStackShim();
+    let dlopenInterception = "disabled";
     if (options.interceptModules !== false) {
       Module._load = function cleanroomAddonLoad(request, parent, isMain) {
         if (normalizedBasename(request) === TARGET_ADDON_BASENAME) {
@@ -732,6 +862,20 @@
         }
         return originalLoad.apply(this, arguments);
       };
+      if (typeof originalDlopen === "function") {
+        try {
+          process.dlopen = function cleanroomAddonDlopen(moduleObject, filename) {
+            if (normalizedBasename(filename) === TARGET_ADDON_BASENAME) {
+              moduleObject.exports = addon;
+              return;
+            }
+            return originalDlopen.apply(this, arguments);
+          };
+          dlopenInterception = "installed";
+        } catch {
+          dlopenInterception = "unavailable";
+        }
+      }
     }
 
     const report = {
@@ -739,8 +883,11 @@
       algorithm: ALGORITHM,
       installed: true,
       moduleInterception: options.interceptModules === false ? "disabled" : "installed",
+      dlopenInterception,
+      cacheInterception,
       platformShim,
       protectionClass: PROTECTION_CLASS,
+      profileMigration,
       status: "installed",
       store: "CODEX_HOME",
     };

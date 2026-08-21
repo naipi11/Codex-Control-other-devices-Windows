@@ -503,7 +503,7 @@ function Set-CcodTransitionStage {
         Validated = @('RecoveryLaunchRequested')
         RecoveryLaunchRequested = @('Recovered')
         Recovered = @()
-        CloseRequested = @('Closed')
+        CloseRequested = @('Closed', 'Recovered')
         Closed = @()
     }
     if ($knownStages -cnotcontains $NewStage -or $legal[$ExpectedStage] -cnotcontains $NewStage) {
