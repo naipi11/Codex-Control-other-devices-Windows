@@ -20,8 +20,8 @@ manages everything automatically.
 
 ## Quick start
 
-1. Download `CodexRemote-fix-2.4.7-setup.exe` and `CodexRemote-fix-2.4.7-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page, then verify the SHA-256.
-2. Run `CodexRemote-fix-2.4.7-setup.exe`; no administrator rights are required.
+1. Download `CodexRemote-fix-2.4.8-setup.exe` and `CodexRemote-fix-2.4.8-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases) page, then verify the SHA-256.
+2. Run `CodexRemote-fix-2.4.8-setup.exe`; no administrator rights are required.
 3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
 ![Settings → Connections → Control other devices (English)](docs/assets/control-other-devices-active-en-US.png)
@@ -57,8 +57,8 @@ the tab, controller enrollment, device list, and remote projects are all working
 
 Every tagged release ships a Windows installer and its SHA-256 checksum as release assets.
 The `.github/workflows/release.yml` workflow builds the installer from the tag automatically,
-so the 2.4.7 release includes the ready-to-run `CodexRemote-fix-2.4.7-setup.exe`
-and `CodexRemote-fix-2.4.7-setup.exe.sha256.txt`.
+so the 2.4.8 release includes the ready-to-run `CodexRemote-fix-2.4.8-setup.exe`
+and `CodexRemote-fix-2.4.8-setup.exe.sha256.txt`.
 
 After a Codex Desktop update, check the [Releases](https://github.com/naipi11/Codex-Control-other-devices-Windows/releases)
 page for a newer installer, or run the **CodexRemote-fix compatibility check** shortcut from the Start menu

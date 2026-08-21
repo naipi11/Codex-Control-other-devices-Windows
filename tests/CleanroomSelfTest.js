@@ -358,6 +358,7 @@ async function rendererPayloadTest(root) {
   assert.throws(() => chooseTarget([avatarOverlay], "renderer"), { code: "TARGET_NOT_FOUND" });
 
   const calls = [];
+  let refreshCalls = 0;
   const client = {
     checkGate(gate) {
       calls.push(gate);
@@ -374,6 +375,10 @@ async function rendererPayloadTest(root) {
     },
     getGateValue(gate) {
       return gate === "782640499" ? 1 : 7;
+    },
+    refreshValuesAsync() {
+      refreshCalls += 1;
+      return Promise.resolve();
     },
   };
   const targetFeatureGate = { enabled: true, metadata: { source: "target" }, value: true };
@@ -392,6 +397,7 @@ async function rendererPayloadTest(root) {
   const source = fs.readFileSync(path.join(root, "..", "src", "runtime", "renderer-payload.js"), "utf8");
   const initial = vm.runInContext(source, context, { filename: "renderer-payload.js" });
   assert.equal(initial.proof, true);
+  assert.equal(refreshCalls, 1);
   assert.equal(client.checkGate("782640499"), false);
   assert.equal(client.checkGate("2055603567"), true);
   assert.equal(client.checkGate("unrelated-gate"), true);

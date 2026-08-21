@@ -31,6 +31,7 @@
 
   const wrapperMarker = Symbol("codex.cleanroom.statsig.gate-wrapper");
   const records = [];
+  const refreshedClients = new WeakSet();
   let scans = 0;
 
   function isObjectLike(value) {
@@ -137,6 +138,21 @@
       return;
     }
     records.push({ kind, methodName, receiver, wrapper });
+  }
+
+  function refreshStatsigClient(value) {
+    if (!isObjectLike(value) || refreshedClients.has(value) || typeof value.refreshValuesAsync !== "function") {
+      return;
+    }
+    refreshedClients.add(value);
+    try {
+      const result = Reflect.apply(value.refreshValuesAsync, value, []);
+      if (result != null && typeof result.catch === "function") {
+        result.catch(() => {});
+      }
+    } catch {
+      // A refresh failure must not disable the gate wrappers or break the renderer.
+    }
   }
 
   function wrapGateMethod(receiver, methodName) {
@@ -256,6 +272,7 @@
       for (const methodName of GATE_METHODS) {
         wrapGateMethod(current.value, methodName);
       }
+      refreshStatsigClient(current.value);
       enqueueDescriptorValues(current.value, queue, current.depth);
     }
     return probe();
