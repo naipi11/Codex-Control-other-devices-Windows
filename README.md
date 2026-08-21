@@ -23,17 +23,16 @@ can upgrade in place without losing settings or device authorization.
 > `127.0.0.1` port. Run it only on a trusted Windows machine, and re-run the compatibility check
 > after every Codex update.
 
-## Before / after evidence
+## What this fixes
 
-![Real before/after capture exhibition](docs/assets/codexremote-fix-before-after-en-US.gif)
+On affected Windows builds, Codex Desktop already contains **Settings → Connections →
+Control other devices**, but a runtime defect hides the tab. CodexRemote-fix restores
+that existing page and leaves the Codex UI, account authorization, and enrollment flow intact.
 
-*The outer frame is an AI-designed exhibition treatment. Every UI panel is a real, redacted Windows capture; the artwork is not a Codex window.*
+![AI-enhanced presentation of a real post-fix Codex capture](docs/assets/codexremote-fix-connections-showcase.gif)
 
-| Before: authorized list missing | After: authorized device visible |
-| --- | --- |
-| ![Real Codex Connections page before the fix](docs/assets/codexremote-fix-real-empty-connections-zh-CN.png) | ![Real Codex Connections page after the fix](docs/assets/codexremote-fix-real-connections-zh-CN.png) |
-
-*The English README uses real captures whose in-app UI language is 简体中文; this is called out explicitly rather than presenting a translated mockup.*
+*AI changed only the presentation frame and lighting. The Codex screenshot inside is a real,
+redacted capture; no UI controls or software windows were invented.*
 
 ## Quick start
 
@@ -55,8 +54,7 @@ needed after upgrading.
 
 Verified on Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`:
 the hidden controller tab, native tray menu, bilingual menu switching, and persistent
-supervisor are working. Existing controller-device enrollment recovery is tracked separately
-in the release notes below.
+supervisor are working.
 
 ## What's new in v2.4.15
 
@@ -65,10 +63,6 @@ in the release notes below.
 - Kept the tray menu bilingual: Follow system, 中文, and English, with in-place state updates.
 - Hardened startup/recovery so an interrupted upgrade can adopt one newly launched ordinary Codex instance without touching device keys.
 - Preserved the existing encrypted device-key store and server-side authorization.
-
-Known issue: on some Codex Windows updates, previously authorized controller devices can disappear from
-**Control other devices** even though the tab is visible. Do not re-pair or delete the key store; profile
-mapping recovery is being handled as a follow-up fix.
 
 ## Everyday use
 
