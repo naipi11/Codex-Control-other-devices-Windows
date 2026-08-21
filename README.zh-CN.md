@@ -20,6 +20,16 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 > 这是非官方运行时兼容方案，会在随机 `127.0.0.1` 端口启用 Chromium 调试接口。
 > 请仅在可信的 Windows 电脑上运行，并在每次 Codex 更新后重新执行兼容性检查。
 
+## 修复前后证据
+
+![真实修复前后截图展览图](docs/assets/codexremote-fix-before-after-zh-CN.gif)
+
+*外框是 AI 生成的科技感展览包装；面板全部来自真实脱敏 Windows 截图，外框不是 Codex 窗口。*
+
+| 修复前：授权列表为空 | 修复后：授权设备可见 |
+| --- | --- |
+| ![真实 Codex“连接”页面修复前](docs/assets/codexremote-fix-real-empty-connections-zh-CN.png) | ![真实 Codex“连接”页面修复后](docs/assets/codexremote-fix-real-connections-zh-CN.png) |
+
 ## 快速开始
 
 1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.15-setup.exe` 和 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`，并核对 SHA-256。

@@ -23,6 +23,18 @@ can upgrade in place without losing settings or device authorization.
 > `127.0.0.1` port. Run it only on a trusted Windows machine, and re-run the compatibility check
 > after every Codex update.
 
+## Before / after evidence
+
+![Real before/after capture exhibition](docs/assets/codexremote-fix-before-after-en-US.gif)
+
+*The outer frame is an AI-designed exhibition treatment. Every UI panel is a real, redacted Windows capture; the artwork is not a Codex window.*
+
+| Before: authorized list missing | After: authorized device visible |
+| --- | --- |
+| ![Real Codex Connections page before the fix](docs/assets/codexremote-fix-real-empty-connections-zh-CN.png) | ![Real Codex Connections page after the fix](docs/assets/codexremote-fix-real-connections-zh-CN.png) |
+
+*The English README uses real captures whose in-app UI language is 简体中文; this is called out explicitly rather than presenting a translated mockup.*
+
 ## Quick start
 
 1. Download `CodexRemote-fix-2.4.15-setup.exe` and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
