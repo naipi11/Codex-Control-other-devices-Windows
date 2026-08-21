@@ -1,4 +1,4 @@
-# Codex Control other devices 持久托盘守护程序设计
+# CodexRemote-fix 持久托盘守护程序设计
 
 状态：设计内容已逐段确认，等待书面规格审阅
 
@@ -369,7 +369,7 @@
 
 - 同步更新 `README.md`、`README.en.md`、`docs/TECHNICAL.md`、`docs/CLEANROOM.md` 和 `SECURITY.md`。
 - 手动会话模式继续保留，作为诊断和保守回退入口。
-- 当前正式开发 checkout 为 `C:\Users\33384\Documents\Codex-Control-other-devices-Windows`。
+- 当前正式开发 checkout 为 `CodexRemote-fix` 仓库；已有本地 checkout 的目录名可保留，以避免破坏旧路径引用。
 - 功能分支为 `codex/persistent-tray-supervisor`。
 - 旧日期归档 checkout 保持不变。
 - 设计文档独立提交；后续实施计划与代码提交分离，便于审查。
