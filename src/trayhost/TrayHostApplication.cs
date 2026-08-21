@@ -1,4 +1,6 @@
 using System;
+using System.Diagnostics;
+using System.IO;
 
 internal sealed class TrayHostApplication : IDisposable
 {
@@ -90,8 +92,31 @@ internal sealed class TrayHostApplication : IDisposable
         {
             TrayPoint point;
             if (!Win32TrayPlatform.GetCursorPosition(out point)) { point = new TrayPoint(0, 0); }
-            try { _window.HandleContextMenu(point); } catch { }
+            WriteDiagnostic("callback message=" + message.ToString("x") + " wParam=" + wParam.ToInt64().ToString("x") + " lParam=" + lParam.ToInt64().ToString("x") + " revision=" + _window.CurrentRevision.ToString() + " menuOpen=" + _window.MenuOpen.ToString());
+            try
+            {
+                uint? result = _window.HandleContextMenu(point);
+                WriteDiagnostic("callback handled result=" + (result.HasValue ? result.Value.ToString() : "null") + " revision=" + _window.CurrentRevision.ToString());
+            }
+            catch (Exception error)
+            {
+                WriteDiagnostic("callback error=" + error.GetType().Name);
+            }
         }
+    }
+
+    private static void WriteDiagnostic(string message)
+    {
+        try
+        {
+            string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexControlOtherDevices", "logs");
+            Directory.CreateDirectory(root);
+            string path = Path.Combine(root, "trayhost-callback.log");
+            File.AppendAllText(path, DateTime.UtcNow.ToString("o") + " pid=" + Process.GetCurrentProcess().Id.ToString() + " " + message + Environment.NewLine);
+            FileInfo info = new FileInfo(path);
+            if (info.Length > 64 * 1024) { File.WriteAllText(path, DateTime.UtcNow.ToString("o") + " pid=" + Process.GetCurrentProcess().Id.ToString() + " log-truncated" + Environment.NewLine); }
+        }
+        catch { }
     }
 
     public void Dispose()

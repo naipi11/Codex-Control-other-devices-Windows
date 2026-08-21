@@ -283,6 +283,20 @@ function Get-CcodDefaultNativeProcess {
     }
 }
 
+function Get-CcodProcessRendererProbe {
+    param([int]$RendererPort, [hashtable]$Adapters)
+    try {
+        $adapter = Get-CcodProcessAdapters -Adapters $Adapters
+        $targets = @(& $adapter.ReadRendererTargets $RendererPort)
+        $exact = @($targets | Where-Object {
+            $null -ne $_ -and $null -ne $_.PSObject.Properties['type'] -and $null -ne $_.PSObject.Properties['url'] -and
+            ($_.type -ceq 'page' -or $_.type -ceq 'webview') -and $_.url -ceq 'app://-/index.html'
+        })
+        if ($exact.Count -ne 1) { return [pscustomobject]@{ Valid = $false; RendererUrl = $null } }
+        return [pscustomobject]@{ Valid = $true; RendererUrl = 'app://-/index.html' }
+    } catch { return [pscustomobject]@{ Valid = $false; RendererUrl = $null } }
+}
+
 function Get-CcodProcessAdapters {
     param([hashtable]$Adapters)
 
@@ -310,7 +324,39 @@ function Get-CcodProcessAdapters {
             Initialize-CcodProcessNativeApi
             @([Ccod.Persistence.Native.TcpListenerTableV1]::GetListenerOwners([string]$Address, [int]$Port))
         }
-        ProbeSpecial = { param($ProcessId, $RendererPort, $MainPort) [pscustomobject]@{ Valid = $false; RendererUrl = $null } }
+        ReadRendererTargets = {
+            param($RendererPort)
+            $response = $null
+            $reader = $null
+            try {
+                $request = [Net.HttpWebRequest][Net.WebRequest]::Create(('http://127.0.0.1:{0}/json/list' -f [int]$RendererPort))
+                $request.Timeout = 1000
+                $request.AllowAutoRedirect = $false
+                $request.Proxy = $null
+                $response = $request.GetResponse()
+                if ($response.StatusCode -ne [Net.HttpStatusCode]::OK) { return @() }
+                $reader = [IO.StreamReader]::new($response.GetResponseStream(), [Text.UTF8Encoding]::new($false))
+                $value = $reader.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop
+                if ($null -eq $value -or $value -isnot [array]) { return @() }
+                return @($value)
+            } catch { return @() }
+            finally {
+                if ($null -ne $reader) { $reader.Dispose() }
+                if ($null -ne $response) { $response.Dispose() }
+            }
+        }
+        ProbeSpecial = {
+            param($ProcessId, $RendererPort, $MainPort)
+            try {
+                $targets = @(& $resolved.ReadRendererTargets $RendererPort)
+                $exact = @($targets | Where-Object {
+                    $null -ne $_ -and $null -ne $_.PSObject.Properties['type'] -and $null -ne $_.PSObject.Properties['url'] -and
+                    ($_.type -ceq 'page' -or $_.type -ceq 'webview') -and $_.url -ceq 'app://-/index.html'
+                })
+                if ($exact.Count -eq 1) { return [pscustomobject]@{ Valid = $true; RendererUrl = 'app://-/index.html' } }
+            } catch { }
+            return [pscustomobject]@{ Valid = $false; RendererUrl = $null }
+        }.GetNewClosure()
         GetProcess = { param($ProcessId, $StatusEvidence) Get-CcodProcessSnapshot -ProcessId $ProcessId -StatusEvidence $StatusEvidence }
         ListProcessIds = { @((Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue).Id) }
         StopProcess = {
@@ -374,6 +420,20 @@ function Get-CcodProcessAdapters {
     }
     if ($null -ne $Adapters) {
         foreach ($name in $Adapters.Keys) { $resolved[$name] = $Adapters[$name] }
+    }
+    if ($null -eq $Adapters -or -not $Adapters.ContainsKey('ProbeSpecial')) {
+        $resolved.ProbeSpecial = {
+            param($ProcessId, $RendererPort, $MainPort)
+            try {
+                $targets = @(& $resolved.ReadRendererTargets $RendererPort)
+                $exact = @($targets | Where-Object {
+                    $null -ne $_ -and $null -ne $_.PSObject.Properties['type'] -and $null -ne $_.PSObject.Properties['url'] -and
+                    ($_.type -ceq 'page' -or $_.type -ceq 'webview') -and $_.url -ceq 'app://-/index.html'
+                })
+                if ($exact.Count -eq 1) { return [pscustomobject]@{ Valid = $true; RendererUrl = 'app://-/index.html' } }
+            } catch { }
+            return [pscustomobject]@{ Valid = $false; RendererUrl = $null }
+        }.GetNewClosure()
     }
     if ($null -eq $Adapters -or -not $Adapters.ContainsKey('RequestGracefulClose')) {
         $resolved.RequestGracefulClose = {

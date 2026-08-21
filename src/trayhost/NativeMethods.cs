@@ -158,7 +158,22 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     public bool AppendSubMenu(IntPtr menu, IntPtr child, string text) { return AppendMenuW(menu, TrayNativeConstants.MfPopup | TrayNativeConstants.MfString, new UIntPtr(unchecked((ulong)child.ToInt64())), text ?? String.Empty); }
     public bool ShowOwner(IntPtr owner) { ShowWindowNative(owner, TrayNativeConstants.SwShownoactivate); return true; }
     public bool HideOwner(IntPtr owner) { ShowWindowNative(owner, TrayNativeConstants.SwHide); return true; }
-    public bool SetForegroundWindow(IntPtr owner) { return SetForegroundWindowNative(owner); }
+    public bool SetForegroundWindow(IntPtr owner)
+    {
+        uint foregroundProcessId;
+        uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindowNative(), out foregroundProcessId);
+        uint ownerProcessId;
+        uint ownerThread = GetWindowThreadProcessId(owner, out ownerProcessId);
+        uint currentThread = GetCurrentThreadId();
+        bool attachedForeground = foregroundThread != 0U && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
+        bool attachedOwner = ownerThread != 0U && ownerThread != currentThread && ownerThread != foregroundThread && AttachThreadInput(currentThread, ownerThread, true);
+        try { return SetForegroundWindowNative(owner); }
+        finally
+        {
+            if (attachedOwner) { AttachThreadInput(currentThread, ownerThread, false); }
+            if (attachedForeground) { AttachThreadInput(currentThread, foregroundThread, false); }
+        }
+    }
     public IntPtr GetForegroundWindow() { return GetForegroundWindowNative(); }
     public uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters) { return TrackPopupMenuExNative(menu, flags, x, y, owner, parameters); }
     public bool PostMessage(IntPtr owner, uint message, UIntPtr wParam, IntPtr lParam) { return PostMessageW(owner, message, wParam, lParam); }
@@ -238,17 +253,20 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     [DllImport("imm32.dll", SetLastError = true)] private static extern IntPtr ImmGetContext(IntPtr window);
     [DllImport("imm32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ImmReleaseContext(IntPtr window, IntPtr context);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool Shell_NotifyIconW(uint message, ref TrayIconData data);
-    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr CreatePopupMenuNative();
+    [DllImport("user32.dll", EntryPoint = "CreatePopupMenu", SetLastError = true)] private static extern IntPtr CreatePopupMenuNative();
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr LoadImageW(IntPtr instance, IntPtr name, uint type, int width, int height, uint flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr LoadIconW(IntPtr instance, IntPtr name);
-    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyIconNative(IntPtr icon);
+    [DllImport("user32.dll", EntryPoint = "DestroyIcon", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyIconNative(IntPtr icon);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AppendMenuW(IntPtr menu, uint flags, UIntPtr newItem, string text);
-    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ShowWindowNative(IntPtr window, int command);
-    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetForegroundWindowNative(IntPtr window);
-    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr GetForegroundWindowNative();
-    [DllImport("user32.dll", SetLastError = true)] private static extern uint TrackPopupMenuExNative(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);
+    [DllImport("user32.dll", EntryPoint = "ShowWindow", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ShowWindowNative(IntPtr window, int command);
+    [DllImport("user32.dll", EntryPoint = "SetForegroundWindow", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetForegroundWindowNative(IntPtr window);
+    [DllImport("user32.dll", EntryPoint = "GetForegroundWindow", SetLastError = true)] private static extern IntPtr GetForegroundWindowNative();
+    [DllImport("user32.dll", SetLastError = true)] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AttachThreadInput(uint attachThread, uint attachToThread, [MarshalAs(UnmanagedType.Bool)] bool attach);
+    [DllImport("user32.dll", EntryPoint = "TrackPopupMenuEx", SetLastError = true)] private static extern uint TrackPopupMenuExNative(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);
     [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyMenuNative(IntPtr menu);
-    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EndMenuNative();
+    [DllImport("user32.dll", EntryPoint = "DestroyMenu", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyMenuNative(IntPtr menu);
+    [DllImport("user32.dll", EntryPoint = "EndMenu", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EndMenuNative();
     [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyWindow(IntPtr window);
 }

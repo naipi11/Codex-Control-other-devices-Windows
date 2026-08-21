@@ -137,6 +137,29 @@ internal static class TrayHostNativeSelfTest
         AssertTrue(!TrayHostApplication.IsContextMenuEvent(TrayNativeConstants.WmApp + 1U, new IntPtr(0x0201)), "left click remains inert");
     }
 
+    private static void TestRealNativePInvokeSurface()
+    {
+        Win32TrayPlatform platform = new Win32TrayPlatform();
+        IntPtr owner = platform.CreateOwner();
+        IntPtr menu = IntPtr.Zero;
+        try
+        {
+            AssertTrue(owner != IntPtr.Zero, "real native owner is created");
+            AssertTrue(platform.ShowOwner(owner), "real ShowWindow entry point resolves");
+            menu = platform.CreatePopupMenu();
+            AssertTrue(menu != IntPtr.Zero, "real CreatePopupMenu entry point resolves");
+            AssertTrue(platform.AppendMenu(menu, TrayNativeConstants.MfString, new UIntPtr(1U), "probe"), "real AppendMenu entry point resolves");
+            platform.SetForegroundWindow(owner);
+            platform.GetForegroundWindow();
+        }
+        finally
+        {
+            if (menu != IntPtr.Zero) { platform.DestroyMenu(menu); }
+            platform.HideOwner(owner);
+            platform.DestroyOwner(owner);
+        }
+    }
+
     public static int Main(string[] args)
     {
         try
@@ -148,6 +171,7 @@ internal static class TrayHostNativeSelfTest
             TestSelectedCommandAndTaskbarRestore();
             TestNoHimcFailureIsSafe();
             TestShellRightClickNotificationMapping();
+            TestRealNativePInvokeSurface();
             Console.WriteLine("TrayHost native self-tests passed: 5");
             return 0;
         }

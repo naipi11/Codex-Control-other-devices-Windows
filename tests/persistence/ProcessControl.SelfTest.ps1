@@ -139,6 +139,28 @@ function New-CcodSpecialStatus {
     }
 }
 
+try {
+    Invoke-CcodTest 'default process adapter recognizes exactly one Codex renderer target' {
+        $module = Get-Module ProcessControl
+        $targets = @([pscustomobject]@{ type = 'page'; url = 'app://-/index.html' })
+        $adapters = & $module {
+            param($fixture)
+            Get-CcodProcessAdapters -Adapters @{ ReadRendererTargets = { param($Port) return @($fixture) }.GetNewClosure() }
+        } $targets
+        $probe = & $adapters.ProbeSpecial 100 9335 52359
+        Assert-CcodTrue $probe.Valid 'the default probe accepts the exact renderer target'
+        Assert-CcodEqual 'app://-/index.html' $probe.RendererUrl 'the default probe preserves the exact renderer URL'
+
+        $adapters = & $module {
+            Get-CcodProcessAdapters -Adapters @{ ReadRendererTargets = { param($Port) return @([pscustomobject]@{ type = 'page'; url = 'app://-/index.html' }, [pscustomobject]@{ type = 'page'; url = 'app://-/index.html' }) } }
+        }
+        $probe = & $adapters.ProbeSpecial 100 9335 52359
+        Assert-CcodTrue (-not $probe.Valid) 'duplicate renderer targets fail closed'
+    }
+} catch {
+    throw
+}
+
 function Assert-CcodStopResultContract {
     param($Result, [string]$Outcome, [bool]$Stopped, $Snapshot, [string]$Message)
 

@@ -1119,8 +1119,19 @@ function Invoke-CcodRepairRenderer {
             if(-not (& $adapter.WaitPortClosed $codex.mainPort (Get-CcodProcessControlTimeout $Request.timeoutMilliseconds))){Throw-CcodSessionError 'CCOD_MAIN_INSPECTOR_OPEN' 'Main Inspector refusal is not proven before renderer repair' $codex.mainPort}
             $bridge=Invoke-CcodSessionBridge -Mode Renderer -NodePath $probe.NodePath -Paths $Paths -RendererPort $codex.rendererPort -MainPort $null -TimeoutMilliseconds $Request.timeoutMilliseconds -Adapter $adapter
             $result.probes=ConvertTo-CcodPublicBridgeProbes $bridge Renderer;$result.special=ConvertTo-CcodSessionSpecial $current
-            $live=[pscustomobject][ordered]@{Valid=$true;runtimeId=$state.Status.session.runtimeId;pid=[int]$codex.pid;creationTimeUtc=$codex.creationTimeUtc;packageFullName=$codex.packageFullName;packageVersion=$codex.packageVersion;appAsarSha256=$codex.appAsarSha256;mainPort=[int]$codex.mainPort;rendererPort=[int]$codex.rendererPort;mainProbe='Closed';rendererProbe='BridgeValid'}
-            & $adapter.WriteStatus $Paths.StateRoot $state.Status $live
+            $migratedStatus=[pscustomobject][ordered]@{schemaVersion=1;session=[pscustomobject][ordered]@{
+                supervisorPid=[int]$Request.supervisorIdentity.pid
+                supervisorCreationTimeUtc=[string]$Request.supervisorIdentity.creationTimeUtc
+                sessionId=[string]$Request.supervisorIdentity.sessionId
+                runtimeId=[string]$Request.runtimeId
+                sessionState='Active'
+                codex=$codex
+            }}
+            $live=[pscustomobject][ordered]@{Valid=$true;runtimeId=$Request.runtimeId;pid=[int]$codex.pid;creationTimeUtc=$codex.creationTimeUtc;packageFullName=$codex.packageFullName;packageVersion=$codex.packageVersion;appAsarSha256=$codex.appAsarSha256;mainPort=[int]$codex.mainPort;rendererPort=[int]$codex.rendererPort;mainProbe='Closed';rendererProbe='BridgeValid'}
+            & $adapter.WriteStatus $Paths.StateRoot $migratedStatus $live
+            $verified=& $adapter.ReadVerified $Paths.StateRoot
+            $succeeded=New-CcodVerifiedStoreWithRecord $verified $probe $Request.runtimeId 'Succeeded' 'Valid' (& $adapter.UtcNow)
+            & $adapter.WriteVerified $Paths.StateRoot $succeeded
             $result.ok=$true;$result.outcome='NoAction';$result.safeState='SpecialValidated';$result.stage='RendererRepaired';return $result
         }catch{
             Write-CcodSessionDiagnostic $result 'RepairRenderer' $Request.transactionId $result.stage (Get-CcodSessionErrorCode $_) $Paths $adapter

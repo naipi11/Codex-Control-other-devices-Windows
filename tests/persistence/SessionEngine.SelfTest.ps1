@@ -1284,8 +1284,8 @@ try {
         Assert-CcodEqual "$($paths.OrchestratorPath),--mode,renderer,--renderer-port,41001,--timeout-ms,30000" ($captured.Arguments -join ',') 'renderer repair passes renderer mode, its recorded port, and the request timeout'
         Assert-CcodTrue (($captured.Arguments -join ',') -cnotmatch 'main') 'renderer repair never passes a main connector argument'
         Assert-CcodEqual 'Wait:41002:30000,InvokeNode' ($repairOrder -join ',') 'explicit main refusal is proven before renderer-only child invocation'
-        Assert-CcodEqual 'runtime-old' $captured.StatusRuntime 'post-upgrade repair preserves the old status runtime'
-        Assert-CcodEqual 'runtime-old' $captured.LiveRuntime 'post-upgrade repair proves status with the old provenance runtime'
+        Assert-CcodEqual 'runtime-1' $captured.StatusRuntime 'post-upgrade repair migrates status to the current runtime'
+        Assert-CcodEqual 'runtime-1' $captured.LiveRuntime 'post-upgrade repair proves status with the current runtime'
         Assert-CcodEqual 22 $restartRequest.supervisorIdentity.pid 'repair regression uses a genuinely restarted supervisor identity'
 
         $missing=Invoke-CcodRepairRenderer -Request (New-CcodEngineRequest -Action RepairRenderer -TransactionId '36cafc98-f225-43bd-ae33-b9a608ac68da') -Paths $paths -Adapters (New-CcodEngineAdapters -Processes @())
