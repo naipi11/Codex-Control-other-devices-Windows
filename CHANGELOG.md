@@ -8,13 +8,11 @@ This file keeps the short bilingual summary for every published release.
 
 - Replaced generated UI mockups in the README with redacted captures from the real Codex Connections page and Windows tray menu.
 - Added an AI-designed exhibition frame and before/after animation built only from those real captures.
-- Added a one-shot post-injection refresh for the existing remote-control enrollment catalog.
 
 ### 简体中文
 
 - 将 README 中的生成式 UI 示意图替换为真实 Codex“连接”页面和 Windows 托盘菜单的脱敏截图。
 - 新增 AI 科技感展览外框与前后对照动图；动图面板全部来自真实截图。
-- 新增注入完成后的一次远程控制授权设备目录刷新。
 
 ## v2.4.15
 
