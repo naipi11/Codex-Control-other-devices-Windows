@@ -59,6 +59,21 @@ internal static class TrayHostProtocolSelfTest
         AssertTrue(threw, "bootstrap direction mismatch is rejected");
     }
 
+    private static void TestBootstrapAcceptsUtf8Preamble()
+    {
+        byte[] payload = Encoding.UTF8.GetBytes("hello");
+        MemoryStream frame = new MemoryStream();
+        ProtocolCodec.WriteBootstrap(frame, ProtocolFrame.Bootstrap(ProtocolDirection.ParentToHost, TrayHostMessageType.ParentHello, payload));
+        MemoryStream stream = new MemoryStream();
+        byte[] preamble = Encoding.UTF8.GetPreamble();
+        stream.Write(preamble, 0, preamble.Length);
+        byte[] bytes = frame.ToArray();
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Position = 0;
+        ProtocolFrame parsed = ProtocolCodec.ReadBootstrap(stream, ProtocolDirection.ParentToHost);
+        AssertEqual("hello", Encoding.UTF8.GetString(parsed.Payload), "bootstrap tolerates the redirected PowerShell UTF-8 preamble");
+    }
+
     private static void TestAuthenticatedFrameRejectsReplayAndTamper()
     {
         byte[] key = Enumerable.Repeat((byte)0x42, 32).ToArray();
@@ -118,10 +133,11 @@ internal static class TrayHostProtocolSelfTest
             TestRfc5869Expand();
             TestBootstrapFrameRoundTrip();
             TestBootstrapRejectsWrongDirection();
+            TestBootstrapAcceptsUtf8Preamble();
             TestAuthenticatedFrameRejectsReplayAndTamper();
             TestLargeEpochUsesUnsignedWireEncoding();
             TestPresentationSnapshotValidation();
-            Console.WriteLine("TrayHost protocol self-tests passed: 6");
+            Console.WriteLine("TrayHost protocol self-tests passed: 7");
             return 0;
         }
         catch (Exception error)
