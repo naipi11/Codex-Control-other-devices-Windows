@@ -33,8 +33,9 @@ that existing page and leaves the Codex UI, account authorization, and enrollmen
 
 ## Quick start
 
-1. Download `CodexRemote-fix-2.4.15-setup.exe` and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
-2. Run `CodexRemote-fix-2.4.15-setup.exe`; no administrator rights are required.
+1. Download `CodexRemote-fix-2.4.16-setup.exe` and `CodexRemote-fix-2.4.16-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
+2. Run `CodexRemote-fix-2.4.16-setup.exe`; no administrator rights are required.
+   Windows 10 users should ensure that .NET Framework 4.8 is installed for the native TrayHost.
 3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
 The current installer and its SHA-256 checksum are always published on the
@@ -49,13 +50,12 @@ Verified on Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`:
 the hidden controller tab, native tray menu, bilingual menu switching, and persistent
 supervisor are working.
 
-## What's new in v2.4.15
+## What's new in v2.4.16
 
-- Rebuilt the tray surface as a compiled native Win32 TrayHost using the normal Windows context-menu behavior.
-- Added a product icon, Start-menu registration, and a **CodexRemote-fix** desktop shortcut.
-- Kept the tray menu bilingual: Follow system, 中文, and English, with in-place state updates.
-- Hardened startup/recovery so an interrupted upgrade can adopt one newly launched ordinary Codex instance without touching device keys.
-- Preserved the existing encrypted device-key store and server-side authorization.
+- Fixed a Windows PowerShell redirected-input UTF-8 preamble that could make TrayHost exit before signaling readiness.
+- Kept strict protocol validation: only the initial bootstrap frame accepts one BOM; authenticated frames remain unchanged.
+- Added Windows GitHub Actions validation for pull requests and pushes to `main`.
+- Preserved the existing native Win32 tray, encrypted device-key store, and server-side authorization.
 
 ## Everyday use
 
@@ -71,8 +71,8 @@ supervisor are working.
 
 Every tagged release ships a Windows installer and its SHA-256 checksum as release assets.
 The `.github/workflows/release.yml` workflow builds the installer from the tag automatically,
-so the 2.4.15 release includes the ready-to-run `CodexRemote-fix-2.4.15-setup.exe`
-and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`.
+so the 2.4.16 release includes the ready-to-run `CodexRemote-fix-2.4.16-setup.exe`
+and `CodexRemote-fix-2.4.16-setup.exe.sha256.txt`.
 
 Each release appends a short bilingual change summary to this README and to the GitHub release body.
 The full history is in [CHANGELOG.md](CHANGELOG.md).
