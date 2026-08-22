@@ -1261,6 +1261,8 @@ $results += Invoke-CcodTest 'README and release workflow publish current install
     Assert-CcodTrue ($workflow -cmatch '(?m)^name: CodexRemote-fix release\r?$') 'release workflow uses public product branding'
     Assert-CcodTrue ($workflow -cmatch '(?m)^\s+name: CodexRemote-fix installer\r?$') 'uploaded artifact uses public product branding'
     Assert-CcodTrue ($workflow -cmatch '--title "CodexRemote-fix \$version"') 'GitHub release title uses public product branding'
+    Assert-CcodTrue ($workflow -cmatch 'englishSection = \[regex\]::Match') 'GitHub release notes extract the English changelog section only'
+    Assert-CcodTrue ($workflow -cmatch 'has no English release section') 'release fails clearly when the English changelog section is missing'
 }
 
 $results += Invoke-CcodTest 'installer carries the Inno contract needed by its self-validation' {
