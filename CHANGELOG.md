@@ -10,7 +10,7 @@ No unreleased changes.
 
 ### English
 
-- Added a bilingual post-install prompt: restart Codex now or restart it manually later.
+- Added a localized post-install prompt: restart Codex now or restart it manually later.
 - The installer never closes or restarts Codex automatically; **Later** leaves the current session untouched.
 - **Restart now** invokes the existing safe SessionController path only after explicit confirmation.
 
