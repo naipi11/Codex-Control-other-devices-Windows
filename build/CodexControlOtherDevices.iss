@@ -25,7 +25,7 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-CloseApplications=force
+CloseApplications=no
 RestartApplications=no
 SetupLogging=yes
 MinVersion=10.0.17763
@@ -61,6 +61,7 @@ Source: "..\Start-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignore
 Source: "..\Reset-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Test-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Prepare-CcodRemoteUpgrade.ps1"; DestDir: "{tmp}"; Flags: dontcopy
+Source: "..\Prompt-CcodRestart.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 
 [InstallDelete]
 Type: files; Name: "{userprograms}\Codex Control other devices\Codex Control other devices for Windows.lnk"
@@ -118,5 +119,22 @@ begin
       Result := 'The previous CodexRemote-fix supervisor could not be stopped safely.';
   except
     Result := 'The previous CodexRemote-fix supervisor could not be stopped safely.';
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+  ScriptPath: String;
+  Parameters: String;
+begin
+  if (CurStep <> ssPostInstall) or WizardSilent then
+    Exit;
+  try
+    ExtractTemporaryFile('Prompt-CcodRestart.ps1');
+    ScriptPath := ExpandConstant('{tmp}\Prompt-CcodRestart.ps1');
+    Parameters := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -AppRoot "' + ExpandConstant('{app}') + '" -InstallRoot "' + ExpandConstant('{localappdata}\CodexControlOtherDevices') + '"';
+    Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  except
   end;
 end;

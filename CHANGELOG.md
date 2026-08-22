@@ -6,6 +6,20 @@ This file keeps the short bilingual summary for every published release.
 
 No unreleased changes.
 
+## v2.4.20
+
+### English
+
+- Added a bilingual post-install prompt: restart Codex now or restart it manually later.
+- The installer never closes or restarts Codex automatically; **Later** leaves the current session untouched.
+- **Restart now** invokes the existing safe SessionController path only after explicit confirmation.
+
+### 简体中文
+
+- 安装完成后新增双语提示，可选择立即重启 Codex 或稍后手动重启。
+- 安装器不会自动关闭或重启 Codex；选择“稍后”会保持当前会话不受影响。
+- 只有明确选择“立即重启”后，才调用现有安全 SessionController 流程。
+
 ## v2.4.19
 
 ### English
