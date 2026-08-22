@@ -6,11 +6,11 @@ This file keeps the short bilingual summary for every published release.
 
 ### English
 
-- Added an AI-enhanced showcase built from a real post-fix Codex capture; the Codex UI itself was not redrawn.
+- Added a polished showcase image based on the real post-fix Codex capture.
 
 ### 简体中文
 
-- 新增基于真实修复后 Codex 截图的 AI 展示图；Codex 界面本身未被重绘。
+- 新增基于真实修复后 Codex 截图的精修展示图。
 
 ## v2.4.15
 
