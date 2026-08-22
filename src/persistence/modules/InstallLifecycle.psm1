@@ -151,7 +151,10 @@ function Test-CcodLifecycleRemovePath {
 }
 
 function Get-CcodLifecycleSourceFiles {
-    param([Parameter(Mandatory)][string]$SourceRoot)
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [switch]$RequireTrayHost
+    )
 
     $root = Get-CcodLifecycleCanonicalRoot -Path $SourceRoot -Kind 'Source root'
     if (-not [IO.Directory]::Exists($root)) {
@@ -172,22 +175,23 @@ function Get-CcodLifecycleSourceFiles {
     )
     foreach ($leaf in $required) { $relative.Add($leaf) }
     $trayHostRoot = Join-Path $root 'bin'
-    if (-not [IO.Directory]::Exists($trayHostRoot)) {
-        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'TrayHost artifact directory is missing.' $trayHostRoot
-    }
-    $expectedTrayHost = @('CodexRemote.TrayHost.exe','CodexRemote.TrayHost.exe.config','trayhost-build-provenance.json')
-    $actualTrayHost = @(Get-ChildItem -LiteralPath $trayHostRoot -Force -ErrorAction Stop)
-    if (@($actualTrayHost | Where-Object { $_.PSIsContainer -or $expectedTrayHost -cnotcontains $_.Name }).Count -gt 0 -or
-        (@($actualTrayHost.Name | Sort-Object) -join ',') -cne (@($expectedTrayHost | Sort-Object) -join ',')) {
-        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'TrayHost artifact set is incomplete or contains unknown files.' $trayHostRoot
-    }
-    foreach ($trayFile in $actualTrayHost) {
-        $trayReparse = Test-CcodLifecycleReparse -Path $trayFile.FullName
-        $trayAds = Test-CcodLifecycleAlternateDataStreams -Path $trayFile.FullName
-        if ($trayReparse -or $trayAds) {
-            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'TrayHost artifact is a reparse point or has alternate data streams.' $trayFile.FullName
+    if ([IO.Directory]::Exists($trayHostRoot)) {
+        $expectedTrayHost = @('CodexRemote.TrayHost.exe','CodexRemote.TrayHost.exe.config','trayhost-build-provenance.json')
+        $actualTrayHost = @(Get-ChildItem -LiteralPath $trayHostRoot -Force -ErrorAction Stop)
+        if (@($actualTrayHost | Where-Object { $_.PSIsContainer -or $expectedTrayHost -cnotcontains $_.Name }).Count -gt 0 -or
+            (@($actualTrayHost.Name | Sort-Object) -join ',') -cne (@($expectedTrayHost | Sort-Object) -join ',')) {
+            Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'TrayHost artifact set is incomplete or contains unknown files.' $trayHostRoot
         }
-        $relative.Add('bin\' + $trayFile.Name)
+        foreach ($trayFile in $actualTrayHost) {
+            $trayReparse = Test-CcodLifecycleReparse -Path $trayFile.FullName
+            $trayAds = Test-CcodLifecycleAlternateDataStreams -Path $trayFile.FullName
+            if ($trayReparse -or $trayAds) {
+                Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_REPARSE' 'TrayHost artifact is a reparse point or has alternate data streams.' $trayFile.FullName
+            }
+            $relative.Add('bin\' + $trayFile.Name)
+        }
+    } elseif ($RequireTrayHost) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'TrayHost artifact directory is missing.' $trayHostRoot
     }
     $runtimeRoot = Join-Path $root 'src\runtime'
     foreach ($item in Get-ChildItem -LiteralPath $runtimeRoot -Force -Recurse -ErrorAction Stop) {
@@ -591,7 +595,7 @@ function Get-CcodLifecycleAdapters {
         ValidateSource = {
             param($SourceRoot)
             try {
-                $files = @(Get-CcodLifecycleSourceFiles -SourceRoot $SourceRoot)
+                $files = @(Get-CcodLifecycleSourceFiles -SourceRoot $SourceRoot -RequireTrayHost)
                 return $files.Count -gt 0
             } catch {
                 return $false
@@ -892,7 +896,7 @@ function Invoke-CcodInstall {
     }
     $projectVersion = & $adapters.GetProjectVersion $sourceRoot
     $nodeCandidates = @(Get-CcodLifecycleNodeCandidates -Adapters $adapters)
-    $files = @(Get-CcodLifecycleSourceFiles -SourceRoot $sourceRoot)
+    $files = @(Get-CcodLifecycleSourceFiles -SourceRoot $sourceRoot -RequireTrayHost)
 
     $existingPointer = $null
     $activePath = Join-Path $root 'active.json'
