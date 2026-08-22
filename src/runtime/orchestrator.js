@@ -10,6 +10,7 @@ const path = require("node:path");
 const { connectTarget, discoverTargets, evaluate } = require("./lib/cdp.js");
 
 const MAIN_OPTIONS_SLOT = "__CODEX_CLEANROOM_MAIN_OPTIONS__";
+const RENDERER_OPTIONS_SLOT = "__CODEX_CLEANROOM_RENDERER_OPTIONS__";
 
 function cliError(code, message) {
   const error = new Error(message);
@@ -199,6 +200,59 @@ function injectionExpression(source) {
   ].join("\n");
 }
 
+function rendererInjectionExpression(source, enrollmentMapping = null) {
+  const options = enrollmentMapping == null ? {} : { enrollmentMapping };
+  return [
+    "(() => {",
+    `  globalThis[${JSON.stringify(RENDERER_OPTIONS_SLOT)}] = ${JSON.stringify(options)};`,
+    "  try {",
+    `    return (0, eval)(${JSON.stringify(source)});`,
+    "  } finally {",
+    `    delete globalThis[${JSON.stringify(RENDERER_OPTIONS_SLOT)}];`,
+    "  }",
+    "})()",
+  ].join("\n");
+}
+
+function extractEnrollmentMapping(value) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 0 || entries.length > 32) {
+    return null;
+  }
+  const expectedKeys = [
+    "accountUserId",
+    "algorithm",
+    "clientId",
+    "keyId",
+    "protectionClass",
+    "publicKeySpkiDerBase64",
+  ].sort();
+  const output = {};
+  for (const [key, record] of entries) {
+    if (typeof key !== "string" || key.length === 0 || key.length > 2048 ||
+        record == null || typeof record !== "object" || Array.isArray(record)) {
+      return null;
+    }
+    const actualKeys = Object.keys(record).sort();
+    if (actualKeys.length !== expectedKeys.length || actualKeys.some((field, index) => field !== expectedKeys[index])) {
+      return null;
+    }
+    if (record.algorithm !== "ecdsa_p256_sha256" || record.protectionClass !== "os_protected_nonextractable" ||
+        typeof record.accountUserId !== "string" || record.accountUserId.length === 0 || record.accountUserId.length > 256 ||
+        typeof record.clientId !== "string" || record.clientId.length === 0 || record.clientId.length > 256 ||
+        typeof record.keyId !== "string" || record.keyId.length === 0 || record.keyId.length > 256 ||
+        typeof record.publicKeySpkiDerBase64 !== "string" || record.publicKeySpkiDerBase64.length === 0 ||
+        record.publicKeySpkiDerBase64.length > 4096) {
+      return null;
+    }
+    output[key] = { ...record };
+  }
+  return output;
+}
+
 function checkPortOnce(port, timeoutMs = 300) {
   return new Promise((resolve) => {
     const socket = net.createConnection({ family: 4, host: "127.0.0.1", port });
@@ -249,7 +303,11 @@ async function installMainPayload(options, source, deadline) {
     client.close();
   }
   const closure = await waitForExplicitRefusal(options.mainPort, remaining(deadline));
-  return { closure, report: sanitizeReport(report) };
+  const enrollmentMapping = extractEnrollmentMapping(report?.rendererEnrollmentMapping);
+  if (report != null && typeof report === "object" && !Array.isArray(report)) {
+    delete report.rendererEnrollmentMapping;
+  }
+  return { closure, enrollmentMapping, report: sanitizeReport(report) };
 }
 
 async function waitForRendererProof(client, deadline, dependencies = {}) {
@@ -277,11 +335,12 @@ async function installRendererPayload(options, source, deadline, dependencies = 
     throw cliError("TARGET_NOT_FOUND", "Renderer target must be the exact Codex page or webview URL");
   }
   const client = await connectRendererTarget(target, options.rendererPort, remaining(deadline));
+  const rendererSourceExpression = rendererInjectionExpression(source, dependencies.enrollmentMapping ?? null);
   try {
     await client.call("Runtime.enable", {}, remaining(deadline));
     await client.call("Page.enable", {}, remaining(deadline));
-    const persistent = await client.call("Page.addScriptToEvaluateOnNewDocument", { source }, remaining(deadline));
-    const installReport = await evaluateRenderer(client, source, remaining(deadline));
+    const persistent = await client.call("Page.addScriptToEvaluateOnNewDocument", { source: rendererSourceExpression }, remaining(deadline));
+    const installReport = await evaluateRenderer(client, rendererSourceExpression, remaining(deadline));
     const probe = await waitForRendererProof(client, deadline, dependencies);
     return {
       currentDocument: { installed: installReport?.targetGate === "782640499" },
@@ -302,7 +361,9 @@ async function runBridge(options) {
   try {
     const main = await installMainPayload(options, mainSource, deadline);
     stage = "renderer-install";
-    const renderer = await installRendererPayload(options, rendererSource, deadline);
+    const renderer = await installRendererPayload(options, rendererSource, deadline, {
+      enrollmentMapping: main.enrollmentMapping,
+    });
     return {
       main: {
         inspectorPortClosed: main.closure,
@@ -487,6 +548,7 @@ module.exports = {
   checkPortOnce,
   chooseTarget,
   injectionExpression,
+  rendererInjectionExpression,
   parseArguments,
   runProbeBridge,
   runBridge,

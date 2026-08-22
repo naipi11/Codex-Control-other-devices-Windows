@@ -340,6 +340,23 @@
     return { migrated: true, reason: "copied-canonical-enrollment", recordCount: sourceRecords.length };
   }
 
+  function readRemoteControlEnrollmentMapping(options = {}) {
+    const targetHome = path.resolve(String(options.targetHome ?? resolveCodexHome(options)));
+    const targetPath = path.join(targetHome, GLOBAL_STATE_FILENAME);
+    const targetState = readGlobalStateObject(targetPath);
+    const mapping = targetState[ENROLLMENT_STATE_KEY];
+    if (!isPlainObject(mapping)) {
+      return null;
+    }
+    const entries = Object.entries(mapping);
+    if (entries.length === 0 || entries.length > 32 || entries.some(([key, record]) => {
+      return typeof key !== "string" || key.length === 0 || key.length > 2048 || !isEnrollmentRecord(record);
+    })) {
+      return null;
+    }
+    return Object.fromEntries(entries.map(([key, record]) => [key, { ...record }]));
+  }
+
   function cacheNativeAddon(addon) {
     if (typeof process.resourcesPath !== "string" || !process.resourcesPath.trim() || Module._cache == null) {
       return { status: "unavailable", path: null };
@@ -848,6 +865,12 @@
     } catch (error) {
       profileMigration = { migrated: false, reason: error?.code ?? "migration-failed", recordCount: 0 };
     }
+    let rendererEnrollmentMapping = null;
+    try {
+      rendererEnrollmentMapping = readRemoteControlEnrollmentMapping(options);
+    } catch {
+      // A missing or malformed profile must never overwrite Codex global state.
+    }
     const service = new DeviceKeyService(options);
     const addon = makeAddon(service);
     const cacheInterception = cacheNativeAddon(addon);
@@ -888,6 +911,7 @@
       platformShim,
       protectionClass: PROTECTION_CLASS,
       profileMigration,
+      rendererEnrollmentMapping,
       status: "installed",
       store: "CODEX_HOME",
     };

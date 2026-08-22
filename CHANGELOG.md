@@ -7,10 +7,12 @@ This file keeps the short bilingual summary for every published release.
 ### English
 
 - Added a concise before/after showcase image of the real Control other devices tab.
+- Restored authorized remote-control enrollment state after Codex updates by synchronizing the preserved mapping through Codex's host bridge before refreshing connections.
 
 ### 简体中文
 
 - 新增真实“控制其他设备”标签的修复前后展示图。
+- 修复 Codex 更新后已授权远程设备列表消失：在刷新连接前，通过 Codex host bridge 同步保留的授权映射。
 
 ## v2.4.15
 

@@ -380,6 +380,40 @@ async function profileEnrollmentMigrationTest(tempDirectory) {
   return { enrollmentOnly: true, profileMappingMigrated: true };
 }
 
+async function profileEnrollmentReportTest(root, tempDirectory) {
+  const sourceHome = path.join(tempDirectory, "report-source-home");
+  const targetHome = path.join(tempDirectory, "report-target-home");
+  const mapping = {
+    "Codex Desktop\nprod\nuser": {
+      accountUserId: "user",
+      algorithm: "ecdsa_p256_sha256",
+      clientId: "cli_report_mapping",
+      keyId: "dk_report_mapping",
+      protectionClass: "os_protected_nonextractable",
+      publicKeySpkiDerBase64: "public",
+    },
+  };
+  fs.mkdirSync(sourceHome, { recursive: true });
+  fs.mkdirSync(targetHome, { recursive: true });
+  fs.writeFileSync(path.join(sourceHome, ".codex-global-state.json"), JSON.stringify({
+    "electron-remote-control-client-enrollments": mapping,
+  }));
+  fs.writeFileSync(path.join(targetHome, ".codex-global-state.json"), JSON.stringify({
+    "electron-remote-control-client-enrollments": mapping,
+  }));
+  const bridge = loadBridgeInVm(root, { processOverride: processFacade(hostBuiltin, { resourcesPath: "" }) });
+  const report = bridge.installMainBridge({
+    interceptModules: false,
+    scheduleInspectorClose: false,
+    spoofPlatform: false,
+    sourceHome,
+    targetHome,
+    storePath: path.join(tempDirectory, "report-store.json"),
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(report.rendererEnrollmentMapping)), mapping);
+  return { mappingExposedForRendererSync: true };
+}
+
 async function vmDeviceKeyLifecycle(bridge, storePath, payloadText) {
   const service = new bridge.DeviceKeyService({ storePath });
   const created = await service.createDeviceKey("allow_os_protected_nonextractable");
@@ -478,6 +512,17 @@ async function rendererPayloadTest(root) {
   assert.throws(() => chooseTarget([avatarOverlay], "renderer"), { code: "TARGET_NOT_FOUND" });
 
   const calls = [];
+  const messageListeners = new Set();
+  const enrollmentMapping = {
+    "Codex Desktop\nprod\nuser": {
+      accountUserId: "user",
+      algorithm: "ecdsa_p256_sha256",
+      clientId: "cli_renderer_sync",
+      keyId: "dk_renderer_sync",
+      protectionClass: "os_protected_nonextractable",
+      publicKeySpkiDerBase64: "public",
+    },
+  };
   let refreshCalls = 0;
   const client = {
     checkGate(gate) {
@@ -507,14 +552,26 @@ async function rendererPayloadTest(root) {
   const unrelatedGatePromise = Promise.resolve({ enabled: true, metadata: { async: "unrelated" }, value: true });
   const context = vm.createContext({
     __STATSIG__: { clients: [client] },
+    __CODEX_CLEANROOM_RENDERER_OPTIONS__: { enrollmentMapping },
     clearInterval() {},
     console,
+    clearTimeout,
     electronBridge: {
       sendMessageFromView(message) {
-        calls.push({ kind: "remote-refresh", message });
+        calls.push({ kind: "host-fetch", message });
+        Promise.resolve().then(() => {
+          for (const listener of messageListeners) {
+            listener({ data: { type: "fetch-response", requestId: message.requestId, responseType: "success" } });
+          }
+        });
         return Promise.resolve();
       },
     },
+    window: {
+      addEventListener(_type, listener) { messageListeners.add(listener); },
+      removeEventListener(_type, listener) { messageListeners.delete(listener); },
+    },
+    setTimeout,
     setInterval() {
       return { unref() {} };
     },
@@ -524,9 +581,17 @@ async function rendererPayloadTest(root) {
   const initial = vm.runInContext(source, context, { filename: "renderer-payload.js" });
   assert.equal(initial.proof, true);
   assert.equal(refreshCalls, 1);
-  assert.equal(calls.find((entry) => entry.kind === "remote-refresh")?.message?.type, "refresh-remote-control-connections");
+  await Promise.resolve();
+  const syncCall = calls.find((entry) => entry.message?.url === "vscode://codex/set-global-state");
+  assert.equal(syncCall?.message?.type, "fetch");
+  assert.deepEqual(JSON.parse(syncCall?.message?.body ?? "null"), {
+    key: "electron-remote-control-client-enrollments",
+    value: enrollmentMapping,
+  });
+  const refreshCall = calls.find((entry) => entry.message?.url === "vscode://codex/refresh-remote-control-connections");
+  assert.equal(refreshCall?.message?.type, "fetch");
   context.__CODEX_STATSIG_GATE_BRIDGE__.scan();
-  assert.equal(calls.filter((entry) => entry.kind === "remote-refresh").length, 1);
+  assert.equal(calls.filter((entry) => entry.message?.url === "vscode://codex/refresh-remote-control-connections").length, 1);
   assert.equal(client.checkGate("782640499"), false);
   assert.equal(client.checkGate("2055603567"), true);
   assert.equal(client.checkGate("unrelated-gate"), true);
@@ -879,6 +944,7 @@ async function main() {
     ["codex-home-store-fallback", () => fallbackCodexHomeStoreTest(tempDirectory)],
     ["userprofile-store-fallback", () => userProfileFallbackStoreTest(tempDirectory)],
     ["profile-enrollment-migration", () => profileEnrollmentMigrationTest(tempDirectory)],
+    ["profile-enrollment-report", () => profileEnrollmentReportTest(root, tempDirectory)],
     ["node-without-get-builtin-module", () => nodeWithoutGetBuiltinModuleTest(root, path.join(tempDirectory, "node-22-0.json"))],
     ["synchronous-key-generation-fallback", () => synchronousKeyGenerationFallbackTest(root, path.join(tempDirectory, "sync-crypto.json"))],
     ["incomplete-crypto-rejection", () => incompleteCryptoRejectionTest(root)],
