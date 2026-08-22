@@ -7,6 +7,10 @@
   const API_SLOT = "__CODEX_STATSIG_GATE_BRIDGE__";
   const TARGET_GATE = "782640499";
   const REMOTE_CONTROL_CLIENT_ENVIRONMENTS_GATE = "2055603567";
+  const REMOTE_CONTROL_REFRESH_MESSAGE = "refresh-remote-control-connections";
+  const REMOTE_CONTROL_ENROLLMENT_SYNC_MESSAGE = "set-global-state";
+  const REMOTE_CONTROL_ENROLLMENT_STATE_KEY = "electron-remote-control-client-enrollments";
+  const RENDERER_OPTIONS_SLOT = "__CODEX_CLEANROOM_RENDERER_OPTIONS__";
   const GATE_OVERRIDES = Object.freeze({
     [TARGET_GATE]: false,
     [REMOTE_CONTROL_CLIENT_ENVIRONMENTS_GATE]: true,
@@ -32,11 +36,55 @@
   const wrapperMarker = Symbol("codex.cleanroom.statsig.gate-wrapper");
   const records = [];
   const refreshedClients = new WeakSet();
+  const rendererOptions = globalThis[RENDERER_OPTIONS_SLOT];
+  let remoteControlEnrollmentSyncRequested = false;
+  let remoteControlRefreshRequested = false;
+  let hostRequestSequence = 0;
   let scans = 0;
 
   function isObjectLike(value) {
     return (typeof value === "object" && value !== null) || typeof value === "function";
   }
+
+  function isEnrollmentMapping(value) {
+    if (!isObjectLike(value) || Array.isArray(value)) {
+      return false;
+    }
+    const entries = Object.entries(value);
+    if (entries.length === 0 || entries.length > 32) {
+      return false;
+    }
+    const expectedKeys = [
+      "accountUserId",
+      "algorithm",
+      "clientId",
+      "keyId",
+      "protectionClass",
+      "publicKeySpkiDerBase64",
+    ];
+    return entries.every(([key, record]) => {
+      if (typeof key !== "string" || key.length === 0 || key.length > 2048 ||
+          !isObjectLike(record) || Array.isArray(record)) {
+        return false;
+      }
+      const actualKeys = Object.keys(record).sort();
+      if (actualKeys.length !== expectedKeys.length ||
+          actualKeys.some((field, index) => field !== [...expectedKeys].sort()[index])) {
+        return false;
+      }
+      return record.algorithm === "ecdsa_p256_sha256" &&
+        record.protectionClass === "os_protected_nonextractable" &&
+        typeof record.accountUserId === "string" && record.accountUserId.length > 0 && record.accountUserId.length <= 256 &&
+        typeof record.clientId === "string" && record.clientId.length > 0 && record.clientId.length <= 256 &&
+        typeof record.keyId === "string" && record.keyId.length > 0 && record.keyId.length <= 256 &&
+        typeof record.publicKeySpkiDerBase64 === "string" &&
+        record.publicKeySpkiDerBase64.length > 0 && record.publicKeySpkiDerBase64.length <= 4096;
+    });
+  }
+
+  const enrollmentMapping = isEnrollmentMapping(rendererOptions?.enrollmentMapping)
+    ? rendererOptions.enrollmentMapping
+    : null;
 
   function getGateOverride(value) {
     if (typeof value !== "string" && typeof value !== "number") {
@@ -155,6 +203,87 @@
     }
   }
 
+  function sendHostFetch(method, params, onComplete) {
+    const sender = globalThis.electronBridge?.sendMessageFromView;
+    if (typeof sender !== "function") {
+      onComplete(false);
+      return;
+    }
+    const requestId = `codex-cleanroom-${Date.now()}-${++hostRequestSequence}`;
+    const messageTarget = globalThis.window ?? globalThis;
+    let settled = false;
+    let timeout;
+    const finish = (success) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout != null && typeof clearTimeout === "function") {
+        clearTimeout(timeout);
+      }
+      if (typeof messageTarget.removeEventListener === "function") {
+        messageTarget.removeEventListener("message", handleMessage);
+      }
+      onComplete(success === true);
+    };
+    const handleMessage = (event) => {
+      const response = event?.data;
+      if (response?.type !== "fetch-response" || response.requestId !== requestId) {
+        return;
+      }
+      finish(response.responseType === "success");
+    };
+    if (typeof messageTarget.addEventListener === "function") {
+      messageTarget.addEventListener("message", handleMessage);
+    }
+    if (typeof setTimeout === "function") {
+      timeout = setTimeout(() => finish(false), 5_000);
+      timeout.unref?.();
+    }
+    try {
+      const result = Reflect.apply(sender, globalThis.electronBridge, [{
+        type: "fetch",
+        requestId,
+        method: "POST",
+        url: `vscode://codex/${method}`,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(params),
+      }]);
+      if (result != null && typeof result.catch === "function") {
+        result.catch(() => finish(false));
+      }
+      if (typeof messageTarget.addEventListener !== "function") {
+        finish(result == null);
+      }
+    } catch {
+      finish(false);
+    }
+  }
+
+  function requestRemoteControlRefresh() {
+    if (remoteControlRefreshRequested) {
+      return;
+    }
+    remoteControlRefreshRequested = true;
+    sendHostFetch(REMOTE_CONTROL_REFRESH_MESSAGE, {}, () => {});
+  }
+
+  function requestRemoteControlEnrollmentSync() {
+    if (enrollmentMapping == null) {
+      requestRemoteControlRefresh();
+      return;
+    }
+    if (remoteControlEnrollmentSyncRequested) {
+      return;
+    }
+    remoteControlEnrollmentSyncRequested = true;
+    sendHostFetch(
+      REMOTE_CONTROL_ENROLLMENT_SYNC_MESSAGE,
+      { key: REMOTE_CONTROL_ENROLLMENT_STATE_KEY, value: enrollmentMapping },
+      () => requestRemoteControlRefresh(),
+    );
+  }
+
   function wrapGateMethod(receiver, methodName) {
     const found = findDataMethod(receiver, methodName);
     if (!found) {
@@ -255,6 +384,7 @@
 
   function scan() {
     scans += 1;
+    requestRemoteControlEnrollmentSync();
     const root = globalThis.__STATSIG__;
     if (!isObjectLike(root)) {
       return probe();

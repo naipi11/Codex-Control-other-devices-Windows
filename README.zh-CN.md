@@ -2,6 +2,14 @@
 
 语言 / Language：**简体中文** · [English](README.md)
 
+[![Windows](https://img.shields.io/badge/Windows-desktop-0078D4?logo=windows&logoColor=white)](https://github.com/naipi11/CodexRemote-fix)
+[![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
+[![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=.net&logoColor=white)](https://dotnet.microsoft.com/download/dotnet-framework/net48)
+[![CI](https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml/badge.svg)](https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/naipi11/CodexRemote-fix?display_name=tag)](https://github.com/naipi11/CodexRemote-fix/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、但因运行时缺陷被隐藏的：
 
 **设置 → 连接 → 控制其他设备（Control other devices）**
@@ -30,8 +38,8 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.16-setup.exe` 和 `CodexRemote-fix-2.4.16-setup.exe.sha256.txt`，并核对 SHA-256。
-2. 运行 `CodexRemote-fix-2.4.16-setup.exe`，无需管理员权限。
+1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.17-setup.exe` 和 `CodexRemote-fix-2.4.17-setup.exe.sha256.txt`，并核对 SHA-256。
+2. 运行 `CodexRemote-fix-2.4.17-setup.exe`，无需管理员权限。
    Windows 10 用户请确认已安装 .NET Framework 4.8，原生 TrayHost 需要该组件。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
@@ -42,6 +50,13 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 已验证：Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`；
 隐藏的控制器标签、原生托盘菜单、双语菜单切换和常驻守护程序均可用。
+
+## v2.4.17 更新内容
+
+- 重大修复：Codex 更新后，已授权的远程控制设备无需重新配对即可保留。
+- 在刷新远程连接前，通过 Codex host bridge 恢复保留的 enrollment 映射。
+- 原地修补已经被 Codex 缓存的原生设备密钥模块导出对象，使现有调用方使用修复后的实现。
+- 保持现有设备密钥、服务器端授权和 Codex 原生注册流程不变。
 
 ## v2.4.16 更新内容
 
@@ -64,8 +79,8 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 每个带 tag 的发布都会附带 Windows 安装包及其 SHA-256 校验文件。
 `.github/workflows/release.yml` 会在 tag 上自动构建安装包，因此后续每次更新都会
-为 2.4.16 发布提供可直接运行的 `CodexRemote-fix-2.4.16-setup.exe`
-及 `CodexRemote-fix-2.4.16-setup.exe.sha256.txt`。
+为 2.4.17 发布提供可直接运行的 `CodexRemote-fix-2.4.17-setup.exe`
+及 `CodexRemote-fix-2.4.17-setup.exe.sha256.txt`。
 
 每次发布都会在本 README 和 GitHub Release 正文中追加简短的中英文更新说明。
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
@@ -73,6 +88,10 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 Codex Desktop 更新后，请到 [Releases](https://github.com/naipi11/CodexRemote-fix/releases)
 查看是否有更新安装包；也可以从开始菜单运行 **CodexRemote-fix compatibility check（兼容性检查）**
 快捷方式，确认当前守护程序仍匹配。
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=naipi11/CodexRemote-fix&type=Date)](https://www.star-history.com/#naipi11/CodexRemote-fix&Date)
 
 ## External renderer 共享 CDP
 

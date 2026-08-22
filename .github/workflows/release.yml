@@ -51,9 +51,18 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $version = $tag.TrimStart('v')
+          $changelog = Get-Content -LiteralPath (Join-Path $PWD 'CHANGELOG.md') -Raw -Encoding UTF8
+          $section = [regex]::Match($changelog, '(?ms)^## ' + [regex]::Escape($tag) + '\r?\n(.*?)(?=^## |\z)')
+          if (-not $section.Success) {
+            throw "CHANGELOG.md has no bilingual section for $tag"
+          }
+          $notesPath = Join-Path $env:RUNNER_TEMP ("CodexRemote-fix-$tag-release-notes.md")
+          Set-Content -LiteralPath $notesPath -Value ("# CodexRemote-fix $version`n`n" + $section.Groups[1].Value.Trim() + "`n") -Encoding UTF8
           $exists = $null -ne (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null)
           if (-not $exists) {
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "CodexRemote-fix $version" --generate-notes
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "CodexRemote-fix $version" --notes-file $notesPath
+          } else {
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title "CodexRemote-fix $version" --notes-file $notesPath
           }
           $assets = @(Get-ChildItem -LiteralPath (Join-Path $PWD 'build\dist') -File | Where-Object { $_.Extension -in @('.exe', '.txt', '.json') })
           gh release upload $tag --repo $env:GITHUB_REPOSITORY $assets.FullName --clobber

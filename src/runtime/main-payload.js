@@ -340,18 +340,66 @@
     return { migrated: true, reason: "copied-canonical-enrollment", recordCount: sourceRecords.length };
   }
 
+  function readRemoteControlEnrollmentMapping(options = {}) {
+    const targetHome = path.resolve(String(options.targetHome ?? resolveCodexHome(options)));
+    const targetPath = path.join(targetHome, GLOBAL_STATE_FILENAME);
+    const targetState = readGlobalStateObject(targetPath);
+    const mapping = targetState[ENROLLMENT_STATE_KEY];
+    if (!isPlainObject(mapping)) {
+      return null;
+    }
+    const entries = Object.entries(mapping);
+    if (entries.length === 0 || entries.length > 32 || entries.some(([key, record]) => {
+      return typeof key !== "string" || key.length === 0 || key.length > 2048 || !isEnrollmentRecord(record);
+    })) {
+      return null;
+    }
+    return Object.fromEntries(entries.map(([key, record]) => [key, { ...record }]));
+  }
+
   function cacheNativeAddon(addon) {
     if (typeof process.resourcesPath !== "string" || !process.resourcesPath.trim() || Module._cache == null) {
       return { status: "unavailable", path: null };
     }
     const addonPath = path.resolve(process.resourcesPath, "native", TARGET_ADDON_BASENAME);
-    const cached = Module._cache[addonPath] ?? { id: addonPath, filename: addonPath, loaded: true, exports: addon };
+    const cacheKey = Object.keys(Module._cache).find((key) => {
+      try {
+        return path.resolve(key).toLowerCase() === addonPath.toLowerCase();
+      } catch {
+        return false;
+      }
+    }) ?? addonPath;
+    const cached = Module._cache[cacheKey] ?? { id: addonPath, filename: addonPath, loaded: true, exports: addon };
+    const existingExports = cached.exports;
+    let patchedExisting = false;
+    if (existingExports != null && existingExports !== addon &&
+        (typeof existingExports === "object" || typeof existingExports === "function")) {
+      for (const methodName of ["createDeviceKey", "deleteDeviceKey", "getDeviceKeyPublic", "signDeviceKey"]) {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(existingExports, methodName);
+          if (descriptor != null && descriptor.get == null && descriptor.set == null && descriptor.writable === false && !descriptor.configurable) {
+            continue;
+          }
+          Object.defineProperty(existingExports, methodName, {
+            configurable: descriptor?.configurable ?? true,
+            enumerable: descriptor?.enumerable ?? true,
+            value: addon[methodName],
+            writable: descriptor?.writable ?? true,
+          });
+          patchedExisting = true;
+        } catch {
+          // A native export may be frozen; future requires still use the clean-room addon.
+        }
+      }
+    }
     cached.id = cached.id ?? addonPath;
     cached.filename = cached.filename ?? addonPath;
     cached.loaded = true;
-    cached.exports = addon;
-    Module._cache[addonPath] = cached;
-    return { status: "installed", path: addonPath };
+    if (existingExports == null || existingExports === addon) {
+      cached.exports = addon;
+    }
+    Module._cache[cacheKey] = cached;
+    return { status: "installed", path: addonPath, patchedExisting };
   }
 
   const DPAPI_SCRIPT = [
@@ -848,6 +896,12 @@
     } catch (error) {
       profileMigration = { migrated: false, reason: error?.code ?? "migration-failed", recordCount: 0 };
     }
+    let rendererEnrollmentMapping = null;
+    try {
+      rendererEnrollmentMapping = readRemoteControlEnrollmentMapping(options);
+    } catch {
+      // A missing or malformed profile must never overwrite Codex global state.
+    }
     const service = new DeviceKeyService(options);
     const addon = makeAddon(service);
     const cacheInterception = cacheNativeAddon(addon);
@@ -888,6 +942,7 @@
       platformShim,
       protectionClass: PROTECTION_CLASS,
       profileMigration,
+      rendererEnrollmentMapping,
       status: "installed",
       store: "CODEX_HOME",
     };
