@@ -192,6 +192,12 @@ internal static class ProtocolCodec
     private static ProtocolFrame ReadFrame(Stream input, ProtocolDirection direction, bool bootstrap, byte[] key, ulong expectedEpoch, ulong expectedSequence)
     {
         byte[] header = ReadExact(input, HeaderSize);
+        if (bootstrap && header[0] == 0xEF && header[1] == 0xBB && header[2] == 0xBF)
+        {
+            Buffer.BlockCopy(header, 3, header, 0, HeaderSize - 3);
+            byte[] tail = ReadExact(input, 3);
+            Buffer.BlockCopy(tail, 0, header, HeaderSize - 3, 3);
+        }
         for (int i = 0; i < 4; i++) { if (header[i] != Magic[i]) { throw new ProtocolViolationException("frame magic is invalid"); } }
         ushort version = BitConverter.ToUInt16(header, 4);
         ushort typeValue = BitConverter.ToUInt16(header, 6);
