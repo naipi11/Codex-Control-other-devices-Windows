@@ -1,14 +1,19 @@
-# CodexRemote-fix
+<div align="center">
+  <img src="assets/codexremote-fix/codexremote-fix.svg" alt="CodexRemote-fix 图标" width="128" height="128">
+  <h1>CodexRemote-fix</h1>
+  <p>语言 / Language：<strong>简体中文</strong> · <a href="README.md">English</a></p>
+</div>
 
-语言 / Language：**简体中文** · [English](README.md)
-
-[![Windows](https://img.shields.io/badge/Windows-desktop-0078D4?logo=windows&logoColor=white)](https://github.com/naipi11/CodexRemote-fix)
-[![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
-[![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=.net&logoColor=white)](https://dotnet.microsoft.com/download/dotnet-framework/net48)
-[![CI](https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml/badge.svg)](https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/naipi11/CodexRemote-fix?display_name=tag)](https://github.com/naipi11/CodexRemote-fix/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/naipi11/CodexRemote-fix"><img src="https://img.shields.io/badge/Windows-desktop-0078D4?logo=windows&logoColor=white" alt="Windows desktop"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+"></a>
+  <a href="https://learn.microsoft.com/powershell/"><img src="https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1+"></a>
+  <a href="https://dotnet.microsoft.com/download/dotnet-framework/net48"><img src="https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=.net&logoColor=white" alt=".NET Framework 4.8"></a>
+  <a href="https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml"><img src="https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/naipi11/CodexRemote-fix/actions/workflows/codeql.yml"><img src="https://github.com/naipi11/CodexRemote-fix/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
+  <a href="https://github.com/naipi11/CodexRemote-fix/releases/latest"><img src="https://img.shields.io/github/v/release/naipi11/CodexRemote-fix?display_name=tag" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
+</p>
 
 CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、但因运行时缺陷被隐藏的：
 
@@ -38,8 +43,8 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.17-setup.exe` 和 `CodexRemote-fix-2.4.17-setup.exe.sha256.txt`，并核对 SHA-256。
-2. 运行 `CodexRemote-fix-2.4.17-setup.exe`，无需管理员权限。
+1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.18-setup.exe` 和 `CodexRemote-fix-2.4.18-setup.exe.sha256.txt`，并核对 SHA-256。
+2. 运行 `CodexRemote-fix-2.4.18-setup.exe`，无需管理员权限。
    Windows 10 用户请确认已安装 .NET Framework 4.8，原生 TrayHost 需要该组件。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
 
@@ -50,6 +55,12 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 已验证：Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`；
 隐藏的控制器标签、原生托盘菜单、双语菜单切换和常驻守护程序均可用。
+
+## v2.4.18 更新内容
+
+- 中英文 README 顶部统一居中显示 CodexRemote-fix 图标、项目名、语言切换和真实项目徽章。
+- 已启用仓库 Dependabot alerts 和自动安全更新。
+- 新增 CodeQL 定期扫描及 main 的 push/PR 扫描，覆盖 JavaScript/TypeScript 与 C#。
 
 ## v2.4.17 更新内容
 
@@ -79,8 +90,8 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 每个带 tag 的发布都会附带 Windows 安装包及其 SHA-256 校验文件。
 `.github/workflows/release.yml` 会在 tag 上自动构建安装包，因此后续每次更新都会
-为 2.4.17 发布提供可直接运行的 `CodexRemote-fix-2.4.17-setup.exe`
-及 `CodexRemote-fix-2.4.17-setup.exe.sha256.txt`。
+为 2.4.18 发布提供可直接运行的 `CodexRemote-fix-2.4.18-setup.exe`
+及 `CodexRemote-fix-2.4.18-setup.exe.sha256.txt`。
 
 每次发布都会在本 README 和 GitHub Release 正文中追加简短的中英文更新说明。
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。

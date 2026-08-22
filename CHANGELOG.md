@@ -6,6 +6,20 @@ This file keeps the short bilingual summary for every published release.
 
 No unreleased changes.
 
+## v2.4.18
+
+### English
+
+- Centered the CodexRemote-fix icon, product name, language switch, and verified project badges in both README languages.
+- Enabled repository Dependabot alerts and automatic security updates.
+- Added scheduled and push/PR CodeQL scanning for the JavaScript/TypeScript and C# portions of the project.
+
+### 简体中文
+
+- 中英文 README 顶部统一居中显示 CodexRemote-fix 图标、项目名、语言切换和真实项目徽章。
+- 已启用仓库 Dependabot alerts 和自动安全更新。
+- 新增 CodeQL 定期扫描及 main 的 push/PR 扫描，覆盖 JavaScript/TypeScript 与 C#。
+
 ## v2.4.17
 
 ### English
