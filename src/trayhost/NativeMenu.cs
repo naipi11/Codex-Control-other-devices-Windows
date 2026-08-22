@@ -70,12 +70,13 @@ internal sealed class NativeMenu : IDisposable
             Append(language, TrayNativeConstants.MfString | LanguageChecked(LanguageMode.English), (uint)TrayCommand.SetLanguageEnglish, 10);
 
             Append(_menu, TrayNativeConstants.MfString | Enabled(11), (uint)TrayCommand.OpenLogs, 11);
+            Append(_menu, TrayNativeConstants.MfString, (uint)TrayCommand.ShowAbout, 12);
             IntPtr uninstall = _native.CreateSubMenu();
             if (uninstall == IntPtr.Zero) { throw new InvalidOperationException("CreateUninstallMenu failed"); }
-            if (!_native.AppendSubMenu(_menu, uninstall, _snapshot.Strings[12])) { throw new InvalidOperationException("AppendUninstallMenu failed"); }
-            Append(uninstall, TrayNativeConstants.MfString | TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed, 0U, 13);
-            Append(uninstall, TrayNativeConstants.MfString | (Has(PresentationFlags.UninstallEnabled) ? 0U : TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed), (uint)TrayCommand.ConfirmUninstall, 14);
-            Append(_menu, TrayNativeConstants.MfString | TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed, 0U, 15);
+            if (!_native.AppendSubMenu(_menu, uninstall, _snapshot.Strings[13])) { throw new InvalidOperationException("AppendUninstallMenu failed"); }
+            Append(uninstall, TrayNativeConstants.MfString | TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed, 0U, 14);
+            Append(uninstall, TrayNativeConstants.MfString | (Has(PresentationFlags.UninstallEnabled) ? 0U : TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed), (uint)TrayCommand.ConfirmUninstall, 15);
+            Append(_menu, TrayNativeConstants.MfString | TrayNativeConstants.MfDisabled | TrayNativeConstants.MfGrayed, 0U, 16);
         }
         catch
         {

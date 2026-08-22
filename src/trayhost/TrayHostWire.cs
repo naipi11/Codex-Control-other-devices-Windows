@@ -99,7 +99,7 @@ internal static class TrayHostWire
         using (BinaryReader reader = new BinaryReader(stream, Utf8))
         {
             ulong revision = reader.ReadUInt64(); TrayColor color = (TrayColor)reader.ReadByte(); TrayState state = (TrayState)reader.ReadByte(); LanguageMode language = (LanguageMode)reader.ReadByte(); PresentationFlags flags = (PresentationFlags)reader.ReadUInt32(); int count = reader.ReadByte();
-            if (count != 18) { throw new ProtocolViolationException("presentation string count is invalid"); }
+            if (count != 20) { throw new ProtocolViolationException("presentation string count is invalid"); }
             string[] strings = new string[count]; for (int i = 0; i < count; i++) { strings[i] = ReadString(reader, 300); }
             RequireEnd(stream);
             try { return new PresentationSnapshot(revision, color, state, language, flags, strings); } catch (ArgumentException error) { throw new ProtocolViolationException(error.Message); }

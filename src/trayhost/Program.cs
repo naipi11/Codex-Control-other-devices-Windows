@@ -103,7 +103,7 @@ internal static class Program
 
     private static int RunHeadlessSmoke()
     {
-        string[] strings = new string[18]; for (int i = 0; i < strings.Length; i++) { strings[i] = "smoke-" + i; }
+        string[] strings = new string[20]; for (int i = 0; i < strings.Length; i++) { strings[i] = "smoke-" + i; }
         PresentationSnapshot snapshot = new PresentationSnapshot(1UL, TrayColor.Green, TrayState.Active, LanguageMode.Chinese, PresentationFlags.OpenLogsEnabled, strings);
         byte[] seed = new byte[32]; byte[] challenge = new byte[32]; byte[] nonce = new byte[32];
         SessionKeys keys = ProtocolCodec.DeriveDirectionalKeys(seed, challenge, nonce, 1UL);

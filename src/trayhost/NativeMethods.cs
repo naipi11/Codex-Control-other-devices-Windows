@@ -35,6 +35,8 @@ internal static class TrayNativeConstants
     internal const int IdiApplication = 32512;
     internal const uint ImageIcon = 1;
     internal const uint LrDefaultSize = 0x00000040;
+    internal const uint MbOk = 0x00000000;
+    internal const uint MbIconInformation = 0x00000040;
 }
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -91,6 +93,7 @@ internal interface INativeTrayPlatform
     uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);
     bool PostMessage(IntPtr owner, uint message, UIntPtr wParam, IntPtr lParam);
     bool SetNotificationFocus(ref TrayIconData icon);
+    bool ShowMessageBox(IntPtr owner, string text, string caption);
     bool DestroyMenu(IntPtr menu);
     bool EndMenu();
     bool DestroyOwner(IntPtr owner);
@@ -151,6 +154,7 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     }
     public bool DeleteIcon(ref TrayIconData icon) { return Shell_NotifyIconW(TrayNativeConstants.NimDelete, ref icon); }
     public bool SetNotificationFocus(ref TrayIconData icon) { return Shell_NotifyIconW(TrayNativeConstants.NimSetFocus, ref icon); }
+    public bool ShowMessageBox(IntPtr owner, string text, string caption) { return MessageBoxW(owner, text ?? String.Empty, caption ?? String.Empty, TrayNativeConstants.MbOk | TrayNativeConstants.MbIconInformation) != 0; }
 
     public IntPtr CreatePopupMenu() { return CreatePopupMenuNative(); }
     public IntPtr CreateSubMenu() { return CreatePopupMenuNative(); }
@@ -268,5 +272,6 @@ internal sealed class Win32TrayPlatform : INativeTrayPlatform
     [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll", EntryPoint = "DestroyMenu", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyMenuNative(IntPtr menu);
     [DllImport("user32.dll", EntryPoint = "EndMenu", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EndMenuNative();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern int MessageBoxW(IntPtr owner, string text, string caption, uint type);
     [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyWindow(IntPtr window);
 }

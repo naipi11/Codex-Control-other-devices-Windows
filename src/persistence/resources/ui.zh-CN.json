@@ -30,6 +30,8 @@
     "Menu.Chinese": "\u4e2d\u6587",
     "Menu.English": "English",
     "Menu.OpenLogs": "\u6253\u5f00\u65e5\u5fd7",
+    "Menu.About": "\u5173\u4e8e",
+    "Menu.AboutVersion": "CodexRemote-fix \uff5c \u7248\u672c {0}",
     "Menu.Uninstall": "\u5378\u8f7d\u5b88\u62a4\u7a0b\u5e8f\u2026",
     "Dialog.UninstallTitle": "\u5378\u8f7d Codex \u8fde\u63a5\u5b88\u62a4\u7a0b\u5e8f\uff1f",
     "Dialog.UninstallMessage": "\u8fd9\u5c06\u505c\u6b62\u5b88\u62a4\u7a0b\u5e8f\u3002\u5982\u679c\u5f53\u524d Codex \u4f1a\u8bdd\u5df2\u63a5\u7ba1\uff0cCodex \u5c06\u6062\u590d\u4e3a\u666e\u901a\u542f\u52a8\u3002\u9ed8\u8ba4\u4fdd\u7559\u8bbe\u5907\u5bc6\u94a5\u3002",

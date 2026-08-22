@@ -25,7 +25,7 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-CloseApplications=no
+CloseApplications=force
 RestartApplications=no
 SetupLogging=yes
 MinVersion=10.0.17763
@@ -60,6 +60,7 @@ Source: "..\Uninstall-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ig
 Source: "..\Start-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Reset-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Test-CodexControlOtherDevices.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\Prepare-CcodRemoteUpgrade.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 
 [InstallDelete]
 Type: files; Name: "{userprograms}\Codex Control other devices\Codex Control other devices for Windows.lnk"
@@ -93,6 +94,29 @@ end;
 function InitializeSetup(): Boolean;
 begin
   if IsAppInstalled() then
-    MsgBox('CodexRemote-fix is already installed. Run the new setup to upgrade the installed files, then the persistent supervisor will be updated.', mbInformation, MB_OK);
+    MsgBox('CodexRemote-fix is already installed. The current supervisor will be stopped safely before the new runtime replaces the old one; device keys and state are preserved.', mbInformation, MB_OK);
   Result := True;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  ScriptPath: String;
+  Parameters: String;
+begin
+  Result := '';
+  NeedsRestart := False;
+  if not IsAppInstalled() then
+    Exit;
+  try
+    ExtractTemporaryFile('Prepare-CcodRemoteUpgrade.ps1');
+    ScriptPath := ExpandConstant('{tmp}\Prepare-CcodRemoteUpgrade.ps1');
+    Parameters := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -InstallRoot "' + ExpandConstant('{localappdata}\CodexControlOtherDevices') + '"';
+    if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      Result := 'Could not start the previous CodexRemote-fix shutdown helper.'
+    else if ResultCode <> 0 then
+      Result := 'The previous CodexRemote-fix supervisor could not be stopped safely.';
+  except
+    Result := 'The previous CodexRemote-fix supervisor could not be stopped safely.';
+  end;
 end;

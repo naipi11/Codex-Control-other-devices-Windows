@@ -10,7 +10,7 @@ internal static class TrayHostTransportSelfTest
 
     private static PresentationSnapshot Snapshot(ulong revision)
     {
-        string[] strings = new string[18];
+        string[] strings = new string[20];
         for (int i = 0; i < strings.Length; i++) { strings[i] = "string-" + i; }
         return new PresentationSnapshot(revision, TrayColor.Green, TrayState.Active, LanguageMode.Chinese, PresentationFlags.OpenLogsEnabled, strings);
     }

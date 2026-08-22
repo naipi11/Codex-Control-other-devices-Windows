@@ -37,7 +37,7 @@ public sealed class PresentationSnapshot
         if (revision == 0UL) { throw new ArgumentException("revision must be positive", "revision"); }
         if (!Enum.IsDefined(typeof(TrayColor), color) || !Enum.IsDefined(typeof(TrayState), state) || !Enum.IsDefined(typeof(LanguageMode), language)) { throw new ArgumentException("presentation enum is invalid"); }
         if ((((uint)flags) & ~0x00000fffu) != 0u) { throw new ArgumentException("presentation flags are invalid", "flags"); }
-        if (strings == null || strings.Length != 18) { throw new ArgumentException("presentation string count is invalid", "strings"); }
+        if (strings == null || strings.Length != 20) { throw new ArgumentException("presentation string count is invalid", "strings"); }
         string[] copy = (string[])strings.Clone();
         for (int i = 0; i < copy.Length; i++)
         {
