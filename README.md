@@ -1,14 +1,18 @@
-# CodexRemote-fix
+<div align="center">
+  <img src="assets/codexremote-fix/codexremote-fix.svg" alt="CodexRemote-fix icon" width="128" height="128">
+  <h1>CodexRemote-fix</h1>
+  <p>Language / 语言: <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+</div>
 
-Language / 语言: English · [简体中文](README.zh-CN.md)
-
-[![Windows](https://img.shields.io/badge/Windows-desktop-0078D4?logo=windows&logoColor=white)](https://github.com/naipi11/CodexRemote-fix)
-[![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
-[![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=.net&logoColor=white)](https://dotnet.microsoft.com/download/dotnet-framework/net48)
-[![CI](https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml/badge.svg)](https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/naipi11/CodexRemote-fix?display_name=tag)](https://github.com/naipi11/CodexRemote-fix/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/naipi11/CodexRemote-fix"><img src="https://img.shields.io/badge/Windows-desktop-0078D4?logo=windows&logoColor=white" alt="Windows desktop"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+"></a>
+  <a href="https://learn.microsoft.com/powershell/"><img src="https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1+"></a>
+  <a href="https://dotnet.microsoft.com/download/dotnet-framework/net48"><img src="https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=.net&logoColor=white" alt=".NET Framework 4.8"></a>
+  <a href="https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml"><img src="https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/naipi11/CodexRemote-fix/releases/latest"><img src="https://img.shields.io/github/v/release/naipi11/CodexRemote-fix?display_name=tag" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
+</p>
 
 CodexRemote-fix enables the UI that ships with Codex Desktop for Windows but is hidden by a runtime defect:
 

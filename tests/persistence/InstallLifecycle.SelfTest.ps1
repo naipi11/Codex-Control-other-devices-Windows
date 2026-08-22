@@ -1204,8 +1204,8 @@ $results += Invoke-CcodTest 'setup uninstall Start menu and desktop use one inst
 $results += Invoke-CcodTest 'README and release workflow publish current installer-first branding' {
     $readme = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.md') -Raw -Encoding UTF8
     $readmeChinese = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.zh-CN.md') -Raw -Encoding UTF8
-    Assert-CcodTrue ($readme -cmatch '\A# CodexRemote-fix\r?\n') 'default README uses the public English product heading'
-    Assert-CcodTrue ($readmeChinese -cmatch '\A# CodexRemote-fix\r?\n') 'Chinese README uses the public product heading'
+    Assert-CcodTrue ($readme -cmatch '\A(?s:<div align="center">.*?<h1>CodexRemote-fix</h1>)') 'default README uses the centered public English product heading'
+    Assert-CcodTrue ($readmeChinese -cmatch '\A(?s:<div align="center">.*?<h1>CodexRemote-fix</h1>)') 'Chinese README uses the centered public product heading'
 
     $quickStart = [regex]::Match($readme, '(?ms)^## Quick start[^\r\n]*\r?\n(.*?)(?=^## )').Groups[1].Value
     Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.17-setup\.exe') 'English Quick Start names the exact setup artifact'
