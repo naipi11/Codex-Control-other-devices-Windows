@@ -65,7 +65,7 @@ supervisor are working.
 
 ## What's new in v2.4.20
 
-- After installation, show a bilingual prompt: restart Codex now or restart it manually later.
+- After installation, show a localized prompt: restart Codex now or restart it manually later.
 - The installer never closes or restarts Codex automatically; choosing **Later** leaves the current session untouched.
 - Choosing **Restart now** invokes the existing safe SessionController path only after explicit user confirmation.
 
@@ -112,8 +112,8 @@ The `.github/workflows/release.yml` workflow builds the installer from the tag a
 so the 2.4.20 release includes the ready-to-run `CodexRemote-fix-2.4.20-setup.exe`
 and `CodexRemote-fix-2.4.20-setup.exe.sha256.txt`.
 
-Each release appends a short bilingual change summary to this README and to the GitHub release body.
-The full history is in [CHANGELOG.md](CHANGELOG.md).
+Each release appends a short English change summary to the GitHub release body. The README and
+[CHANGELOG.md](CHANGELOG.md) retain the bilingual documentation history.
 
 After a Codex Desktop update, check the [Releases](https://github.com/naipi11/CodexRemote-fix/releases)
 page for a newer installer, or run the **CodexRemote-fix compatibility check** shortcut from the Start menu

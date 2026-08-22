@@ -1160,6 +1160,14 @@ $results += Invoke-CcodTest 'post-install restart prompt does nothing when the u
     }
 }
 
+$results += Invoke-CcodTest 'Chinese restart prompt decodes its Unicode text before display' {
+    $output = @(& (Join-Path $repositoryRoot 'Prompt-CcodRestart.ps1') -AppRoot $repositoryRoot -PreviewChinese 2>&1)
+    Assert-CcodEqual 0 $LASTEXITCODE 'Chinese prompt preview exits successfully'
+    $text = $output -join "`n"
+    Assert-CcodTrue ($text -notmatch '\\u[0-9a-fA-F]{4}') 'Chinese prompt never exposes Unicode escape literals'
+    Assert-CcodTrue ($text -match 'Codex' -and $text.Length -gt 20) 'Chinese prompt contains decoded restart text'
+}
+
 $results += Invoke-CcodTest 'CodexRemote-fix icon is a bounded multi-resolution PNG ICO' {
     $iconPath = Join-Path $repositoryRoot 'assets\codexremote-fix\codexremote-fix.ico'
     Assert-CcodTrue (Test-Path -LiteralPath $iconPath -PathType Leaf) 'public product ICO exists'
@@ -1256,6 +1264,8 @@ $results += Invoke-CcodTest 'README and release workflow publish current install
 
     Assert-CcodTrue ($readme -cmatch 'uninstall \*\*CodexRemote-fix\*\* from') 'English uninstall instructions use the public product name'
     Assert-CcodTrue ($readmeChinese -cmatch '(?s)Windows .{0,100}\*\*CodexRemote-fix\*\*') 'Chinese uninstall instructions use the public product name'
+    Assert-CcodTrue ($readme -cmatch 'Each release appends a short English change summary to the GitHub release body') 'README documents English-only GitHub release notes'
+    Assert-CcodTrue ($readme -cnotmatch 'bilingual change summary to this README and to the GitHub release body') 'README does not promise bilingual GitHub release notes'
 
     $workflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\release.yml') -Raw -Encoding UTF8
     Assert-CcodTrue ($workflow -cmatch '(?m)^name: CodexRemote-fix release\r?$') 'release workflow uses public product branding'
