@@ -362,13 +362,44 @@
       return { status: "unavailable", path: null };
     }
     const addonPath = path.resolve(process.resourcesPath, "native", TARGET_ADDON_BASENAME);
-    const cached = Module._cache[addonPath] ?? { id: addonPath, filename: addonPath, loaded: true, exports: addon };
+    const cacheKey = Object.keys(Module._cache).find((key) => {
+      try {
+        return path.resolve(key).toLowerCase() === addonPath.toLowerCase();
+      } catch {
+        return false;
+      }
+    }) ?? addonPath;
+    const cached = Module._cache[cacheKey] ?? { id: addonPath, filename: addonPath, loaded: true, exports: addon };
+    const existingExports = cached.exports;
+    let patchedExisting = false;
+    if (existingExports != null && existingExports !== addon &&
+        (typeof existingExports === "object" || typeof existingExports === "function")) {
+      for (const methodName of ["createDeviceKey", "deleteDeviceKey", "getDeviceKeyPublic", "signDeviceKey"]) {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(existingExports, methodName);
+          if (descriptor != null && descriptor.get == null && descriptor.set == null && descriptor.writable === false && !descriptor.configurable) {
+            continue;
+          }
+          Object.defineProperty(existingExports, methodName, {
+            configurable: descriptor?.configurable ?? true,
+            enumerable: descriptor?.enumerable ?? true,
+            value: addon[methodName],
+            writable: descriptor?.writable ?? true,
+          });
+          patchedExisting = true;
+        } catch {
+          // A native export may be frozen; future requires still use the clean-room addon.
+        }
+      }
+    }
     cached.id = cached.id ?? addonPath;
     cached.filename = cached.filename ?? addonPath;
     cached.loaded = true;
-    cached.exports = addon;
-    Module._cache[addonPath] = cached;
-    return { status: "installed", path: addonPath };
+    if (existingExports == null || existingExports === addon) {
+      cached.exports = addon;
+    }
+    Module._cache[cacheKey] = cached;
+    return { status: "installed", path: addonPath, patchedExisting };
   }
 
   const DPAPI_SCRIPT = [

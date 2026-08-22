@@ -270,17 +270,27 @@ async function dlopenInterceptionTest(root, storePath) {
       throw new Error("original dlopen should not receive the device-key addon");
     },
   });
-  const bridge = loadBridgeInVm(root, { processOverride });
-  const report = bridge.installMainBridge({ storePath, scheduleInspectorClose: false, spoofPlatform: false });
-  assert.equal(report.dlopenInterception, "installed");
-  const moduleObject = { exports: {} };
-  processOverride.dlopen(moduleObject, "C:\\Codex\\resources\\native\\remote-control-device-key.node");
-  assert.equal(typeof moduleObject.exports.getDeviceKeyPublic, "function");
   const moduleBuiltin = hostBuiltin("module");
-  const cached = moduleBuiltin._cache?.[path.resolve("C:\\Codex\\resources\\native\\remote-control-device-key.node")];
-  assert.equal(typeof cached?.exports?.getDeviceKeyPublic, "function");
-  assert.equal(originalCalls, 0);
-  return { dlopenInterceptionVerified: true };
+  const addonPath = path.resolve("C:\\Codex\\resources\\native\\remote-control-device-key.node");
+  const legacyGetDeviceKeyPublic = () => { throw new Error("legacy addon should be replaced"); };
+  const legacyExports = { getDeviceKeyPublic: legacyGetDeviceKeyPublic };
+  moduleBuiltin._cache[addonPath] = { id: addonPath, filename: addonPath, loaded: true, exports: legacyExports };
+  const bridge = loadBridgeInVm(root, { processOverride });
+  try {
+    const report = bridge.installMainBridge({ storePath, scheduleInspectorClose: false, spoofPlatform: false });
+    assert.equal(report.dlopenInterception, "installed");
+    const moduleObject = { exports: {} };
+    processOverride.dlopen(moduleObject, "C:\\Codex\\resources\\native\\remote-control-device-key.node");
+    assert.equal(typeof moduleObject.exports.getDeviceKeyPublic, "function");
+    const cached = moduleBuiltin._cache?.[addonPath];
+    assert.equal(cached?.exports, legacyExports);
+    assert.notEqual(legacyExports.getDeviceKeyPublic, legacyGetDeviceKeyPublic);
+    assert.equal(typeof cached?.exports?.getDeviceKeyPublic, "function");
+    assert.equal(originalCalls, 0);
+    return { cachedAddonPatched: true, dlopenInterceptionVerified: true };
+  } finally {
+    delete moduleBuiltin._cache[addonPath];
+  }
 }
 
 async function fallbackCodexHomeStoreTest(tempDirectory) {
