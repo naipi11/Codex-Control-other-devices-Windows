@@ -1208,16 +1208,16 @@ $results += Invoke-CcodTest 'README and release workflow publish current install
     Assert-CcodTrue ($readmeChinese -cmatch '\A# CodexRemote-fix\r?\n') 'Chinese README uses the public product heading'
 
     $quickStart = [regex]::Match($readme, '(?ms)^## Quick start[^\r\n]*\r?\n(.*?)(?=^## )').Groups[1].Value
-    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.15-setup\.exe') 'English Quick Start names the exact setup artifact'
-    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.15-setup\.exe\.sha256\.txt') 'English Quick Start names the exact checksum artifact'
+    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.16-setup\.exe') 'English Quick Start names the exact setup artifact'
+    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.16-setup\.exe\.sha256\.txt') 'English Quick Start names the exact checksum artifact'
     Assert-CcodTrue ($quickStart -cnotmatch '(?i)powershell|Install-CodexControlOtherDevices') 'English Quick Start does not teach PowerShell installation'
     Assert-CcodTrue ($quickStart -cmatch '\*\*CodexRemote-fix\*\*') 'English Quick Start names the public desktop shortcut'
 
-    $chineseSections = [regex]::Matches($readmeChinese, '(?ms)^## [^\r\n]+\r?\n(.*?)(?=^## |\z)')
-    Assert-CcodTrue ($chineseSections.Count -ge 1) 'Chinese README exposes a first Quick Start section'
-    $quickStartChinese = $chineseSections[0].Groups[1].Value
-    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.4\.15-setup\.exe') 'Chinese Quick Start names the exact setup artifact'
-    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.4\.15-setup\.exe\.sha256\.txt') 'Chinese Quick Start names the exact checksum artifact'
+    $quickStartChineseMatch = [regex]::Match($readmeChinese, '(?ms)^## [^\r\n]+\r?\n(?:\r?\n)?(?=1\.[^\r\n]*\[Releases\])(.*?)(?=^## |\z)')
+    Assert-CcodTrue $quickStartChineseMatch.Success 'Chinese README exposes a Quick Start section'
+    $quickStartChinese = $quickStartChineseMatch.Groups[1].Value
+    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.4\.16-setup\.exe') 'Chinese Quick Start names the exact setup artifact'
+    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.4\.16-setup\.exe\.sha256\.txt') 'Chinese Quick Start names the exact checksum artifact'
     Assert-CcodTrue ($quickStartChinese -cnotmatch '(?i)powershell|Install-CodexControlOtherDevices') 'Chinese Quick Start does not teach PowerShell installation'
     Assert-CcodTrue ($quickStartChinese -cmatch '\*\*CodexRemote-fix\*\*') 'Chinese Quick Start names the public desktop shortcut'
 
