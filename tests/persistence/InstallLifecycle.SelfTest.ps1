@@ -1112,28 +1112,31 @@ $results += Invoke-CcodTest 'installer exposes CodexRemote-fix as the searchable
     Assert-CcodTrue ($buildScript -cmatch 'CodexRemote-fix-\$Version-setup\.exe\.sha256\.txt') 'build script writes a hash beside the public setup filename'
 }
 
-$results += Invoke-CcodTest 'installer publishes the exact CodexRemote-fix 2.4.19 release artifacts' {
+$results += Invoke-CcodTest 'installer publishes the exact CodexRemote-fix 2.4.20 release artifacts' {
     $package = Get-Content -LiteralPath (Join-Path $repositoryRoot 'package.json') -Raw | ConvertFrom-Json
-    Assert-CcodEqual '2.4.19' ([string]$package.version) 'package version is exactly 2.4.19'
+    Assert-CcodEqual '2.4.20' ([string]$package.version) 'package version is exactly 2.4.20'
 
     $installerScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss') -Raw
     $outputBase = [regex]::Match($installerScript, '(?m)^OutputBaseFilename=(.+)$').Groups[1].Value.Trim()
     $setupName = ($outputBase -replace '\{#ProjectVersion\}', [string]$package.version) + '.exe'
-    Assert-CcodEqual 'CodexRemote-fix-2.4.19-setup.exe' $setupName 'Inno output resolves to the exact public setup filename'
+    Assert-CcodEqual 'CodexRemote-fix-2.4.20-setup.exe' $setupName 'Inno output resolves to the exact public setup filename'
 
     $buildScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'build\build.ps1') -Raw
     $checksumTemplate = [regex]::Match($buildScript, 'Join-Path \$dist \("([^"]+\.sha256\.txt)"\)').Groups[1].Value
     $checksumName = $checksumTemplate.Replace('$Version', [string]$package.version)
-    Assert-CcodEqual 'CodexRemote-fix-2.4.19-setup.exe.sha256.txt' $checksumName 'build script resolves to the exact public checksum filename'
+    Assert-CcodEqual 'CodexRemote-fix-2.4.20-setup.exe.sha256.txt' $checksumName 'build script resolves to the exact public checksum filename'
 }
 
 $results += Invoke-CcodTest 'installer stops the running supervisor before replacing the installed version' {
     $installerScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'build\CodexControlOtherDevices.iss') -Raw -Encoding UTF8
     $prepareScript = Join-Path $repositoryRoot 'Prepare-CcodRemoteUpgrade.ps1'
+    $promptScript = Join-Path $repositoryRoot 'Prompt-CcodRestart.ps1'
     Assert-CcodTrue (Test-Path -LiteralPath $prepareScript -PathType Leaf) 'pre-upgrade supervisor stopper exists'
-    Assert-CcodTrue ($installerScript -cmatch '(?m)^CloseApplications=force\r?$') 'installer requests forced application closure'
+    Assert-CcodTrue (Test-Path -LiteralPath $promptScript -PathType Leaf) 'post-install Codex restart prompt exists'
+    Assert-CcodTrue ($installerScript -cmatch '(?m)^CloseApplications=no\r?$') 'installer never lets Restart Manager close Codex'
     Assert-CcodTrue ($installerScript -cmatch '(?m)^function PrepareToInstall\(') 'installer runs the pre-upgrade hook'
     Assert-CcodTrue ($installerScript -cmatch 'Prepare-CcodRemoteUpgrade\.ps1') 'installer bundles and invokes the pre-upgrade supervisor stopper'
+    Assert-CcodTrue ($installerScript -cmatch '(?s)CurStepChanged.*ssPostInstall.*Prompt-CcodRestart\.ps1') 'installer prompts after post-install completion'
 }
 
 $results += Invoke-CcodTest 'pre-upgrade supervisor stopper exits cleanly when no old runtime is present' {
@@ -1141,6 +1144,17 @@ $results += Invoke-CcodTest 'pre-upgrade supervisor stopper exits cleanly when n
     try {
         $output = @(& (Join-Path $repositoryRoot 'Prepare-CcodRemoteUpgrade.ps1') -InstallRoot $root 2>&1)
         Assert-CcodEqual 0 $LASTEXITCODE 'pre-upgrade helper no-op exits successfully without an installed supervisor'
+    } finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+$results += Invoke-CcodTest 'post-install restart prompt does nothing when the user chooses later' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-restart-prompt-later-' + [guid]::NewGuid().ToString('N'))
+    try {
+        $output = @(& (Join-Path $repositoryRoot 'Prompt-CcodRestart.ps1') -AppRoot $repositoryRoot -InstallRoot $root -Choice Later 2>&1)
+        Assert-CcodEqual 0 $LASTEXITCODE 'later choice exits successfully'
+        Assert-CcodTrue (($output -join "`n") -notmatch '(?i)Start-CodexControlOtherDevices') 'later choice does not launch the restart wrapper'
     } finally {
         if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -1227,16 +1241,16 @@ $results += Invoke-CcodTest 'README and release workflow publish current install
     Assert-CcodTrue ($readmeChinese -cmatch '\A(?s:<div align="center">.*?<h1>CodexRemote-fix</h1>)') 'Chinese README uses the centered public product heading'
 
     $quickStart = [regex]::Match($readme, '(?ms)^## Quick start[^\r\n]*\r?\n(.*?)(?=^## )').Groups[1].Value
-    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.19-setup\.exe') 'English Quick Start names the exact setup artifact'
-    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.19-setup\.exe\.sha256\.txt') 'English Quick Start names the exact checksum artifact'
+    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.20-setup\.exe') 'English Quick Start names the exact setup artifact'
+    Assert-CcodTrue ($quickStart -cmatch 'CodexRemote-fix-2\.4\.20-setup\.exe\.sha256\.txt') 'English Quick Start names the exact checksum artifact'
     Assert-CcodTrue ($quickStart -cnotmatch '(?i)powershell|Install-CodexControlOtherDevices') 'English Quick Start does not teach PowerShell installation'
     Assert-CcodTrue ($quickStart -cmatch '\*\*CodexRemote-fix\*\*') 'English Quick Start names the public desktop shortcut'
 
     $quickStartChineseMatch = [regex]::Match($readmeChinese, '(?ms)^## [^\r\n]+\r?\n(?:\r?\n)?(?=1\.[^\r\n]*\[Releases\])(.*?)(?=^## |\z)')
     Assert-CcodTrue $quickStartChineseMatch.Success 'Chinese README exposes a Quick Start section'
     $quickStartChinese = $quickStartChineseMatch.Groups[1].Value
-    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.4\.19-setup\.exe') 'Chinese Quick Start names the exact setup artifact'
-    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.4\.19-setup\.exe\.sha256\.txt') 'Chinese Quick Start names the exact checksum artifact'
+    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.4\.20-setup\.exe') 'Chinese Quick Start names the exact setup artifact'
+    Assert-CcodTrue ($quickStartChinese -cmatch 'CodexRemote-fix-2\.4\.20-setup\.exe\.sha256\.txt') 'Chinese Quick Start names the exact checksum artifact'
     Assert-CcodTrue ($quickStartChinese -cnotmatch '(?i)powershell|Install-CodexControlOtherDevices') 'Chinese Quick Start does not teach PowerShell installation'
     Assert-CcodTrue ($quickStartChinese -cmatch '\*\*CodexRemote-fix\*\*') 'Chinese Quick Start names the public desktop shortcut'
 
