@@ -28,8 +28,6 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 
 ![基于真实修复后 Codex 截图的 AI 展示图](docs/assets/codexremote-fix-connections-showcase.gif)
 
-*AI 只修改展示边框和光效；中间的 Codex 界面是真实脱敏截图，没有新增虚构控件或软件窗口。*
-
 ## 快速开始
 
 1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.15-setup.exe` 和 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`，并核对 SHA-256。
