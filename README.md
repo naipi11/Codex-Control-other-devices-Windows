@@ -10,6 +10,7 @@
   <a href="https://learn.microsoft.com/powershell/"><img src="https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1+"></a>
   <a href="https://dotnet.microsoft.com/download/dotnet-framework/net48"><img src="https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=.net&logoColor=white" alt=".NET Framework 4.8"></a>
   <a href="https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml"><img src="https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/naipi11/CodexRemote-fix/actions/workflows/codeql.yml"><img src="https://github.com/naipi11/CodexRemote-fix/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
   <a href="https://github.com/naipi11/CodexRemote-fix/releases/latest"><img src="https://img.shields.io/github/v/release/naipi11/CodexRemote-fix?display_name=tag" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
 </p>
@@ -45,8 +46,8 @@ that existing page and leaves the Codex UI, account authorization, and enrollmen
 
 ## Quick start
 
-1. Download `CodexRemote-fix-2.4.17-setup.exe` and `CodexRemote-fix-2.4.17-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
-2. Run `CodexRemote-fix-2.4.17-setup.exe`; no administrator rights are required.
+1. Download `CodexRemote-fix-2.4.18-setup.exe` and `CodexRemote-fix-2.4.18-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
+2. Run `CodexRemote-fix-2.4.18-setup.exe`; no administrator rights are required.
    Windows 10 users should ensure that .NET Framework 4.8 is installed for the native TrayHost.
 3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
@@ -61,6 +62,12 @@ needed after upgrading.
 Verified on Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`:
 the hidden controller tab, native tray menu, bilingual menu switching, and persistent
 supervisor are working.
+
+## What's new in v2.4.18
+
+- Centered the CodexRemote-fix icon, product name, language switch, and verified project badges in both README languages.
+- Enabled repository Dependabot alerts and automatic security updates.
+- Added scheduled and push/PR CodeQL scanning for the JavaScript/TypeScript and C# portions of the project.
 
 ## What's new in v2.4.17
 
@@ -90,8 +97,8 @@ supervisor are working.
 
 Every tagged release ships a Windows installer and its SHA-256 checksum as release assets.
 The `.github/workflows/release.yml` workflow builds the installer from the tag automatically,
-so the 2.4.17 release includes the ready-to-run `CodexRemote-fix-2.4.17-setup.exe`
-and `CodexRemote-fix-2.4.17-setup.exe.sha256.txt`.
+so the 2.4.18 release includes the ready-to-run `CodexRemote-fix-2.4.18-setup.exe`
+and `CodexRemote-fix-2.4.18-setup.exe.sha256.txt`.
 
 Each release appends a short bilingual change summary to this README and to the GitHub release body.
 The full history is in [CHANGELOG.md](CHANGELOG.md).
