@@ -67,7 +67,8 @@ supervisor are working.
 
 - After installation, show an English prompt: restart Codex now or restart it manually later.
 - The installer never closes or restarts Codex automatically; choosing **Later** leaves the current session untouched.
-- Choosing **Restart now** invokes the existing safe SessionController path only after explicit user confirmation.
+- The installer now stops the prior CodexRemote-fix supervisor from its persistent runtime, validates the packaged TrayHost payload, and shows the prompt only after the new runtime is active.
+- Choosing **Restart now** safely closes the current Codex session and launches a fresh controlled session after explicit user confirmation.
 
 ## What's new in v2.4.19
 

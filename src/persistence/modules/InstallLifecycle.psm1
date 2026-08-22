@@ -151,7 +151,10 @@ function Test-CcodLifecycleRemovePath {
 }
 
 function Get-CcodLifecycleSourceFiles {
-    param([Parameter(Mandatory)][string]$SourceRoot)
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [switch]$RequireTrayHost
+    )
 
     $root = Get-CcodLifecycleCanonicalRoot -Path $SourceRoot -Kind 'Source root'
     if (-not [IO.Directory]::Exists($root)) {
@@ -187,6 +190,8 @@ function Get-CcodLifecycleSourceFiles {
             }
             $relative.Add('bin\' + $trayFile.Name)
         }
+    } elseif ($RequireTrayHost) {
+        Throw-CcodLifecycleError 'CCOD_INSTALL_SOURCE_INCOMPLETE' 'TrayHost artifact directory is missing.' $trayHostRoot
     }
     $runtimeRoot = Join-Path $root 'src\runtime'
     foreach ($item in Get-ChildItem -LiteralPath $runtimeRoot -Force -Recurse -ErrorAction Stop) {
@@ -589,12 +594,12 @@ function Get-CcodLifecycleAdapters {
     $defaults = @{
         ValidateSource = {
             param($SourceRoot)
-            $validate = [IO.Path]::GetFullPath((Join-Path $SourceRoot 'tests\Validate.ps1'))
-            if (-not [IO.File]::Exists($validate)) { return $false }
-            $powershell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
-            $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $validate + '" -SkipInstalledPackageCheck'
-            $process = Start-Process -FilePath $powershell -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
-            try { return $process.ExitCode -eq 0 } finally { $process.Dispose() }
+            try {
+                $files = @(Get-CcodLifecycleSourceFiles -SourceRoot $SourceRoot -RequireTrayHost)
+                return $files.Count -gt 0
+            } catch {
+                return $false
+            }
         }
         GetProjectVersion = { param($SourceRoot) Get-CcodLifecycleProjectVersion -SourceRoot $SourceRoot }
         DiscoverNodeCandidates = {
@@ -891,7 +896,7 @@ function Invoke-CcodInstall {
     }
     $projectVersion = & $adapters.GetProjectVersion $sourceRoot
     $nodeCandidates = @(Get-CcodLifecycleNodeCandidates -Adapters $adapters)
-    $files = @(Get-CcodLifecycleSourceFiles -SourceRoot $sourceRoot)
+    $files = @(Get-CcodLifecycleSourceFiles -SourceRoot $sourceRoot -RequireTrayHost)
 
     $existingPointer = $null
     $activePath = Join-Path $root 'active.json'
