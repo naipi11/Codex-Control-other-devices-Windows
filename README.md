@@ -2,6 +2,14 @@
 
 Language / 语言: English · [简体中文](README.zh-CN.md)
 
+[![Windows](https://img.shields.io/badge/Windows-desktop-0078D4?logo=windows&logoColor=white)](https://github.com/naipi11/CodexRemote-fix)
+[![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
+[![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4?logo=.net&logoColor=white)](https://dotnet.microsoft.com/download/dotnet-framework/net48)
+[![CI](https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml/badge.svg)](https://github.com/naipi11/CodexRemote-fix/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/naipi11/CodexRemote-fix?display_name=tag)](https://github.com/naipi11/CodexRemote-fix/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 CodexRemote-fix enables the UI that ships with Codex Desktop for Windows but is hidden by a runtime defect:
 
 **Settings → Connections → Control other devices**
@@ -33,8 +41,8 @@ that existing page and leaves the Codex UI, account authorization, and enrollmen
 
 ## Quick start
 
-1. Download `CodexRemote-fix-2.4.16-setup.exe` and `CodexRemote-fix-2.4.16-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
-2. Run `CodexRemote-fix-2.4.16-setup.exe`; no administrator rights are required.
+1. Download `CodexRemote-fix-2.4.17-setup.exe` and `CodexRemote-fix-2.4.17-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
+2. Run `CodexRemote-fix-2.4.17-setup.exe`; no administrator rights are required.
    Windows 10 users should ensure that .NET Framework 4.8 is installed for the native TrayHost.
 3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
 
@@ -49,6 +57,13 @@ needed after upgrading.
 Verified on Windows 11 · Codex Desktop `26.818.2441.0` · Node.js `22.23.1`:
 the hidden controller tab, native tray menu, bilingual menu switching, and persistent
 supervisor are working.
+
+## What's new in v2.4.17
+
+- Major fix: authorized remote-control devices now survive Codex updates without re-pairing.
+- Restored the preserved enrollment mapping through Codex's host bridge before refreshing remote connections.
+- Patched an already-cached native device-key addon export in place, so existing Codex consumers use the corrected implementation.
+- Kept the existing device keys, server-side authorization, and normal Codex enrollment flow unchanged.
 
 ## What's new in v2.4.16
 
@@ -71,8 +86,8 @@ supervisor are working.
 
 Every tagged release ships a Windows installer and its SHA-256 checksum as release assets.
 The `.github/workflows/release.yml` workflow builds the installer from the tag automatically,
-so the 2.4.16 release includes the ready-to-run `CodexRemote-fix-2.4.16-setup.exe`
-and `CodexRemote-fix-2.4.16-setup.exe.sha256.txt`.
+so the 2.4.17 release includes the ready-to-run `CodexRemote-fix-2.4.17-setup.exe`
+and `CodexRemote-fix-2.4.17-setup.exe.sha256.txt`.
 
 Each release appends a short bilingual change summary to this README and to the GitHub release body.
 The full history is in [CHANGELOG.md](CHANGELOG.md).
@@ -80,6 +95,10 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
 After a Codex Desktop update, check the [Releases](https://github.com/naipi11/CodexRemote-fix/releases)
 page for a newer installer, or run the **CodexRemote-fix compatibility check** shortcut from the Start menu
 to confirm the current supervisor still matches.
+
+## Star history
+
+[![Star History Chart](https://api.star-history.com/svg?repos=naipi11/CodexRemote-fix&type=Date)](https://www.star-history.com/#naipi11/CodexRemote-fix&Date)
 
 ## External renderer shared CDP
 

@@ -6,6 +6,22 @@ This file keeps the short bilingual summary for every published release.
 
 No unreleased changes.
 
+## v2.4.17
+
+### English
+
+- Major fix: authorized remote-control devices now survive Codex updates without re-pairing.
+- Restored the preserved enrollment mapping through Codex's host bridge before refreshing remote connections.
+- Patched already-cached native device-key addon exports in place so existing Codex consumers use the corrected implementation.
+- Kept device keys, server-side authorization, and the normal Codex enrollment flow unchanged.
+
+### 简体中文
+
+- 重大修复：Codex 更新后，已授权的远程控制设备无需重新配对即可保留。
+- 在刷新远程连接前，通过 Codex host bridge 恢复保留的 enrollment 映射。
+- 原地修补已被缓存的原生设备密钥模块导出对象，使现有 Codex 调用方使用修复后的实现。
+- 保持设备密钥、服务器端授权和 Codex 原生注册流程不变。
+
 ## v2.4.16
 
 ### English
