@@ -24,6 +24,7 @@ function New-CcodLifecycleSourceFixture {
     New-Item -ItemType Directory -Path (Join-Path $Root 'src\runtime') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $Root 'src\persistence\modules') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $Root 'src\persistence\resources') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $Root 'bin') -Force | Out-Null
     [IO.File]::WriteAllText(
         (Join-Path $Root 'package.json'),
         (@{ name = 'codexremote-fix'; version = $Version; private = $true } | ConvertTo-Json -Depth 4),
@@ -45,6 +46,9 @@ function New-CcodLifecycleSourceFixture {
     }
     [IO.File]::WriteAllText((Join-Path $Root 'src\persistence\resources\ui.en-US.json'), '{"schemaVersion":1,"language":"en-US"}', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $Root 'src\persistence\resources\ui.zh-CN.json'), '{"schemaVersion":1,"language":"zh-CN"}', [Text.UTF8Encoding]::new($false))
+    foreach ($trayHostFile in @('CodexRemote.TrayHost.exe', 'CodexRemote.TrayHost.exe.config', 'trayhost-build-provenance.json')) {
+        [IO.File]::WriteAllText((Join-Path $Root "bin\$trayHostFile"), "fixture $trayHostFile`r`n", [Text.UTF8Encoding]::new($false))
+    }
     return $Root
 }
 
@@ -195,6 +199,21 @@ function Set-CcodLifecycleTestStatus {
 }
 
 $results = @()
+
+$results += Invoke-CcodTest 'default installer validation uses the structural runtime payload and requires TrayHost files' {
+    $source = New-CcodLifecycleTempRoot
+    try {
+        New-CcodLifecycleSourceFixture -Root $source | Out-Null
+        $module = Get-Module InstallLifecycle
+        $valid = & $module { param($SourceRoot) $adapters = Get-CcodLifecycleAdapters; & $adapters.ValidateSource $SourceRoot } $source
+        Assert-CcodEqual $true $valid 'installer payload validates without running the source test suite'
+        Remove-Item -LiteralPath (Join-Path $source 'bin') -Recurse -Force
+        $missingTrayHost = & $module { param($SourceRoot) $adapters = Get-CcodLifecycleAdapters; & $adapters.ValidateSource $SourceRoot } $source
+        Assert-CcodEqual $false $missingTrayHost 'installer payload rejects a missing TrayHost runtime'
+    } finally {
+        if (Test-Path -LiteralPath $source) { Remove-Item -LiteralPath $source -Recurse -Force }
+    }
+}
 
 $results += Invoke-CcodTest 'first install stages verifies activates task and persists consent' {
     $source = New-CcodLifecycleTempRoot
@@ -1135,8 +1154,13 @@ $results += Invoke-CcodTest 'installer stops the running supervisor before repla
     Assert-CcodTrue (Test-Path -LiteralPath $promptScript -PathType Leaf) 'post-install Codex restart prompt exists'
     Assert-CcodTrue ($installerScript -cmatch '(?m)^CloseApplications=no\r?$') 'installer never lets Restart Manager close Codex'
     Assert-CcodTrue ($installerScript -cmatch '(?m)^function PrepareToInstall\(') 'installer runs the pre-upgrade hook'
+    Assert-CcodTrue ($installerScript -cmatch '(?m)^function HasPersistentRuntime\(') 'installer detects a persistent runtime even if the uninstall key is unavailable'
+    Assert-CcodTrue ($installerScript -cmatch 'if HasExistingRuntime\(\) and not WizardSilent then') 'silent upgrades do not block on the informational existing-installation dialog'
     Assert-CcodTrue ($installerScript -cmatch 'Prepare-CcodRemoteUpgrade\.ps1') 'installer bundles and invokes the pre-upgrade supervisor stopper'
-    Assert-CcodTrue ($installerScript -cmatch '(?s)CurStepChanged.*ssPostInstall.*Prompt-CcodRestart\.ps1') 'installer prompts after post-install completion'
+    Assert-CcodTrue ($installerScript -cmatch '(?m)^function InstallPersistentRuntimeOrAbort\(') 'installer checks the persistent runtime activation result before continuing'
+    Assert-CcodTrue ($installerScript -cmatch '(?m)^procedure ShowRuntimeActivationFailure\(') 'silent upgrades have a dedicated non-blocking runtime activation error path'
+    Assert-CcodTrue ($installerScript -cnotmatch '(?ms)^\[Run\]\s*\r?\nFilename: "powershell\.exe"; Parameters: ".*Install-CodexControlOtherDevices\.ps1') 'installer does not silently ignore its runtime installer exit code through a Run entry'
+    Assert-CcodTrue ($installerScript -cmatch '(?s)CurStepChanged.*InstallPersistentRuntimeOrAbort.*Prompt-CcodRestart\.ps1') 'installer prompts only after the persistent runtime activation succeeds'
 }
 
 $results += Invoke-CcodTest 'pre-upgrade supervisor stopper exits cleanly when no old runtime is present' {
@@ -1155,6 +1179,27 @@ $results += Invoke-CcodTest 'post-install restart prompt does nothing when the u
         $output = @(& (Join-Path $repositoryRoot 'Prompt-CcodRestart.ps1') -AppRoot $repositoryRoot -InstallRoot $root -Choice Later 2>&1)
         Assert-CcodEqual 0 $LASTEXITCODE 'later choice exits successfully'
         Assert-CcodTrue (($output -join "`n") -notmatch '(?i)Start-CodexControlOtherDevices') 'later choice does not launch the restart wrapper'
+    } finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+$results += Invoke-CcodTest 'post-install restart prompt requests an explicit controlled Codex restart after Yes' {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('ccod-restart-prompt-yes-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [IO.Directory]::CreateDirectory($root) | Out-Null
+        $marker = Join-Path $root 'restart-marker.txt'
+        $startScript = Join-Path $root 'Start-CodexControlOtherDevices.ps1'
+        $source = @"
+param([switch]`$RestartCodex)
+[IO.File]::WriteAllText('$marker', [string]`$RestartCodex, [Text.UTF8Encoding]::new(`$false))
+exit 0
+"@
+        [IO.File]::WriteAllText($startScript, $source, [Text.UTF8Encoding]::new($false))
+        $output = @(& (Join-Path $repositoryRoot 'Prompt-CcodRestart.ps1') -AppRoot $root -InstallRoot $root -Choice Restart 2>&1)
+        Assert-CcodEqual 0 $LASTEXITCODE 'restart choice exits successfully when the verified wrapper succeeds'
+        Assert-CcodTrue (Test-Path -LiteralPath $marker -PathType Leaf) 'restart choice invokes the wrapper'
+        Assert-CcodEqual 'True' ([IO.File]::ReadAllText($marker, [Text.UTF8Encoding]::new($false))) 'restart choice passes the explicit RestartCodex switch'
     } finally {
         if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
     }

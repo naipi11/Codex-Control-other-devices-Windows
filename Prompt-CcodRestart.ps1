@@ -36,9 +36,17 @@ $selected = if ([string]::IsNullOrWhiteSpace($Choice)) { Show-CcodRestartPrompt 
 if ($selected -ceq 'Later') { exit 0 }
 
 $startScript = [IO.Path]::GetFullPath((Join-Path $AppRoot 'Start-CodexControlOtherDevices.ps1'))
-if (-not [IO.File]::Exists($startScript)) { exit 1 }
+if (-not [IO.File]::Exists($startScript)) {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    [Windows.Forms.MessageBox]::Show('Codex could not be restarted automatically. Please restart Codex manually.', 'CodexRemote-fix', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    exit 1
+}
 $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
-$arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$startScript)
+$arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$startScript,'-RestartCodex')
 $null = & $powershell @arguments 2>$null
-if ($LASTEXITCODE -ne 0) { exit 1 }
+if ($LASTEXITCODE -ne 0) {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    [Windows.Forms.MessageBox]::Show('Codex could not be restarted automatically. Please restart Codex manually.', 'CodexRemote-fix', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    exit 1
+}
 exit 0

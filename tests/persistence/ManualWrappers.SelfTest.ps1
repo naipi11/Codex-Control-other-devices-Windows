@@ -32,7 +32,7 @@ $root=Join-Path ([IO.Path]::GetTempPath()) ('ccod-wrapper-selftest-'+[guid]::New
 try{
     Invoke-CcodTest 'keeps exact public parameters and contains no process bridge or kill implementation' {
         $startAst=Get-CcodScriptAst $startPath;$resetAst=Get-CcodScriptAst $resetPath
-        Assert-CcodEqual 'RendererDebugPort,MainInspectorPort,TimeoutSeconds' (($startAst.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath}) -join ',') 'Start public parameters remain exact'
+        Assert-CcodEqual 'RendererDebugPort,MainInspectorPort,TimeoutSeconds,RestartCodex' (($startAst.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath}) -join ',') 'Start exposes an explicit installer-approved Codex restart option'
         Assert-CcodEqual 'BackupDeviceKeyStore,DoNotRestart' (($resetAst.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath}) -join ',') 'Reset public parameters remain exact'
         foreach($case in @(@{Name='Start';Ast=$startAst},@{Name='Reset';Ast=$resetAst})){
             $commands=@($case.Ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object{$_.GetCommandName()}|Where-Object{$_})
@@ -62,6 +62,12 @@ try{
 
         $arguments=New-CcodStartControllerArguments -Controller 'C:\installed\SessionController.ps1' -RequestPath 'C:\request.json' -ResultPath 'C:\result.json'
         Assert-CcodEqual '-NoProfile,-ExecutionPolicy,Bypass,-File,C:\installed\SessionController.ps1,-RequestPath,C:\request.json,-ResultPath,C:\result.json' ($arguments -join ',') 'child arguments carry only file paths, never Boolean text'
+
+        $restart=New-CcodRestartControllerRequest -RuntimeId 'runtime-1' -TimeoutSeconds 45 -SupervisorIdentity $identity -TransactionId 'ebd973bd-9b64-4cf3-a282-d080be72ff34'
+        Assert-CcodEqual 'Recover' $restart.action 'explicit restart first closes the verified current Codex session'
+        Assert-CcodEqual $true $restart.existingOnly 'explicit restart never adopts an unrelated closed-app session'
+        Assert-CcodEqual $false $restart.restartOrdinary 'explicit restart closes before the separate controlled relaunch'
+        Assert-CcodEqual 45000 $restart.timeoutMilliseconds 'explicit restart keeps its caller timeout'
     }
 
     Invoke-CcodTest 'real powershell file-mode children receive Boolean JSON without parameter binding failures' {
@@ -77,6 +83,11 @@ try{
         $resetRequest=New-CcodResetControllerRequest -RuntimeId 'runtime-1' -DoNotRestart $true -SupervisorIdentity $identity -TransactionId 'b56470ad-948a-4df7-b5f2-04a4df86a256'
         $reset=Invoke-CcodResetInstalledController -Resolved $resolved -Request $resetRequest
         Assert-CcodEqual $false $reset.source.restartOrdinary 'Reset DoNotRestart false crossed the real powershell.exe child as Boolean'
+
+        $restartRequest=New-CcodRestartControllerRequest -RuntimeId 'runtime-1' -TimeoutSeconds 45 -SupervisorIdentity $identity -TransactionId 'ebd973bd-9b64-4cf3-a282-d080be72ff34'
+        $restartWorkflow=Invoke-CcodRestartInstalledWorkflow -Resolved $resolved -RestartRequest $restartRequest -ApplyRequest $startRequest
+        Assert-CcodEqual 'Closed' $restartWorkflow.Close.outcome 'explicit restart closes the verified existing Codex session first'
+        Assert-CcodEqual 'Activated' $restartWorkflow.Apply.outcome 'explicit restart then starts the controlled Codex session'
     }
 
     Invoke-CcodTest 'keeps a successful reset successful when the optional device-key backup fails' {
