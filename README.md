@@ -31,9 +31,6 @@ that existing page and leaves the Codex UI, account authorization, and enrollmen
 
 ![AI-enhanced presentation of a real post-fix Codex capture](docs/assets/codexremote-fix-connections-showcase.gif)
 
-*AI changed only the presentation frame and lighting. The Codex screenshot inside is a real,
-redacted capture; no UI controls or software windows were invented.*
-
 ## Quick start
 
 1. Download `CodexRemote-fix-2.4.15-setup.exe` and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
