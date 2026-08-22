@@ -1160,12 +1160,13 @@ $results += Invoke-CcodTest 'post-install restart prompt does nothing when the u
     }
 }
 
-$results += Invoke-CcodTest 'Chinese restart prompt decodes its Unicode text before display' {
-    $output = @(& (Join-Path $repositoryRoot 'Prompt-CcodRestart.ps1') -AppRoot $repositoryRoot -PreviewChinese 2>&1)
-    Assert-CcodEqual 0 $LASTEXITCODE 'Chinese prompt preview exits successfully'
+$results += Invoke-CcodTest 'post-install restart prompt is always English' {
+    $output = @(& (Join-Path $repositoryRoot 'Prompt-CcodRestart.ps1') -AppRoot $repositoryRoot -Preview 2>&1)
+    Assert-CcodEqual 0 $LASTEXITCODE 'English prompt preview exits successfully'
     $text = $output -join "`n"
-    Assert-CcodTrue ($text -notmatch '\\u[0-9a-fA-F]{4}') 'Chinese prompt never exposes Unicode escape literals'
-    Assert-CcodTrue ($text -match 'Codex' -and $text.Length -gt 20) 'Chinese prompt contains decoded restart text'
+    Assert-CcodTrue ($text -notmatch '\\u[0-9a-fA-F]{4}') 'English prompt never exposes Unicode escape literals'
+    Assert-CcodTrue ($text -match '(?i)Codex must be restarted' -and $text -match '(?i)Restart Codex now') 'prompt contains English restart text'
+    Assert-CcodTrue ($text -notmatch '[\p{IsCJKUnifiedIdeographs}]') 'installer prompt contains no CJK text'
 }
 
 $results += Invoke-CcodTest 'CodexRemote-fix icon is a bounded multi-resolution PNG ICO' {

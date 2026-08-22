@@ -65,7 +65,7 @@ supervisor are working.
 
 ## What's new in v2.4.20
 
-- After installation, show a localized prompt: restart Codex now or restart it manually later.
+- After installation, show an English prompt: restart Codex now or restart it manually later.
 - The installer never closes or restarts Codex automatically; choosing **Later** leaves the current session untouched.
 - Choosing **Restart now** invokes the existing safe SessionController path only after explicit user confirmation.
 
