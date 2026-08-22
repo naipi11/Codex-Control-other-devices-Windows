@@ -29,17 +29,13 @@ On affected Windows builds, Codex Desktop already contains **Settings → Connec
 Control other devices**, but a runtime defect hides the tab. CodexRemote-fix restores
 that existing page and leaves the Codex UI, account authorization, and enrollment flow intact.
 
-![Control other devices tab before and after](docs/assets/codexremote-fix-tab-before-after-en-US.gif)
+![Control other devices tab before and after](docs/assets/codexremote-fix-tab-before-after-en-US.png)
 
 ## Quick start
 
 1. Download `CodexRemote-fix-2.4.15-setup.exe` and `CodexRemote-fix-2.4.15-setup.exe.sha256.txt` from the [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page, then verify the SHA-256.
 2. Run `CodexRemote-fix-2.4.15-setup.exe`; no administrator rights are required.
 3. The tray supervisor starts automatically and creates the desktop shortcut **CodexRemote-fix**. When the tray icon is green, open **Settings → Connections → Control other devices** to enroll or use the device.
-
-![Real Codex Connections capture with Control other devices enabled](docs/assets/codexremote-fix-real-connections-zh-CN.png)
-
-*Real Windows capture; UI language is 简体中文 and device labels are redacted to generic names.*
 
 The current installer and its SHA-256 checksum are always published on the
 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) page.

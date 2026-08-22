@@ -6,7 +6,7 @@ This file keeps the short bilingual summary for every published release.
 
 ### English
 
-- Added a concise before/after showcase of the real Control other devices tab.
+- Added a concise before/after showcase image of the real Control other devices tab.
 
 ### 简体中文
 

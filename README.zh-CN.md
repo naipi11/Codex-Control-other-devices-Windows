@@ -26,17 +26,13 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 **设置 → 连接 → 控制其他设备**，但运行时缺陷会把这个标签隐藏。CodexRemote-fix
 恢复这个已有页面，不修改 Codex UI、账号授权或原生配对流程。
 
-![控制其他设备标签修复前后](docs/assets/codexremote-fix-tab-before-after-zh-CN.gif)
+![控制其他设备标签修复前后](docs/assets/codexremote-fix-tab-before-after-zh-CN.png)
 
 ## 快速开始
 
 1. 从 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 下载 `CodexRemote-fix-2.4.15-setup.exe` 和 `CodexRemote-fix-2.4.15-setup.exe.sha256.txt`，并核对 SHA-256。
 2. 运行 `CodexRemote-fix-2.4.15-setup.exe`，无需管理员权限。
 3. 托盘守护程序会自动启动，并创建桌面快捷方式 **CodexRemote-fix**。托盘图标为绿色时，打开 **设置 → 连接 → 控制其他设备** 即可注册或使用。
-
-![真实 Codex“连接”页面：已启用“控制其他设备”](docs/assets/codexremote-fix-real-connections-zh-CN.png)
-
-*真实 Windows 截图；设备名称已替换为通用名称。*
 
 当前安装包及其 SHA-256 校验值始终发布在
 [Releases](https://github.com/naipi11/CodexRemote-fix/releases) 页面。
