@@ -6,11 +6,11 @@ This file keeps the short bilingual summary for every published release.
 
 ### English
 
-- Added a polished showcase image based on the real post-fix Codex capture.
+- Added a concise before/after showcase of the real Control other devices tab.
 
 ### 简体中文
 
-- 新增基于真实修复后 Codex 截图的精修展示图。
+- 新增真实“控制其他设备”标签的修复前后展示图。
 
 ## v2.4.15
 
