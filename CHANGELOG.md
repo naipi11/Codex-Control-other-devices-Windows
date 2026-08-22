@@ -6,6 +6,20 @@ This file keeps the short bilingual summary for every published release.
 
 No unreleased changes.
 
+## v2.4.19
+
+### English
+
+- Added a native About menu item that displays the active CodexRemote-fix version.
+- The installer now stops and verifies the running supervisor before replacing the installed runtime.
+- Preserved device keys and persistent state through the safe atomic runtime upgrade; old runtimes are retired after activation.
+
+### 简体中文
+
+- 新增原生“关于”菜单项，显示当前 CodexRemote-fix 版本。
+- 安装器替换已安装运行时前，会先停止并验证当前守护程序。
+- 安全的原子 runtime 升级会保留设备密钥和持久化状态，新运行时激活后才清理旧运行时。
+
 ## v2.4.18
 
 ### English

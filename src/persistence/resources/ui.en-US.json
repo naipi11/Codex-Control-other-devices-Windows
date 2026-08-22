@@ -30,6 +30,8 @@
     "Menu.Chinese": "\u4e2d\u6587",
     "Menu.English": "English",
     "Menu.OpenLogs": "Open logs",
+    "Menu.About": "About",
+    "Menu.AboutVersion": "CodexRemote-fix | Version {0}",
     "Menu.Uninstall": "Uninstall supervisor\u2026",
     "Dialog.UninstallTitle": "Uninstall Codex connection supervisor?",
     "Dialog.UninstallMessage": "This stops the supervisor. A managed Codex session will restart normally. Device keys are kept by default.",

@@ -4,7 +4,7 @@ $script:CcodUiModes=@('System','zh-CN','en-US')
 $script:CcodUiKeys=@(
   'Tray.Title','Status.Waiting','Status.Inspecting','Status.Transitioning','Status.Active','Status.ActivePaused','Status.Suppressed','Status.Recovered','Status.Error','Status.RendererHandoff',
   'Tooltip.Waiting','Tooltip.Inspecting','Tooltip.Transitioning','Tooltip.Active','Tooltip.ActivePaused','Tooltip.Suppressed','Tooltip.Recovered','Tooltip.Error',
-  'Menu.SessionReady','Menu.ApplyNow','Menu.ManualRetry','Menu.Automation','Menu.CandidateOptIn','Menu.Language','Menu.FollowSystem','Menu.Chinese','Menu.English','Menu.OpenLogs','Menu.Uninstall',
+  'Menu.SessionReady','Menu.ApplyNow','Menu.ManualRetry','Menu.Automation','Menu.CandidateOptIn','Menu.Language','Menu.FollowSystem','Menu.Chinese','Menu.English','Menu.OpenLogs','Menu.About','Menu.AboutVersion','Menu.Uninstall',
   'Dialog.UninstallTitle','Dialog.UninstallMessage','Error.UninstallStart','Error.LanguageChange'
 )
 $script:CcodUiEmergencyEnglish=[ordered]@{
@@ -36,6 +36,8 @@ $script:CcodUiEmergencyEnglish=[ordered]@{
   'Menu.Chinese'=([char]0x4e2d+[char]0x6587)
   'Menu.English'='English'
   'Menu.OpenLogs'='Open logs'
+  'Menu.About'='About'
+  'Menu.AboutVersion'='CodexRemote-fix | Version {0}'
   'Menu.Uninstall'=('Uninstall supervisor'+[char]0x2026)
   'Dialog.UninstallTitle'='Uninstall Codex connection supervisor?'
   'Dialog.UninstallMessage'='This stops the supervisor. A managed Codex session will restart normally. Device keys are kept by default.'

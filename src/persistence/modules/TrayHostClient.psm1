@@ -23,7 +23,7 @@ function Convert-CcodTrayHostState([string]$Value) {
 }
 
 function New-CcodTrayHostSnapshot {
-    param($Presentation,$Catalog,[string]$LanguageMode,[string]$SystemCultureName,[UInt64]$Revision)
+    param($Presentation,$Catalog,[string]$LanguageMode,[string]$SystemCultureName,[UInt64]$Revision,[string]$RuntimeId)
     $flags=[PresentationFlags]::None
     $flagMap=@{
         SessionReadyVisible=[PresentationFlags]::SessionReadyVisible;ApplyNowVisible=[PresentationFlags]::ApplyNowVisible;ApplyNowEnabled=[PresentationFlags]::ApplyNowEnabled
@@ -43,6 +43,9 @@ function New-CcodTrayHostSnapshot {
     $follow=Get-CcodUiString -Catalog $Catalog -Key 'Menu.FollowSystem' -Arguments @($systemLanguage)
     $tooltipKey='Tooltip.'+$stateKey
     $tooltip=if($null -ne $Catalog.Strings.PSObject.Properties[$tooltipKey]){$Catalog.Strings.$tooltipKey}else{$Catalog.Strings.'Tooltip.Waiting'}
+    $projectVersion='unknown'
+    if($RuntimeId -is [string] -and $RuntimeId -cmatch '^(?<version>\d+\.\d+\.\d+)-'){$projectVersion=$Matches['version']}
+    $aboutVersion=Get-CcodUiString -Catalog $Catalog -Key 'Menu.AboutVersion' -Arguments @($projectVersion)
     $strings=[string[]]@(
         $Catalog.Strings.'Tray.Title',
         $Catalog.Strings.('Status.'+$stateKey),
@@ -56,12 +59,14 @@ function New-CcodTrayHostSnapshot {
         $Catalog.Strings.'Menu.Chinese',
         $Catalog.Strings.'Menu.English',
         $Catalog.Strings.'Menu.OpenLogs',
+        $Catalog.Strings.'Menu.About',
         $Catalog.Strings.'Menu.Uninstall',
         $Catalog.Strings.'Error.UninstallStart',
         $Catalog.Strings.'Menu.Uninstall',
         $tooltip,
         $Catalog.Strings.'Dialog.UninstallTitle',
-        $Catalog.Strings.'Dialog.UninstallMessage'
+        $Catalog.Strings.'Dialog.UninstallMessage',
+        $aboutVersion
     )
     $mode=if($LanguageMode -ceq 'zh-CN'){[LanguageMode]::Chinese}elseif($LanguageMode -ceq 'en-US'){[LanguageMode]::English}else{[LanguageMode]::System}
     return [PresentationSnapshot]::new($Revision,(Convert-CcodTrayHostColor $Presentation.Color),(Convert-CcodTrayHostState $stateKey),$mode,$flags,$strings)
@@ -72,20 +77,20 @@ function New-CcodTrayHostContext {
     Import-CcodTrayHostAssembly
     $runtimeRoot=Get-CcodTrayHostRuntimeRoot;$runtimeId=Split-Path $runtimeRoot -Leaf;$exe=Join-Path $runtimeRoot 'bin\CodexRemote.TrayHost.exe'
     $initialPresentation=[pscustomobject][ordered]@{Color='Gray';StateKey='Waiting';SessionReadyVisible=$false;ApplyNowVisible=$false;ApplyNowEnabled=$false;ManualRetryVisible=$false;ManualRetryEnabled=$false;AutomationToggleEnabled=$true;AutomationChecked=$false;CandidateOptInToggleEnabled=$true;CandidateOptInChecked=$false;OpenLogsEnabled=$true;UninstallEnabled=$true;Busy=$false}
-    $initial=New-CcodTrayHostSnapshot $initialPresentation $Catalog $LanguageMode $SystemCultureName ([UInt64]1)
+    $initial=New-CcodTrayHostSnapshot $initialPresentation $Catalog $LanguageMode $SystemCultureName ([UInt64]1) $runtimeId
     $process=[Diagnostics.Process]::GetCurrentProcess()
     try{
         $options=[TrayHostStartOptions]::new();$options.ExePath=$exe;$options.RuntimeId=$runtimeId;$options.ParentPid=$process.Id;$options.ParentCreationFileTimeUtc=$process.StartTime.ToFileTimeUtc();$options.InitialPresentation=$initial
         $client=[TrayHostParentClient]::Start($options)
     }finally{$process.Dispose()}
-    return [pscustomobject][ordered]@{Client=$client;CommandQueue=$CommandQueue;OnTick=$OnTick;Catalog=$Catalog;LanguageMode=$LanguageMode;SystemCultureName=$SystemCultureName;CurrentRevision=[UInt64]1;MenuOpen=$false;Exited=$false;LastError=$null;ApplicationContext=[pscustomobject]@{}}
+    return [pscustomobject][ordered]@{Client=$client;CommandQueue=$CommandQueue;OnTick=$OnTick;Catalog=$Catalog;LanguageMode=$LanguageMode;SystemCultureName=$SystemCultureName;RuntimeId=$runtimeId;CurrentRevision=[UInt64]1;MenuOpen=$false;Exited=$false;LastError=$null;ApplicationContext=[pscustomobject]@{}}
 }
 
 function Set-CcodTrayHostPresentation {
     param($Context,$Presentation,$Catalog,[string]$LanguageMode,[string]$SystemCultureName)
     if($null -eq $Context -or $null -eq $Context.Client){throw 'CCOD_TRAYHOST_CONTEXT_INVALID'}
     $revision=[UInt64]([UInt64]$Context.CurrentRevision + [UInt64]1)
-    $snapshot=New-CcodTrayHostSnapshot $Presentation $Catalog $LanguageMode $SystemCultureName $revision
+    $snapshot=New-CcodTrayHostSnapshot $Presentation $Catalog $LanguageMode $SystemCultureName $revision $Context.RuntimeId
     if(-not $Context.Client.TryPublish($snapshot)){throw 'CCOD_TRAYHOST_PRESENTATION_FAILED'}
     $Context.Catalog=$Catalog;$Context.LanguageMode=$LanguageMode;$Context.SystemCultureName=$SystemCultureName;$Context.CurrentRevision=$revision
 }

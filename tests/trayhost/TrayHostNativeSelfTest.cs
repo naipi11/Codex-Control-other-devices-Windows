@@ -12,6 +12,7 @@ internal sealed class FakeTrayPlatform : INativeTrayPlatform
     internal bool SawNonzeroIcon;
     internal Action DuringTrack;
     internal int TrackCalls;
+    internal readonly List<string> MessageBoxes = new List<string>();
 
     public IntPtr CreateOwner() { Calls.Add("CreateOwner"); return new IntPtr(10); }
     public IntPtr AssociateOwnerInputContext(IntPtr owner, IntPtr context) { Calls.Add(context == IntPtr.Zero ? "Associate:null" : "Associate:restore"); return new IntPtr(20); }
@@ -33,6 +34,7 @@ internal sealed class FakeTrayPlatform : INativeTrayPlatform
     public uint TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters) { Calls.Add("Track"); TrackCalls++; if (DuringTrack != null) { DuringTrack(); } return TrackResult; }
     public bool PostMessage(IntPtr owner, uint message, UIntPtr wParam, IntPtr lParam) { Calls.Add("WM_NULL"); return true; }
     public bool SetNotificationFocus(ref TrayIconData icon) { Calls.Add("NIM_SETFOCUS"); return true; }
+    public bool ShowMessageBox(IntPtr owner, string text, string caption) { MessageBoxes.Add(caption + "|" + text); Calls.Add("MessageBox"); return true; }
     public bool DestroyMenu(IntPtr menu) { Calls.Add("DestroyMenu"); return true; }
     public bool EndMenu() { Calls.Add("EndMenu"); return true; }
     public bool DestroyOwner(IntPtr owner) { Calls.Add("DestroyOwner"); return true; }
@@ -45,7 +47,7 @@ internal static class TrayHostNativeSelfTest
 
     private static PresentationSnapshot Snapshot(ulong revision)
     {
-        string[] strings = new string[18];
+        string[] strings = new string[20];
         for (int i = 0; i < strings.Length; i++) { strings[i] = "s" + i; }
         return new PresentationSnapshot(revision, TrayColor.Green, TrayState.Active, LanguageMode.Chinese,
             PresentationFlags.SessionReadyVisible | PresentationFlags.ApplyNowVisible | PresentationFlags.ApplyNowEnabled |
@@ -67,7 +69,7 @@ internal static class TrayHostNativeSelfTest
         platform.TrackResult = 0;
         AssertTrue(window.HandleContextMenu(new TrayPoint(10, 20)) == 0, "cancel returns zero");
         AssertTrue(platform.SawNonzeroIcon, "NIM_ADD receives a valid HICON");
-        AssertEqual("CreateOwner|Associate:null|GetContext|LoadIcon|NIM_ADD|NIM_SETVERSION|GetContext|GetContext|CreateMenu|Append:s0|Append:s1|Append:s2|Append:s3|Append:s4|Append:s5|Append:s6|SubMenu:s7|Append:s8|Append:s9|Append:s10|Append:s11|SubMenu:s12|Append:s13|Append:s14|Append:s15|ShowOwner|SetForeground|GetForeground|Track|WM_NULL|NIM_SETFOCUS|HideOwner|DestroyMenu", String.Join("|", platform.Calls.ToArray()), "native menu order is exact");
+        AssertEqual("CreateOwner|Associate:null|GetContext|LoadIcon|NIM_ADD|NIM_SETVERSION|GetContext|GetContext|CreateMenu|Append:s0|Append:s1|Append:s2|Append:s3|Append:s4|Append:s5|Append:s6|SubMenu:s7|Append:s8|Append:s9|Append:s10|Append:s11|Append:s12|SubMenu:s13|Append:s14|Append:s15|Append:s16|ShowOwner|SetForeground|GetForeground|Track|WM_NULL|NIM_SETFOCUS|HideOwner|DestroyMenu", String.Join("|", platform.Calls.ToArray()), "native menu order is exact");
         window.Dispose();
     }
 
@@ -114,6 +116,17 @@ internal static class TrayHostNativeSelfTest
         platform.Calls.Clear();
         window.ReAddAfterTaskbarCreated();
         AssertEqual("NIM_ADD|NIM_SETVERSION", String.Join("|", platform.Calls.ToArray()), "Explorer restore re-adds and versions the icon");
+        window.Dispose();
+    }
+
+    private static void TestAboutCommandShowsCurrentVersion()
+    {
+        FakeTrayPlatform platform = new FakeTrayPlatform();
+        TrayWindow window = NewWindow(platform);
+        platform.TrackResult = (uint)TrayCommand.ShowAbout;
+        window.HandleContextMenu(new TrayPoint(0, 0));
+        AssertTrue(platform.MessageBoxes.Count == 1, "about command shows one information box");
+        AssertEqual("s12|s19", platform.MessageBoxes[0], "about uses the localized caption and runtime version text");
         window.Dispose();
     }
 
@@ -169,6 +182,7 @@ internal static class TrayHostNativeSelfTest
             TestOwnerShowFailureNeverTracks();
             TestReentryAndPendingSnapshot();
             TestSelectedCommandAndTaskbarRestore();
+            TestAboutCommandShowsCurrentVersion();
             TestNoHimcFailureIsSafe();
             TestShellRightClickNotificationMapping();
             TestRealNativePInvokeSurface();

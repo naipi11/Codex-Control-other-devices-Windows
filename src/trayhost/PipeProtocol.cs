@@ -36,7 +36,8 @@ public enum TrayCommand : ushort
     SetLanguageChinese = 1006,
     SetLanguageEnglish = 1007,
     OpenLogs = 1008,
-    ConfirmUninstall = 1009
+    ConfirmUninstall = 1009,
+    ShowAbout = 1010
 }
 
 internal sealed class ProtocolViolationException : IOException

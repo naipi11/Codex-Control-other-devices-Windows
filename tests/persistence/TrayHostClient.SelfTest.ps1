@@ -16,4 +16,12 @@ Invoke-CcodTest 'Supervisor imports the TrayHost client as its only production t
     Assert-CcodTrue ($supervisor -match 'Invoke-CcodTrayHostRunLoop') 'default RunUiContext delegates to TrayHostClient'
 }
 
+Invoke-CcodTest 'TrayHost client carries the localized About item and active runtime version contract' {
+    $source = Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
+    Assert-CcodTrue ($source -cmatch "Menu\.AboutVersion") 'snapshot formats the localized About version string'
+    Assert-CcodTrue ($source -cmatch "RuntimeId -is \[string\].*\^\(\?<version\>\\d\+\\\.\\d\+\\\.\\d\+\)-") 'snapshot extracts the semantic version from the active runtime id'
+    Assert-CcodTrue ($source -cmatch "Menu\.About',") 'snapshot carries the localized About menu label'
+    Assert-CcodTrue ($source -cmatch '\$aboutVersion') 'snapshot appends the About message to the presentation payload'
+}
+
 Write-Host 'TrayHost client self-tests passed.'

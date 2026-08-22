@@ -104,7 +104,7 @@ internal static class TrayHostProtocolSelfTest
 
     private static string[] ValidStrings()
     {
-        string[] values = new string[18];
+        string[] values = new string[20];
         for (int i = 0; i < values.Length; i++) { values[i] = "string-" + i; }
         return values;
     }
@@ -118,7 +118,7 @@ internal static class TrayHostProtocolSelfTest
             LanguageMode.Chinese,
             PresentationFlags.AutomationToggleEnabled | PresentationFlags.AutomationChecked,
             ValidStrings());
-        AssertTrue(snapshot.Revision == 1UL && snapshot.Strings.Count == 18, "presentation snapshot retains its validated fields");
+        AssertTrue(snapshot.Revision == 1UL && snapshot.Strings.Count == 20, "presentation snapshot retains its validated fields");
         bool threw = false;
         string[] invalid = ValidStrings();
         invalid[3] = "bad\rtext";

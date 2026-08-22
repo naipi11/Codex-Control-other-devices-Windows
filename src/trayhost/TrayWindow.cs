@@ -67,7 +67,11 @@ internal sealed class TrayWindow : IDisposable
         {
             _inputGuard.VerifyNoOwnerInputContext(_owner);
             using (NativeMenu menu = new NativeMenu(_native, _owner, _current)) { result = menu.Show(point); }
-            if (result != 0U && Enum.IsDefined(typeof(TrayCommand), (ushort)result) && (TrayCommand)result != TrayCommand.None)
+            if (result == (uint)TrayCommand.ShowAbout)
+            {
+                _native.ShowMessageBox(_owner, _current.Strings[19], _current.Strings[12]);
+            }
+            else if (result != 0U && Enum.IsDefined(typeof(TrayCommand), (ushort)result) && (TrayCommand)result != TrayCommand.None)
             {
                 Action<TrayCommand, ulong> handler = CommandSelected;
                 if (handler != null) { handler((TrayCommand)result, _current.Revision); }
