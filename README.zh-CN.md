@@ -26,7 +26,7 @@ CodexRemote-fix 在 Windows 版 Codex Desktop 中启用随应用一起打包、�
 **设置 → 连接 → 控制其他设备**，但运行时缺陷会把这个标签隐藏。CodexRemote-fix
 恢复这个已有页面，不修改 Codex UI、账号授权或原生配对流程。
 
-![CodexRemote-fix 展示图](docs/assets/codexremote-fix-connections-showcase.gif)
+![控制其他设备标签修复前后](docs/assets/codexremote-fix-tab-before-after-zh-CN.gif)
 
 ## 快速开始
 
