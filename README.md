@@ -29,7 +29,7 @@ On affected Windows builds, Codex Desktop already contains **Settings → Connec
 Control other devices**, but a runtime defect hides the tab. CodexRemote-fix restores
 that existing page and leaves the Codex UI, account authorization, and enrollment flow intact.
 
-![AI-enhanced presentation of a real post-fix Codex capture](docs/assets/codexremote-fix-connections-showcase.gif)
+![CodexRemote-fix showcase](docs/assets/codexremote-fix-connections-showcase.gif)
 
 ## Quick start
 
